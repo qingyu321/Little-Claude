@@ -187,7 +187,7 @@ function UserMsg({ message, isHighlighted = false }: Props) {
       >
         {copied ? t('msg.copied') : t('msg.copyText')}
       </button>
-      <div className={`max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
+      <div className={`message-content max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
         bg-bg-user-msg text-text-inverse
         text-sm leading-relaxed shadow-md whitespace-pre-wrap
         ${isHighlighted ? 'search-highlight-blink' : ''}`}>
@@ -450,7 +450,7 @@ function AssistantMsg({ message, isFirstInGroup = true }: Props) {
       ) : (
         <div className="w-8 flex-shrink-0" />
       )}
-      <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed">
+      <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed message-content">
         <MarkdownRenderer content={safeContent(message.content)} />
       </div>
     </div>
@@ -863,7 +863,7 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
   const depth = message.subAgentDepth ?? 0;
 
   return (
-    <div className={depth > 0 ? 'ml-16 pl-3 border-l-2 border-accent/15' : 'ml-11'}>
+    <div className={`message-content ${depth > 0 ? 'ml-16 pl-3 border-l-2 border-accent/15' : 'ml-11'}`}>
       <button
         onClick={() => canExpand && setExpanded(!expanded)}
         className={`flex items-center gap-1.5 py-1 text-left group
@@ -914,7 +914,7 @@ function ToolResultMsg({ message }: Props) {
     : '';
 
   return (
-    <div className={depth > 0 ? 'ml-16 pl-3 border-l-2 border-accent/15' : 'ml-11'}>
+    <div className={`message-content ${depth > 0 ? 'ml-16 pl-3 border-l-2 border-accent/15' : 'ml-11'}`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-1.5 py-0.5 cursor-pointer group"
@@ -953,7 +953,7 @@ function ToolResultMsg({ message }: Props) {
 function ThinkingMsg({ message }: Props) {
   const t = useT();
   return (
-    <div className="ml-11">
+    <div className="ml-11 message-content">
       <details className="group">
         <summary className="flex items-center gap-1.5 py-1
           cursor-pointer text-[11px] text-text-tertiary list-none select-none">
