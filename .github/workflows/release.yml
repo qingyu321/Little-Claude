@@ -90,12 +90,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           # 只构建，不在私有仓库创建 release；产物由各平台后续步骤
-          # 上传到公开的 Little-Claude-Updater 仓库（匿名可下载，驱动自动更新）
+          # 上传到公开的 Little-Claude 仓库（匿名可下载，驱动自动更新）
           args: ${{ matrix.args }} ${{ steps.edition.outputs.extra_args }}
 
       # Windows only: sign the NSIS installer with the updater private key,
       # publish it (with latest.json) to the PUBLIC updater repo
-      # qingyu321/Little-Claude-Updater, which drives in-app auto-update.
+      # qingyu321/Little-Claude, which drives in-app auto-update.
       - name: Publish Windows installer to updater repo (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
@@ -103,7 +103,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
-          UPDATER_REPO: qingyu321/Little-Claude-Updater
+          UPDATER_REPO: qingyu321/Little-Claude
           RELEASE_TITLE: ${{ steps.edition.outputs.release_name }}
         run: |
           set -euo pipefail
@@ -156,7 +156,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
-          UPDATER_REPO: qingyu321/Little-Claude-Updater
+          UPDATER_REPO: qingyu321/Little-Claude
           RELEASE_TITLE: ${{ steps.edition.outputs.release_name }}
         run: |
           set -euo pipefail
