@@ -1,6 +1,6 @@
 [package]
 name = "little-claude"
-version = "1.1.0"
+version = "1.1.1"
 description = "Little Claude - Claude Code desktop GUI client"
 authors = ["TinyZ"]
 license = "UNLICENSED"
