@@ -1,0 +1,791 @@
+import { create } from 'zustand';
+import { useSessionStore } from './sessionStore';
+import { useAgentStore } from './agentStore';
+import type { FileAttachment } from '../hooks/useFileAttachments';
+
+// --- Types ---
+
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface UserQuestion {
+  question: string;
+  header?: string;
+  options: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm?: string;
+}
+
+export interface MessageAttachment {
+  name: string;
+  path: string;
+  isImage: boolean;
+  preview?: string;  // base64 data URL (thumbnail)
+}
+
+export type InteractionState = 'pending' | 'sending' | 'resolved' | 'failed' | 'expired';
+
+export interface PermissionRequestData {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  description?: string;
+  toolUseId?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  type: 'text' | 'tool_use' | 'thinking' | 'tool_result' | 'permission' | 'plan' | 'plan_review' | 'question' | 'todo';
+  content: string;
+  toolName?: string;
+  toolInput?: any;
+  toolResultContent?: string;      // tool result content merged from tool_result stream events
+  isPartial?: boolean;
+  timestamp: number;
+  // Interactive message fields
+  permissionTool?: string;         // tool requesting permission
+  permissionDescription?: string;  // what the tool wants to do
+  resolved?: boolean;              // whether the user responded
+  // SDK control protocol permission data (Phase 2)
+  interactionState?: InteractionState;
+  interactionError?: string;
+  permissionData?: PermissionRequestData;
+  planItems?: string[];            // plan steps
+  planContent?: string;            // markdown content for plan_review
+  // AskUserQuestion fields
+  questions?: UserQuestion[];      // question data from AskUserQuestion tool
+  // TodoWrite fields
+  todoItems?: TodoItem[];          // todo list items
+  // File attachments (user-sent images/files)
+  attachments?: MessageAttachment[];
+  // Command feedback fields (for system messages from slash commands)
+  commandType?: 'mode' | 'model-switch' | 'info' | 'help' | 'action' | 'error' | 'processing';
+  commandData?: Record<string, any>;
+  // Command processing card fields
+  commandStartTime?: number;
+  commandCompleted?: boolean;
+  // Sub-agent nesting depth (0 = main agent, 1+ = inside Task sub-agent)
+  subAgentDepth?: number;
+  // CLI checkpoint UUID for file restoration (from --replay-user-messages)
+  checkpointUuid?: string;
+}
+
+export interface SessionMeta {
+  model?: string;
+  cost?: number;
+  duration?: number;
+  turns?: number;
+  sessionId?: string;
+  /** The desk-generated ID used as key in Rust StdinManager for sending follow-up messages */
+  stdinId?: string;
+  /** Message ID of a pending processing card (for CLI slash commands) */
+  pendingCommandMsgId?: string;
+  /** Accumulated input tokens from stream events (message_start) — per turn, reset each turn */
+  inputTokens?: number;
+  /** Accumulated output tokens from stream events (message_delta) — per turn, reset each turn */
+  outputTokens?: number;
+  /** Cumulative input tokens across ALL turns in this session/task */
+  totalInputTokens?: number;
+  /** Cumulative output tokens across ALL turns in this session/task */
+  totalOutputTokens?: number;
+  /** Timestamp (Date.now()) when the current turn started — used for elapsed timer */
+  turnStartTime?: number;
+  /** Timestamp of last stream activity — used for stall detection instead of total elapsed */
+  lastProgressAt?: number;
+  /** JSON fingerprint of the active provider config used when spawning the CLI process.
+   *  Compared before sending via stdin to detect stale pre-warm sessions. */
+  envFingerprint?: string;
+  /** Snapshot of sessionMode at session spawn — per-session isolation (Phase 4) */
+  snapshotMode?: import('./settingsStore').SessionMode;
+  /** Snapshot of selectedModel at session spawn — per-session isolation (Phase 4) */
+  snapshotModel?: string;
+  /** Snapshot of thinkingLevel at session spawn — per-session isolation (Phase 4) */
+  snapshotThinking?: import('./settingsStore').ThinkingLevel;
+  /** Snapshot of context window mode at session spawn. */
+  snapshotContextWindowMode?: import('./settingsStore').ContextWindowMode;
+  /** Snapshot of active provider ID at session spawn — per-tab provider isolation */
+  snapshotProviderId?: string | null;
+  /** Snapshot of CLI backend at session spawn — "claude" or "codex" */
+  snapshotCliBackend?: string;
+  /** Which backend originally created this session — from JSONL _origin field */
+  sessionOrigin?: string;
+  /** The resolved model name used when spawning the CLI process.
+   *  Compared before sending via stdin to detect mid-session model switches. */
+  spawnedModel?: string;
+  /** Set when API provider config changed mid-session (TK-303).
+   *  If resume fails due to thinking signature mismatch, auto-retry without resume. */
+  providerSwitched?: boolean;
+  /** The user message text to re-send if provider-switch auto-retry triggers. */
+  providerSwitchPendingText?: string;
+  /** Set when model changed mid-session.
+   *  If resume fails due to thinking signature mismatch, auto-retry without resume. */
+  modelSwitched?: boolean;
+  /** The user message text to re-send if model-switch auto-retry triggers. */
+  modelSwitchPendingText?: string;
+  /** Rate limit info from CLI rate_limit_event (latest per rateLimitType) */
+  rateLimits?: Record<string, {
+    rateLimitType: string;
+    resetsAt: number;
+    isUsingOverage?: boolean;
+    overageStatus?: string;
+    overageDisabledReason?: string;
+  }>;
+}
+
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'error';
+
+export type ActivityPhase = 'idle' | 'thinking' | 'writing' | 'tool' | 'awaiting' | 'completed' | 'error';
+
+export interface ActivityStatus {
+  phase: ActivityPhase;
+  toolName?: string;  // only when phase === 'tool'
+  /** Human-readable status message shown in the ActivityIndicator (error info, reconnecting, etc.) */
+  statusMessage?: string;
+}
+
+// --- Per-session snapshot (backward compat type — kept for external consumers) ---
+
+export interface SessionSnapshot {
+  messages: ChatMessage[];
+  partialText: string;
+  partialThinking: string;
+  sessionStatus: SessionStatus;
+  sessionMeta: SessionMeta;
+  activityStatus: ActivityStatus;
+  inputDraft: string;
+  pendingAttachments: FileAttachment[];
+  /** User messages queued while AI is actively processing (not yet sent to stdin) */
+  pendingUserMessages: string[];
+}
+
+// --- Tab session: the ONLY place session data lives ---
+
+export interface TabSession {
+  tabId: string;
+  messages: ChatMessage[];
+  partialText: string;
+  partialThinking: string;
+  sessionStatus: SessionStatus;
+  sessionMeta: SessionMeta;
+  activityStatus: ActivityStatus;
+  inputDraft: string;
+  pendingAttachments: FileAttachment[];
+  pendingUserMessages: string[];
+}
+
+// --- Store State & Actions ---
+
+/** Lightweight streaming state separated from the heavy tabs Map.
+ *  Updated at text_delta frequency (10-60 Hz) without copying tabs. */
+export interface StreamState {
+  partialText: string;
+  partialThinking: string;
+  isStreaming: boolean;
+}
+
+function emptyStream(): StreamState {
+  return { partialText: '', partialThinking: '', isStreaming: false };
+}
+
+interface ChatState {
+  /** All tab data — the ONLY place session data lives */
+  tabs: Map<string, TabSession>;
+  /** High-frequency streaming state, updated independently from tabs.
+   *  Prevents O(n) Map copies on every text_delta event. */
+  streams: Map<string, StreamState>;
+
+  // --- Tab-level operations (all take tabId) ---
+  addMessage: (tabId: string, message: ChatMessage) => void;
+  /** Batch-add multiple messages in a single set() call — avoids N re-renders */
+  batchAddMessages: (tabId: string, messages: ChatMessage[]) => void;
+  updateMessage: (tabId: string, id: string, updates: Partial<ChatMessage>) => void;
+  updatePartialMessage: (tabId: string, text: string) => void;
+  updatePartialThinking: (tabId: string, text: string) => void;
+  /** Get current stream state for a tab (replaces reading partialText/partialThinking from tabs) */
+  getStreamState: (tabId: string) => StreamState;
+  setSessionStatus: (tabId: string, status: SessionStatus) => void;
+  setActivityStatus: (tabId: string, status: ActivityStatus) => void;
+  /** Clear messages and UI state but PRESERVE sessionMeta (for session reload) */
+  clearMessages: (tabId: string) => void;
+  /** Full reset: clear everything including sessionMeta (for new session / /clear) */
+  resetTab: (tabId: string) => void;
+  setSessionMeta: (tabId: string, meta: Partial<SessionMeta>) => void;
+  setInputDraft: (tabId: string, text: string) => void;
+  setPendingAttachments: (tabId: string, files: FileAttachment[]) => void;
+  addPendingMessage: (tabId: string, text: string) => void;
+  /** Dequeue the first pending message (FIFO). Returns undefined if empty. */
+  shiftPendingMessage: (tabId: string) => string | undefined;
+  flushPendingMessages: (tabId: string) => string[];
+  clearPendingMessages: (tabId: string) => void;
+  rewindToTurn: (tabId: string, startMsgIdx: number) => void;
+  setInteractionState: (tabId: string, msgId: string, state: InteractionState, error?: string) => void;
+  getActiveInteraction: (tabId: string) => ChatMessage | undefined;
+
+  // --- Tab lifecycle ---
+  ensureTab: (tabId: string) => void;
+  removeTab: (tabId: string) => void;
+  getTab: (tabId: string) => TabSession | undefined;
+
+  // --- Backward compat: sessionCache alias + *InCache methods ---
+  /** @deprecated Alias for tabs. Kept for gradual migration. */
+  sessionCache: Map<string, SessionSnapshot>;
+  /** @deprecated Data already lives in tabs. Kept for call sites that save before switching. */
+  saveToCache: (tabId: string) => void;
+  /** @deprecated Just checks tab existence. Kept for backward compat. */
+  restoreFromCache: (tabId: string) => boolean;
+  removeFromCache: (tabId: string) => void;
+  hasCachedSession: (tabId: string) => boolean;
+  /** @deprecated Use addMessage(tabId, message) directly. */
+  addMessageToCache: (tabId: string, message: ChatMessage) => void;
+  /** @deprecated Use updatePartialMessage(tabId, text) directly. */
+  updatePartialInCache: (tabId: string, text: string) => void;
+  /** @deprecated Use updatePartialThinking(tabId, thinking) directly. */
+  updatePartialThinkingInCache: (tabId: string, thinking: string) => void;
+  /** @deprecated Use setSessionStatus(tabId, status) directly. */
+  setStatusInCache: (tabId: string, status: SessionStatus) => void;
+  /** @deprecated Use setSessionMeta(tabId, meta) directly. */
+  setMetaInCache: (tabId: string, meta: Partial<SessionMeta>) => void;
+  /** @deprecated Use setActivityStatus(tabId, status) directly. */
+  setActivityInCache: (tabId: string, status: ActivityStatus) => void;
+  /** @deprecated Use updateMessage(tabId, msgId, updates) directly. */
+  updateMessageInCache: (tabId: string, msgId: string, updates: Partial<ChatMessage>) => void;
+
+  /** Highlight a specific message for search result jump blink (user turn number, 1-based). Auto-clears after 2s. */
+  highlightMessageIndex: number | null;
+  setHighlightMessageIndex: (index: number | null) => void;
+}
+
+// --- Helpers ---
+
+let messageCounter = 0;
+
+export function generateMessageId(): string {
+  messageCounter += 1;
+  return `msg_${Date.now()}_${messageCounter}`;
+}
+
+/** Default empty tab for when no tab is selected */
+const EMPTY_TAB: TabSession = {
+  tabId: '',
+  messages: [],
+  partialText: '',
+  partialThinking: '',
+  sessionStatus: 'idle',
+  sessionMeta: {},
+  activityStatus: { phase: 'idle' },
+  inputDraft: '',
+  pendingAttachments: [],
+  pendingUserMessages: [],
+};
+
+function createTab(tabId: string): TabSession {
+  return { ...EMPTY_TAB, tabId };
+}
+
+/** Maximum number of tabs kept in memory. LRU eviction applies to idle tabs. */
+const MAX_CACHE = 8;
+
+/**
+ * Immutable Map update helper: get tab, apply updater, return new Map.
+ * Returns undefined if tab doesn't exist (caller should return {} to skip).
+ */
+function updateTab(
+  tabs: Map<string, TabSession>,
+  tabId: string,
+  updater: (tab: TabSession) => TabSession,
+): { tabs: Map<string, TabSession>; sessionCache: Map<string, TabSession> } | undefined {
+  const tab = tabs.get(tabId);
+  if (!tab) return undefined;
+  const newTabs = new Map(tabs);
+  newTabs.set(tabId, updater(tab));
+  return { tabs: newTabs, sessionCache: newTabs };
+}
+
+// --- Selector helpers ---
+
+/**
+ * React hook: select a field from the active tab.
+ * Usage: `useActiveTab(t => t.messages)`
+ */
+export function useActiveTab<T>(selector: (tab: TabSession) => T): T {
+  const tabId = useSessionStore((s) => s.selectedSessionId);
+  return useChatStore((state) => {
+    const tab = tabId ? state.tabs.get(tabId) : undefined;
+    return selector(tab ?? EMPTY_TAB);
+  });
+}
+
+/**
+ * Imperative: get active tab data (for non-React contexts).
+ */
+export function getActiveTabState(): TabSession {
+  const tabId = useSessionStore.getState().selectedSessionId;
+  const tab = tabId ? useChatStore.getState().tabs.get(tabId) : undefined;
+  return tab ?? EMPTY_TAB;
+}
+
+// --- Store ---
+
+// A5: Module-level dedup cache for batchAddMessages — avoids O(n) Map rebuild
+// on every assistant message. Keyed by tabId, invalidated when message count changes.
+const _batchDedupCache = new Map<string, { len: number; ids: Map<string, number> }>();
+
+/** Drop all per-tab module-level caches when a tab is removed (memory hygiene). */
+function _purgeTabCache(tabId: string) {
+  _batchDedupCache.delete(tabId);
+  useAgentStore.getState().removeCache(tabId);
+}
+
+export const useChatStore = create<ChatState>()((set, get) => ({
+  tabs: new Map(),
+  sessionCache: new Map(),   // alias — always kept in sync with tabs
+  streams: new Map(),        // light-weight streaming state, updated without copying tabs
+
+  highlightMessageIndex: null,
+  setHighlightMessageIndex: (index) => set({ highlightMessageIndex: index }),
+
+  // ------------------------------------------------------------------
+  // Tab-level operations
+  // ------------------------------------------------------------------
+
+  addMessage: (tabId, message) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        // De-duplicate: if a message with the same ID already exists, update it
+        // instead of appending a duplicate. This happens when the CLI re-sends
+        // a complete assistant message that was previously delivered partially.
+        const existingIdx = tab.messages.findIndex((m) => m.id === message.id);
+        const messages = existingIdx !== -1
+          ? tab.messages.map((m, i) => i === existingIdx ? { ...m, ...message } : m)
+          : [...tab.messages, message];
+        return { ...tab, messages };
+        // NOTE: partialText/isStreaming are NOT cleared here. Clearing is handled
+        // explicitly by clearPartial() in the result/process_exit handlers and
+        // in the assistant message handler when a text block supersedes streaming.
+      });
+      return result ?? {};
+    }),
+
+  /** Batch-add multiple messages in a single set() call.
+   *  Deduplicates by message ID (update if exists, append if new).
+   *  For streaming text that should be cleared when a full assistant text block
+   *  arrives, the caller should still clear partialText/isStreaming separately
+   *  (or pass clearStreaming: true via batchAddMessagesWithStreamClear). */
+  batchAddMessages: (tabId, messages) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        if (messages.length === 0) return tab;
+        const existing = tab.messages;
+        // A5: Reuse cached dedup Map when message count hasn't changed.
+        // Only rebuild when messages were added/removed by other operations.
+        let existingIds: Map<string, number>;
+        const cache = _batchDedupCache.get(tabId);
+        if (cache && cache.len === existing.length) {
+          existingIds = cache.ids;
+        } else {
+          existingIds = new Map<string, number>();
+          for (let i = 0; i < existing.length; i++) {
+            existingIds.set(existing[i].id, i);
+          }
+          _batchDedupCache.set(tabId, { len: existing.length, ids: existingIds });
+        }
+        const newMessages: ChatMessage[] = [];
+        const updated = [...existing];
+        for (const msg of messages) {
+          const idx = existingIds.get(msg.id);
+          if (idx !== undefined) {
+            updated[idx] = { ...updated[idx], ...msg };
+          } else {
+            newMessages.push(msg);
+          }
+        }
+        return { ...tab, messages: [...updated, ...newMessages] };
+      });
+      return result ?? {};
+    }),
+
+  updateMessage: (tabId, id, updates) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        messages: tab.messages.map((m) =>
+          m.id === id ? { ...m, ...updates } : m,
+        ),
+      }));
+      return result ?? {};
+    }),
+
+  updatePartialMessage: (tabId, text) =>
+    set((state) => {
+      // Update streams — lightweight, no tabs Map copy
+      const newStreams = new Map(state.streams);
+      const s = newStreams.get(tabId);
+      newStreams.set(tabId, {
+        partialText: (s?.partialText ?? '') + text,
+        partialThinking: s?.partialThinking ?? '',
+        isStreaming: true,
+      });
+      // Only update tabs for activityStatus (lightweight, no messages array copy)
+      const newTabs = new Map(state.tabs);
+      const tab = newTabs.get(tabId);
+      if (tab && tab.activityStatus.phase !== 'writing') {
+        newTabs.set(tabId, { ...tab, activityStatus: { phase: 'writing' as ActivityPhase } });
+      }
+      return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
+    }),
+
+  updatePartialThinking: (tabId, text) =>
+    set((state) => {
+      const newStreams = new Map(state.streams);
+      const s = newStreams.get(tabId);
+      newStreams.set(tabId, {
+        partialText: s?.partialText ?? '',
+        partialThinking: (s?.partialThinking ?? '') + text,
+        isStreaming: true,
+      });
+      const newTabs = new Map(state.tabs);
+      const tab = newTabs.get(tabId);
+      if (tab && tab.activityStatus.phase !== 'thinking') {
+        newTabs.set(tabId, { ...tab, activityStatus: { phase: 'thinking' as ActivityPhase } });
+      }
+      return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
+    }),
+
+  getStreamState: (tabId) => {
+    const s = get().streams.get(tabId);
+    return s ?? emptyStream();
+  },
+
+  setSessionStatus: (tabId, status) => {
+    // Sync running state to sessionStore for tab indicators
+    useSessionStore.getState().setSessionRunning(tabId, status === 'running');
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        sessionStatus: status,
+        // Sync activity status with session status
+        ...(status === 'completed' ? { activityStatus: { phase: 'completed' as ActivityPhase } }
+          : status === 'error' ? { activityStatus: { phase: 'error' as ActivityPhase } }
+          : status === 'idle' ? { activityStatus: { phase: 'idle' as ActivityPhase } }
+          : {}),
+      }));
+      // Clear streams when session ends
+      const newStreams = (status === 'completed' || status === 'error' || status === 'idle')
+        ? (() => { const m = new Map(state.streams); m.delete(tabId); return m; })()
+        : state.streams;
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
+    });
+  },
+
+  setActivityStatus: (tabId, status) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        if (tab.activityStatus.phase === status.phase && tab.activityStatus.toolName === status.toolName) return tab;
+        return { ...tab, activityStatus: status };
+      });
+      return result ?? {};
+    }),
+
+  clearMessages: (tabId) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        messages: [],
+        sessionStatus: 'idle',
+        // Preserve sessionMeta (especially sessionId for resume)
+        activityStatus: { phase: 'idle' },
+        inputDraft: '',
+        pendingAttachments: [],
+        pendingUserMessages: [],
+      }));
+      const newStreams = new Map(state.streams);
+      newStreams.delete(tabId);
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
+    }),
+
+  resetTab: (tabId) => {
+    // B5: also drop the per-tab agent snapshot — otherwise the next
+    // restoreFromCache for this tab resurrects a stale agent tree (e.g. a
+    // deleted session's sub-agents appearing in the freshly cleared tab).
+    useAgentStore.getState().removeCache(tabId);
+    return set((state) => {
+      const result = updateTab(state.tabs, tabId, () => createTab(tabId));
+      const newStreams = new Map(state.streams);
+      newStreams.delete(tabId);
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
+    });
+  },
+
+  setSessionMeta: (tabId, meta) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        sessionMeta: { ...tab.sessionMeta, ...meta },
+      }));
+      return result ?? {};
+    }),
+
+  setInputDraft: (tabId, text) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        inputDraft: text,
+      }));
+      return result ?? {};
+    }),
+
+  setPendingAttachments: (tabId, files) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        pendingAttachments: files,
+      }));
+      return result ?? {};
+    }),
+
+  addPendingMessage: (tabId, text) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        pendingUserMessages: [...tab.pendingUserMessages, text],
+      }));
+      return result ?? {};
+    }),
+
+  shiftPendingMessage: (tabId) => {
+    const tab = get().tabs.get(tabId);
+    if (!tab || tab.pendingUserMessages.length === 0) return undefined;
+    const first = tab.pendingUserMessages[0];
+    set((state) => {
+      const r = updateTab(state.tabs, tabId, (t) => ({
+        ...t,
+        pendingUserMessages: t.pendingUserMessages.slice(1),
+      }));
+      return r ?? {};
+    });
+    return first;
+  },
+
+  flushPendingMessages: (tabId) => {
+    const tab = get().tabs.get(tabId);
+    if (!tab) return [];
+    const msgs = tab.pendingUserMessages;
+    set((state) => {
+      const r = updateTab(state.tabs, tabId, (t) => ({
+        ...t,
+        pendingUserMessages: [],
+      }));
+      return r ?? {};
+    });
+    return msgs;
+  },
+
+  clearPendingMessages: (tabId) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        pendingUserMessages: [],
+      }));
+      return result ?? {};
+    }),
+
+  rewindToTurn: (tabId, startMsgIdx) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        // Guard against invalid index — if out of bounds, keep messages intact
+        if (startMsgIdx < 0 || startMsgIdx > tab.messages.length) {
+          console.warn('[chatStore] rewindToTurn: invalid index', startMsgIdx, 'total:', tab.messages.length);
+          return {
+            ...tab,
+            partialText: '',
+            partialThinking: '',
+            activityStatus: { phase: 'idle' as ActivityPhase },
+          };
+        }
+        return {
+          ...tab,
+          messages: tab.messages.slice(0, startMsgIdx),
+          partialText: '',
+          partialThinking: '',
+          // Keep sessionMeta (sessionId needed for resume), reset transient state
+          activityStatus: { phase: 'idle' as ActivityPhase },
+        };
+      });
+      return result ?? {};
+    }),
+
+  setInteractionState: (tabId, msgId, interactionState, error) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        messages: tab.messages.map((m) =>
+          m.id === msgId ? {
+            ...m,
+            interactionState,
+            interactionError: error,
+            resolved: interactionState === 'resolved',
+          } : m,
+        ),
+      }));
+      return result ?? {};
+    }),
+
+  getActiveInteraction: (tabId) => {
+    const tab = get().tabs.get(tabId);
+    if (!tab) return undefined;
+    // Return the last message with an active (pending) interaction
+    for (let i = tab.messages.length - 1; i >= 0; i--) {
+      const m = tab.messages[i];
+      if ((m.type === 'permission' || m.type === 'question') && m.interactionState === 'pending') {
+        return m;
+      }
+    }
+    return undefined;
+  },
+
+  // ------------------------------------------------------------------
+  // Tab lifecycle
+  // ------------------------------------------------------------------
+
+  ensureTab: (tabId) => {
+    if (get().tabs.has(tabId)) return;
+    const newTabs = new Map(get().tabs);
+    newTabs.set(tabId, createTab(tabId));
+    // LRU eviction — keep at most MAX_CACHE tabs
+    // Never evict tabs that are actively streaming — their disk JSONL may have
+    // been compacted, so the tab is the only source of full history (#32 fix)
+    if (newTabs.size > MAX_CACHE) {
+      const keysIter = newTabs.keys();
+      while (newTabs.size > MAX_CACHE) {
+        const oldest = keysIter.next().value;
+        if (oldest === undefined) break;
+        if (oldest === tabId) continue; // don't evict the tab we're creating
+        const entry = newTabs.get(oldest);
+        // B2: TabSession.isStreaming was removed (dead field) — the real
+        // streaming flag lives in the streams Map (StreamState.isStreaming).
+        if (get().streams.get(oldest)?.isStreaming || entry?.sessionStatus === 'running') continue; // protect active
+        newTabs.delete(oldest);
+      }
+      // If all candidates are streaming, allow cache to exceed MAX_CACHE
+    }
+    set({ tabs: newTabs, sessionCache: newTabs });
+  },
+
+  removeTab: (tabId) => {
+    const newTabs = new Map(get().tabs);
+    newTabs.delete(tabId);
+    set({ tabs: newTabs, sessionCache: newTabs });
+    _purgeTabCache(tabId);
+  },
+
+  getTab: (tabId) => get().tabs.get(tabId),
+
+  // ------------------------------------------------------------------
+  // Backward compat: sessionCache + *InCache methods
+  // ------------------------------------------------------------------
+
+  saveToCache: (tabId) => {
+    // In v2, data already lives in tabs. This is effectively a no-op.
+    // However, we still ensure the tab exists (some call sites save before switching
+    // and may not have called ensureTab yet).
+    get().ensureTab(tabId);
+  },
+
+  restoreFromCache: (tabId) => {
+    const tab = get().tabs.get(tabId);
+    if (!tab) return false;
+    // #27/#30 safety net: if tab has zero messages but this is a persisted session
+    // (has a disk path), treat as cache miss so the caller falls back to disk load.
+    // Streaming state lives in the `streams` Map (TabSession.isStreaming is never
+    // set true — it was a dead check); a live stream must keep the tab alive or
+    // the first buffered events get dropped with the tab.
+    const stream = get().streams.get(tabId);
+    if (
+      tab.messages.length === 0 &&
+      !stream?.isStreaming &&
+      !tab.partialText &&
+      !stream?.partialText
+    ) {
+      const session = useSessionStore.getState().sessions.find((s) => s.id === tabId);
+      if (session?.path) {
+        const newTabs = new Map(get().tabs);
+        newTabs.delete(tabId);
+        set({ tabs: newTabs, sessionCache: newTabs });
+        _purgeTabCache(tabId);
+        return false;
+      }
+    }
+    // TK-329: Validate stdinId ownership — prevent cross-tab contamination
+    if (tab.sessionMeta.stdinId) {
+      const ownerTab = useSessionStore.getState().getTabForStdin(tab.sessionMeta.stdinId);
+      if (ownerTab && ownerTab !== tabId) {
+        // Fix: strip stdinId that belongs to another tab
+        set((state) => {
+          const result = updateTab(state.tabs, tabId, (t) => ({
+            ...t,
+            sessionMeta: { ...t.sessionMeta, stdinId: undefined },
+          }));
+          return result ?? {};
+        });
+      }
+    }
+    // Sync running state to sessionStore for sidebar indicator (FI-1 fix)
+    useSessionStore.getState().setSessionRunning(tabId, tab.sessionStatus === 'running');
+    return true;
+  },
+
+  removeFromCache: (tabId) => {
+    get().removeTab(tabId);
+  },
+
+  hasCachedSession: (tabId) => get().tabs.has(tabId),
+
+  // *InCache methods — delegate directly to tab-level methods
+
+  addMessageToCache: (tabId, message) => {
+    // #27/#30 fix: skip if no tab entry — creating a tab with only this single
+    // message risks losing real history if the entry was LRU-evicted.
+    if (!get().tabs.has(tabId)) return;
+    get().addMessage(tabId, message);
+  },
+
+  updatePartialInCache: (tabId, text) => {
+    if (!get().tabs.has(tabId)) return;
+    get().updatePartialMessage(tabId, text);
+  },
+
+  updatePartialThinkingInCache: (tabId, thinking) => {
+    if (!get().tabs.has(tabId)) return;
+    get().updatePartialThinking(tabId, thinking);
+  },
+
+  setStatusInCache: (tabId, status) => {
+    // Always sync running state indicator, even without a tab
+    useSessionStore.getState().setSessionRunning(tabId, status === 'running');
+    if (!get().tabs.has(tabId)) return;
+    get().setSessionStatus(tabId, status);
+  },
+
+  setMetaInCache: (tabId, meta) => {
+    if (!get().tabs.has(tabId)) return;
+    get().setSessionMeta(tabId, meta);
+  },
+
+  setActivityInCache: (tabId, status) => {
+    if (!get().tabs.has(tabId)) return;
+    get().setActivityStatus(tabId, status);
+  },
+
+  updateMessageInCache: (tabId, msgId, updates) => {
+    if (!get().tabs.has(tabId)) return;
+    get().updateMessage(tabId, msgId, updates);
+  },
+}));

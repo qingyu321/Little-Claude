@@ -1,0 +1,79 @@
+[package]
+name = "little-claude"
+version = "1.1.0"
+description = "Little Claude - Claude Code desktop GUI client"
+authors = ["TinyZ"]
+license = "UNLICENSED"
+edition = "2021"
+
+[features]
+default = ["local-asr"]
+local-asr = ["sherpa-onnx"]
+
+[lib]
+name = "little_claude_lib"
+crate-type = ["staticlib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+notify = "7"
+base64 = "0.22"
+serde_yaml = "0.9"
+tauri-plugin-process = "2"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+futures-util = { version = "0.3", features = ["channel"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http-body = "1"
+rand = "0.8"
+trash = "5"
+flate2 = "1"
+tar = "0.4"
+zip = "2"
+sha2 = "0.10"
+aes-gcm = "0.10"
+rust-embed = "8"
+async-trait = "0.1"
+log = "0.4"
+which = "6"
+sysinfo = "0.31"
+sherpa-onnx = { version = "1.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Com",
+    "Win32_Media_Audio",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"

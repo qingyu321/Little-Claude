@@ -1,0 +1,98 @@
+/**
+ * Platform detection utilities for cross-platform UI adaptation.
+ *
+ * Uses navigator.platform (widely supported) to detect the current OS.
+ * Results are cached — safe to call frequently.
+ */
+
+export type Platform = 'mac' | 'windows' | 'linux';
+
+let _cached: Platform | null = null;
+
+export function getPlatform(): Platform {
+  if (_cached) return _cached;
+  const p = navigator.platform?.toLowerCase() ?? '';
+  if (p.includes('mac')) _cached = 'mac';
+  else if (p.includes('win')) _cached = 'windows';
+  else _cached = 'linux';
+  return _cached;
+}
+
+export function isMac(): boolean {
+  return getPlatform() === 'mac';
+}
+
+export function isWindows(): boolean {
+  return getPlatform() === 'windows';
+}
+
+/** Returns the platform-appropriate modifier key symbol/label */
+export function modKey(): string {
+  return isMac() ? '⌘' : 'Ctrl';
+}
+
+/** Returns the platform-appropriate file manager name */
+export function fileManagerName(): string {
+  switch (getPlatform()) {
+    case 'mac': return 'Finder';
+    case 'windows': return '资源管理器';
+    default: return '文件管理器';
+  }
+}
+
+/** Returns the English file manager name */
+export function fileManagerNameEn(): string {
+  switch (getPlatform()) {
+    case 'mac': return 'Finder';
+    case 'windows': return 'Explorer';
+    default: return 'Files';
+  }
+}
+
+/* ================================================================
+   Cross-platform path utilities
+   ================================================================ */
+
+/** Extract filename from a Unix or Windows path */
+export function getFileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** Extract directory portion from a Unix or Windows path */
+export function getDirName(path: string): string {
+  const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return lastSep >= 0 ? path.substring(0, lastSep + 1) : '';
+}
+
+/* ================================================================
+   Claude CLI project directory encoding
+   ================================================================ */
+
+/**
+ * Encode a filesystem path into the Claude CLI project directory name.
+ *
+ * Claude CLI replaces `\`, `:`, `/`, `.`, and ` ` (space) with `-`.
+ * This mirrors the Rust `encode_project_name` function.
+ *
+ * Unix:     /Users/a/my-app → -Users-a-my-app
+ * Windows:  C:\Users\a → C--Users-a
+ * Windows:  D:\agent self\agent\tokenicode-src → D--agent-self-agent-tokenicode-src
+ */
+export function encodeProjectName(path: string): string {
+  let result = '';
+  for (let i = 0; i < path.length; i++) {
+    const ch = path[i];
+    switch (ch) {
+      case '\\':
+      case ':':
+      case '/':
+      case '.':
+      case ' ':
+        result += '-';
+        break;
+      default:
+        result += ch;
+    }
+  }
+  return result;
+}

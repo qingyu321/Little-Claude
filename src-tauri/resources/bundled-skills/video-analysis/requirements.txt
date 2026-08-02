@@ -1,0 +1,15 @@
+# System dependencies: ffmpeg and ffprobe are BUNDLED in bin/ (auto-detected;
+# no install needed). yt-dlp ships with the Python packages below and is only
+# needed for --allow-platform platform-page fetches.
+#
+# Offline install (Windows x64, Python 3.11): all wheels are bundled in
+# wheelhouse/ — run setup_offline.bat (or setup_offline.sh in Git Bash), or:
+#   python -m pip install --no-index --find-links wheelhouse -r requirements.txt
+# Online fallback (other platforms): python -m pip install -r requirements.txt
+openai>=1.0.0
+faster-whisper>=1.1.1
+requests>=2.32.0
+yt-dlp
+# Acceleration pipeline dependencies (pHash dedup + grid stitching)
+Pillow>=10.0.0
+numpy>=1.24.0

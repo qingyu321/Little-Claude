@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Little Claude",
+  "version": "1.1.0",
+  "identifier": "com.tinyzhuang.tokenicode",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:15200",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Little Claude",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com; media-src 'self' data: blob: asset: https:; frame-src https: http:",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http: wss:; media-src 'self' data: blob: asset: https:; frame-src https: http:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/.tokenicode/wallpapers/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": []
+  },
+  "plugins": {}
+}

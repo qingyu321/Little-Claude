@@ -1,0 +1,91 @@
+import { useSettingsStore, SecondaryPanelTab } from '../../stores/settingsStore';
+import { FileExplorer } from '../files/FileExplorer';
+import { SkillsPanel } from '../skills/SkillsPanel';
+import { PluginsPanel } from '../plugins/PluginsPanel';
+import { PreviewPanel } from '../preview/PreviewPanel';
+import { InterviewPanel } from '../interview/InterviewPanel';
+import { useInterviewStore } from '../../stores/interviewStore';
+import { useT } from '../../lib/i18n';
+
+const tabs: { id: SecondaryPanelTab; labelKey: string; icon: string }[] = [
+  { id: 'files', labelKey: 'panel.files', icon: 'M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3z' },
+  { id: 'preview', labelKey: 'panel.preview', icon: 'M2 4h12v8H2zM5 14h6' },
+  { id: 'skills', labelKey: 'panel.skills', icon: 'M8 1L1 4.5l7 3.5 7-3.5L8 1zM1 11.5l7 3.5 7-3.5M1 8l7 3.5L15 8' },
+  { id: 'plugins', labelKey: 'panel.plugins', icon: 'M6 2v4M10 2v4M4 6h8v3a4 4 0 01-4 4h0a4 4 0 01-4-4V6zM8 13v2' },
+  { id: 'interview', labelKey: 'panel.interview', icon: 'M8 1a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3zM4 7v1a4 4 0 0 0 8 0V7M8 12v3M5 15h6' },
+];
+
+export function SecondaryPanel() {
+  const t = useT();
+  const activeTab = useSettingsStore((s) => s.secondaryPanelTab);
+  const setTab = useSettingsStore((s) => s.setSecondaryTab);
+  const togglePanel = useSettingsStore((s) => s.toggleSecondaryPanel);
+  const interviewActive = useInterviewStore((s) => s.active);
+  const previewVisible = useSettingsStore((s) => s.previewSidebarVisible);
+  const skillsVisible = useSettingsStore((s) => s.skillsSidebarVisible);
+
+  // Filter tabs based on module visibility settings
+  const visibleTabs = tabs.filter((tab) => {
+    if (tab.id === 'interview') return true; // always visible
+    if (tab.id === 'preview') return previewVisible;
+    if (tab.id === 'skills') return skillsVisible;
+    return true; // files, plugins always visible
+  });
+
+  // Window dragging handled via CSS -webkit-app-region: drag on the top strip
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Tab bar — extra top padding for macOS traffic lights */}
+      <div
+        className="flex items-center justify-between px-2 pt-6 pb-2
+        border-b border-border-subtle cursor-default">
+        <div className="flex gap-1 min-w-0 overflow-hidden">
+          {visibleTabs.map((tab) => {
+            const isInterviewTab = tab.id === 'interview';
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setTab(tab.id)}
+                className={`px-2.5 py-1.5 rounded-lg text-[13px] font-medium
+                  transition-smooth flex items-center gap-1.5 whitespace-nowrap flex-shrink-0
+                  ${activeTab === tab.id
+                    ? 'bg-accent/10 text-accent'
+                    : 'text-text-muted hover:bg-bg-secondary hover:text-text-primary'
+                  }`}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+                  stroke="currentColor" strokeWidth="1.5" className="flex-shrink-0">
+                  <path d={tab.icon} />
+                </svg>
+                {t(tab.labelKey)}
+                {/* 面试激活时的状态点 */}
+                {isInterviewTab && interviewActive && (
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0
+                    ${activeTab === tab.id ? 'bg-accent' : 'bg-red-500'} animate-pulse-soft`} />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={togglePanel}
+          className="p-1 rounded-lg hover:bg-bg-tertiary
+            text-text-tertiary transition-smooth" title={t('panel.close')}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+            stroke="currentColor" strokeWidth="1.5">
+            <path d="M4 4l6 6M10 4l-6 6" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-hidden">
+        {activeTab === 'files' && <FileExplorer />}
+        {activeTab === 'preview' && <PreviewPanel />}
+        {activeTab === 'skills' && <SkillsPanel />}
+        {activeTab === 'plugins' && <PluginsPanel />}
+        {activeTab === 'interview' && <InterviewPanel />}
+      </div>
+    </div>
+  );
+}

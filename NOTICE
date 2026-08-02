@@ -1,0 +1,21 @@
+TOKENICODE DeepSeek Alpha
+
+This project is a modified distribution of TOKENICODE.
+
+Original project:
+  TOKENICODE
+  https://github.com/yiliqi78/TOKENICODE
+
+Original author / copyright notice:
+  Copyright 2025 TinyZ
+
+The original TOKENICODE project is licensed under the Apache License,
+Version 2.0. This modified project keeps the same license and preserves
+the original attribution.
+
+Major modifications in this fork include:
+  - DeepSeek / CC Switch model naming and API model normalization
+  - Codex skills discovery and de-duplication
+  - Skills metadata translation and SKILL.md preview translation
+  - UI changes for local DeepSeek-oriented workflows
+

@@ -1,0 +1,66 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Installer files
+release-artifacts/
+*.dmg
+*.exe
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.zip
+*.tar.gz
+*.sig
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+configs/*.json
+
+# npm lock (project uses pnpm)
+package-lock.json
+
+# Obsidian
+.obsidian/
+
+# Local test data (video analysis output)
+video-results/
+
+# Local tool state
+.trellis/workspace/
+src-tauri/.cargo/
+
+# Temp test files / backups
+src-tauri/icons.bak/
+test_func.rs
+test_string.rs
+test_string.pdb
+_TEMP_launch_readme.txt

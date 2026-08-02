@@ -1,0 +1,278 @@
+import { useEffect, useCallback, useState } from 'react';
+import { useSetupStore } from '../../stores/setupStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { useT } from '../../lib/i18n';
+import { stripAnsi } from '../../lib/strip-ansi';
+import { AiAvatar } from '../shared/AiAvatar';
+import {
+  bridge,
+  onDownloadProgress,
+} from '../../lib/tauri-bridge';
+
+/** Detect if an error message looks like a permission/access issue */
+function isPermissionError(msg: string): boolean {
+  const hints = ['EPERM', 'EACCES', 'permission denied', 'access denied',
+    'Access is denied', 'operation not permitted'];
+  const lower = msg.toLowerCase();
+  return hints.some(h => lower.includes(h.toLowerCase()));
+}
+
+/** Detect if an error message looks like a network/firewall issue */
+function isNetworkError(msg: string): boolean {
+  if (isPermissionError(msg)) return false;
+  const lower = msg.toLowerCase();
+  // Local extraction timeout is NOT a network issue
+  if (lower.includes('local extraction') || lower.includes('not a network issue')) return false;
+  const hints = ['timeout', 'timed out', 'network', 'connect', 'ENOTFOUND',
+    'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'fetch', 'Failed to download',
+    'All install methods failed', 'dns', 'certificate'];
+  return hints.some(h => lower.includes(h.toLowerCase()));
+}
+
+/**
+ * SetupWizard — lightweight CLI detection & direct download install.
+ *
+ * Simplified flow (TK-302 v3):
+ *   checking → (CLI found? skip to main) | not_installed
+ *   not_installed → user clicks Install → installing (download with progress)
+ *   installing → installed → auto-complete
+ *   install_failed → retry | skip
+ *
+ * On Windows, git-bash (PortableGit) is auto-installed as part of the flow.
+ * Auth/login is handled separately in Settings (TK-303).
+ */
+export function SetupWizard() {
+  const t = useT();
+  const step = useSetupStore((s) => s.step);
+  const error = useSetupStore((s) => s.error);
+  const cliVersion = useSetupStore((s) => s.cliVersion);
+  const setStep = useSetupStore((s) => s.setStep);
+  const setError = useSetupStore((s) => s.setError);
+  const setCliInfo = useSetupStore((s) => s.setCliInfo);
+  const setSetupCompleted = useSettingsStore((s) => s.setSetupCompleted);
+
+  const [downloadPercent, setDownloadPercent] = useState(0);
+  const [downloadPhase, setDownloadPhase] = useState<string>('');
+
+  // Auto-detect CLI on mount — skip wizard entirely if found
+  useEffect(() => {
+    let cancelled = false;
+    async function detect() {
+      try {
+        const status = await bridge.checkClaudeCli();
+        if (cancelled) return;
+        if (status.installed && !status.git_bash_missing) {
+          setCliInfo(status.version ?? null, status.path ?? null);
+          setSetupCompleted(true);
+          return;
+        }
+        // CLI installed but git-bash missing → treat as needing install
+        // (install_claude_cli will auto-install git-bash then detect existing CLI)
+        if (status.installed && status.git_bash_missing) {
+          setCliInfo(status.version ?? null, status.path ?? null);
+        }
+        setStep('not_installed');
+      } catch {
+        if (!cancelled) setStep('not_installed');
+      }
+    }
+    detect();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Download-based install: Rust HTTP client downloads binary directly
+  const handleInstall = useCallback(async () => {
+    setStep('installing');
+    setError(null);
+    setDownloadPercent(0);
+    setDownloadPhase('');
+
+    const unlistenProgress = await onDownloadProgress((event) => {
+      setDownloadPercent(event.percent);
+      setDownloadPhase(event.phase);
+    });
+
+    try {
+      await bridge.installClaudeCli();
+      unlistenProgress();
+
+      // Verify installation
+      const status = await bridge.checkClaudeCli();
+      if (status.installed) {
+        setCliInfo(status.version ?? null, status.path ?? null);
+        setStep('installed');
+        setTimeout(() => setSetupCompleted(true), 1200);
+      } else {
+        setError('CLI not found after download');
+        setStep('install_failed');
+      }
+    } catch (err) {
+      unlistenProgress();
+      setError(stripAnsi(String(err)));
+      setStep('install_failed');
+    }
+  }, []);
+
+  const handleSkip = useCallback(() => {
+    setSetupCompleted(true);
+  }, []);
+
+  // Phase label for download progress
+  const phaseLabel =
+    // Native binary install phases (primary path)
+    downloadPhase === 'native_version' ? t('setup.nativeVersion')
+    : downloadPhase === 'native_manifest' ? t('setup.nativeManifest')
+    : downloadPhase === 'native_download' ? t('setup.nativeDownload')
+    : downloadPhase === 'native_verify' ? t('setup.nativeVerify')
+    : downloadPhase === 'native_install' ? t('setup.nativeInstall')
+    // npm fallback phases
+    : downloadPhase === 'npm_fallback' ? t('setup.npmFallback')
+    : downloadPhase === 'node_downloading' ? t('setup.downloadingNode')
+    : downloadPhase === 'node_extracting' ? t('setup.extractingNode')
+    : downloadPhase === 'node_complete' ? t('setup.preparingEnv')
+    : downloadPhase === 'installing' ? t('setup.nativeInstall')
+    // Windows git phases
+    : downloadPhase === 'git_downloading' ? t('setup.downloadingGit')
+    : downloadPhase === 'git_extracting' ? t('setup.extractingGit')
+    : downloadPhase === 'git_complete' ? t('setup.preparingEnv')
+    // Legacy phases
+    : downloadPhase === 'version' ? t('setup.nativeVersion')
+    : downloadPhase === 'downloading' ? t('setup.nativeDownload')
+    : '';
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full text-center">
+      <div className="w-full max-w-md">
+        {/* Icon — customizable AI avatar */}
+        <AiAvatar size="w-20 h-20" rounded="rounded-3xl" className="mb-6 shadow-glow mx-auto" />
+
+        {/* Step: Checking */}
+        {step === 'checking' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-center gap-2">
+              <span className="text-sm font-bold leading-none animate-pulse-soft text-accent">
+                /
+              </span>
+              <span className="text-sm text-text-muted">{t('setup.checking')}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Step: Not Installed */}
+        {step === 'not_installed' && (
+          <div className="space-y-4">
+            <h2 className="text-xl font-semibold text-accent">
+              {t('setup.notInstalled')}
+            </h2>
+            <p className="text-sm text-text-muted leading-relaxed">
+              {t('setup.notInstalledDesc')}
+            </p>
+            <button
+              onClick={handleInstall}
+              className="px-6 py-3 rounded-xl text-sm font-medium
+                bg-accent hover:bg-accent-hover text-text-inverse
+                hover:shadow-glow transition-smooth
+                flex items-center gap-2 mx-auto cursor-pointer"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 14h10" />
+              </svg>
+              {t('setup.install')}
+            </button>
+
+            <button onClick={handleSkip}
+              className="text-xs text-text-tertiary hover:text-text-muted
+                transition-smooth mt-2 cursor-pointer">
+              {t('setup.skip')}
+            </button>
+          </div>
+        )}
+
+        {/* Step: Installing (download progress) */}
+        {step === 'installing' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-center gap-2">
+              <span className="text-sm font-bold leading-none animate-pulse-soft text-accent">
+                /
+              </span>
+              <span className="text-sm text-text-muted">
+                {phaseLabel || t('setup.installing')}
+              </span>
+            </div>
+            {/* Precise progress bar */}
+            <div className="h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+              <div
+                className="h-full rounded-full bg-accent transition-all duration-300 ease-out"
+                style={{ width: `${Math.max(downloadPercent, 2)}%` }}
+              />
+            </div>
+            {downloadPercent > 0 && (
+              <span className="text-xs text-text-tertiary">{downloadPercent}%</span>
+            )}
+          </div>
+        )}
+
+        {/* Step: Install Failed */}
+        {step === 'install_failed' && (
+          <div className="space-y-4">
+            <h2 className="text-xl font-semibold text-red-500">
+              {t('setup.installFailed')}
+            </h2>
+            <p className="text-sm text-text-muted leading-relaxed">
+              {t('setup.installFailedDesc')}
+            </p>
+            {error && (
+              <p className="text-xs text-red-400 font-mono bg-red-500/10 p-2 rounded-lg">
+                {error}
+              </p>
+            )}
+            {error && isPermissionError(error) && (
+              <p className="text-xs text-amber-500">
+                {t('error.permissionHint')}
+              </p>
+            )}
+            {error && !isPermissionError(error) && isNetworkError(error) && (
+              <p className="text-xs text-amber-500">
+                {t('network.firewallHint')}
+              </p>
+            )}
+            <div className="flex gap-3 justify-center">
+              <button onClick={handleInstall}
+                className="px-4 py-2 rounded-xl text-sm font-medium
+                  bg-accent hover:bg-accent-hover text-text-inverse
+                  transition-smooth cursor-pointer">
+                {t('setup.retry')}
+              </button>
+              <button onClick={handleSkip}
+                className="px-4 py-2 rounded-xl text-sm font-medium
+                  border border-border-subtle text-text-muted
+                  hover:bg-bg-tertiary transition-smooth cursor-pointer">
+                {t('setup.skip')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step: Installed (brief confirmation, auto-completes) */}
+        {step === 'installed' && (
+          <div className="space-y-3 animate-scale-in">
+            <div className="flex items-center justify-center gap-2">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-success">
+                <circle cx="10" cy="10" r="9" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M6 10l3 3 5-6" stroke="currentColor" strokeWidth="1.5"
+                  strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span className="text-sm text-text-primary font-medium">{t('setup.installed')}</span>
+            </div>
+            {cliVersion && (
+              <p className="text-xs text-text-tertiary">
+                {t('setup.version')}: {cliVersion}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

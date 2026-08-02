@@ -1,0 +1,9 @@
+# image-reader has NO third-party dependencies.
+#
+# scripts/describe_image.py is Python 3.9+ standard library only
+# (urllib, json, base64, argparse, ipaddress) — nothing to pip install,
+# no venv, no offline wheelhouse. This is deliberate: unlike video-analysis,
+# the skill needs no ffmpeg/ASR/SDK, so it must stay install-free on any
+# machine that has a Python interpreter.
+#
+# If you extend the script later and add a real dependency, list it here.

@@ -1,0 +1,1387 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ================================================================
+   Default theme (Black) — light mode — clean solid
+   ================================================================ */
+@theme {
+  --color-bg-primary: #F8F8FA;
+  --color-bg-secondary: #F0F0F2;
+  --color-bg-tertiary: #E8E8EA;
+  --color-bg-chat: #FFFFFF;
+  --color-bg-sidebar: #F5F5F7;
+  --color-bg-input: #FFFFFF;
+  --color-bg-user-msg: #333333;
+  --color-bg-assistant-msg: #F8F8FA;
+  --color-bg-tool: #F3F3F5;
+  --color-bg-thinking: #F0F0F2;
+  --color-bg-card: #FFFFFF;
+  --color-bg-nav-active: rgba(0, 0, 0, 0.04);
+
+  --color-text-primary: #1A1A1A;
+  --color-text-secondary: #555555;
+  --color-text-tertiary: #888888;
+  --color-text-inverse: #FFFFFF;
+  --color-text-muted: #777777;
+
+  --color-border: #E5E5EA;
+  --color-border-subtle: #EBEBF0;
+  --color-border-focus: #333333;
+
+  --color-accent: #333333;
+  --color-accent-light: #555555;
+  --color-accent-hover: #1A1A1A;
+  --color-accent-glow: rgba(0, 0, 0, 0.06);
+  --color-success: #10b981;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+
+  --color-gradient-start: #333333;
+  --color-gradient-mid: #444444;
+  --color-gradient-end: #555555;
+
+  /* Syntax highlighting — decoupled from semantic colors */
+  --color-syntax-keyword:  #7C3AED;
+  --color-syntax-string:   #059669;
+  --color-syntax-number:   #D97706;
+  --color-syntax-function: #2563EB;
+  --color-syntax-comment:  #9CA3AF;
+  --color-syntax-type:     #0891B2;
+  --color-syntax-builtin:  #6366F1;
+  --color-syntax-delete:   #DC2626;
+  --color-syntax-meta:     #78716C;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.03);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08),
+    0 4px 8px rgba(0, 0, 0, 0.04);
+  --shadow-glow: 0 0 20px rgba(0, 0, 0, 0.06);
+
+  /* Icon slash color — same as brackets in default theme */
+  --color-icon-slash: white;
+}
+
+@variant dark (&:where(.dark, .dark *));
+
+/* ================================================================
+   Black — dark mode
+   ================================================================ */
+.dark {
+  --color-bg-primary: #141414;
+  --color-bg-secondary: #1C1C1E;
+  --color-bg-tertiary: #2C2C2E;
+  --color-bg-chat: #0A0A0A;
+  --color-bg-sidebar: #1C1C1E;
+  --color-bg-input: #1C1C1E;
+  --color-bg-user-msg: #D0D0D0;
+  --color-bg-assistant-msg: #1A1A1C;
+  --color-bg-tool: #1E1E20;
+  --color-bg-thinking: #1A1A1C;
+  --color-bg-card: #1C1C1E;
+
+  --color-text-primary: #F0F0F0;
+  --color-text-secondary: #B0B0B0;
+  --color-text-tertiary: #8C8C8C;
+  --color-text-inverse: #101010;
+  --color-text-muted: #A3A3A3;
+
+  --color-border: #38383A;
+  --color-border-subtle: #2C2C2E;
+  --color-border-focus: #D0D0D0;
+
+  --color-accent: #D0D0D0;
+  --color-accent-light: #E0E0E0;
+  --color-accent-hover: #FFFFFF;
+  --color-accent-glow: rgba(255, 255, 255, 0.08);
+
+  --color-gradient-start: #D0D0D0;
+  --color-gradient-mid: #E0E0E0;
+  --color-gradient-end: #F0F0F0;
+
+  /* Syntax highlighting — dark mode */
+  --color-syntax-keyword:  #A78BFA;
+  --color-syntax-string:   #34D399;
+  --color-syntax-number:   #FBBF24;
+  --color-syntax-function: #60A5FA;
+  --color-syntax-comment:  #6B7280;
+  --color-syntax-type:     #22D3EE;
+  --color-syntax-builtin:  #818CF8;
+  --color-syntax-delete:   #F87171;
+  --color-syntax-meta:     #A8A29E;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 20px rgba(255, 255, 255, 0.06);
+
+  /* Icon slash color — same as brackets in default theme */
+  --color-icon-slash: black;
+}
+
+/* ================================================================
+   Blue theme — light mode
+   ================================================================ */
+.theme-blue {
+  --color-bg-user-msg: #4E80F7;
+  --color-bg-nav-active: rgba(78, 128, 247, 0.06);
+
+  --color-text-secondary: #4E80F7;
+  --color-border-focus: #4E80F7;
+
+  --color-accent: #4E80F7;
+  --color-accent-light: #6B9AFF;
+  --color-accent-hover: #3D6FE6;
+  --color-accent-glow: rgba(78, 128, 247, 0.10);
+
+  --color-gradient-start: #4E80F7;
+  --color-gradient-mid: #5C8EFF;
+  --color-gradient-end: #6B9AFF;
+
+  /* Syntax — blue accent: swap function to avoid blue-on-blue */
+  --color-syntax-keyword:  #9333EA;
+  --color-syntax-function: #0891B2;
+
+  --shadow-glow: 0 0 20px rgba(78, 128, 247, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* Blue — dark mode */
+.theme-blue.dark,
+.dark.theme-blue {
+  --color-bg-user-msg: #6B9AFF;
+
+  --color-text-secondary: #6B9AFF;
+  --color-border-focus: #6B9AFF;
+
+  --color-accent: #6B9AFF;
+  --color-accent-light: #8AB2FF;
+  --color-accent-hover: #4E80F7;
+  --color-accent-glow: rgba(107, 154, 255, 0.15);
+
+  --color-gradient-start: #4E80F7;
+  --color-gradient-mid: #5C8EFF;
+  --color-gradient-end: #6B9AFF;
+
+  /* Syntax — blue dark */
+  --color-syntax-keyword:  #C084FC;
+  --color-syntax-function: #22D3EE;
+
+  --shadow-glow: 0 0 20px rgba(107, 154, 255, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* ================================================================
+   Orange theme — light mode
+   ================================================================ */
+.theme-orange {
+  --color-bg-user-msg: #C47252;
+  --color-bg-nav-active: rgba(196, 114, 82, 0.06);
+
+  --color-text-secondary: #C47252;
+  --color-border-focus: #C47252;
+
+  --color-accent: #C47252;
+  --color-accent-light: #D4856A;
+  --color-accent-hover: #B06141;
+  --color-accent-glow: rgba(196, 114, 82, 0.10);
+  --color-warning: #E8A86D;
+
+  --color-gradient-start: #C47252;
+  --color-gradient-mid: #CC7E5E;
+  --color-gradient-end: #D4856A;
+
+  /* Syntax — orange accent: swap number to avoid amber-on-orange */
+  --color-syntax-number:   #2563EB;
+  --color-syntax-function: #0891B2;
+
+  --shadow-glow: 0 0 20px rgba(196, 114, 82, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* Orange — dark mode */
+.theme-orange.dark,
+.dark.theme-orange {
+  --color-bg-user-msg: #D4856A;
+
+  --color-text-secondary: #D4856A;
+  --color-border-focus: #D4856A;
+
+  --color-accent: #D4856A;
+  --color-accent-light: #E09882;
+  --color-accent-hover: #C47252;
+  --color-accent-glow: rgba(212, 133, 106, 0.15);
+
+  --color-gradient-start: #C47252;
+  --color-gradient-mid: #CC7E5E;
+  --color-gradient-end: #D4856A;
+
+  /* Syntax — orange dark */
+  --color-syntax-number:   #60A5FA;
+  --color-syntax-function: #22D3EE;
+
+  --shadow-glow: 0 0 20px rgba(212, 133, 106, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* ================================================================
+   Green theme — light mode
+   ================================================================ */
+.theme-green {
+  --color-bg-user-msg: #57A64B;
+  --color-bg-nav-active: rgba(87, 166, 75, 0.06);
+
+  --color-text-secondary: #4CA85A;
+  --color-border-focus: #57A64B;
+
+  --color-accent: #57A64B;
+  --color-accent-light: #6DBF62;
+  --color-accent-hover: #56AD63;
+  --color-accent-glow: rgba(87, 166, 75, 0.10);
+  --color-success: #57A64B;
+
+  --color-gradient-start: #57A64B;
+  --color-gradient-mid: #73C880;
+  --color-gradient-end: #6DBF62;
+
+  /* Syntax — green accent: swap string to avoid green-on-green */
+  --color-syntax-string:   #D97706;
+  --color-syntax-function: #0891B2;
+
+  --shadow-glow: 0 0 20px rgba(87, 166, 75, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* Green — dark mode */
+.theme-green.dark,
+.dark.theme-green {
+  --color-bg-user-msg: #6DBF62;
+
+  --color-text-secondary: #6DBF62;
+  --color-border-focus: #6DBF62;
+
+  --color-accent: #6DBF62;
+  --color-accent-light: #97DEA2;
+  --color-accent-hover: #57A64B;
+  --color-accent-glow: rgba(109, 191, 98, 0.15);
+
+  --color-gradient-start: #57A64B;
+  --color-gradient-mid: #73C880;
+  --color-gradient-end: #6DBF62;
+
+  /* Syntax — green dark */
+  --color-syntax-string:   #FBBF24;
+  --color-syntax-function: #22D3EE;
+
+  --shadow-glow: 0 0 20px rgba(109, 191, 98, 0.10);
+
+  --color-icon-slash: var(--color-accent);
+}
+
+/* ================================================================
+   Solid backgrounds — all themes
+   ================================================================ */
+
+/* Light mode */
+.gradient-bg {
+  background: #F5F5F7;
+}
+
+/* Dark mode — all themes */
+.dark .gradient-bg {
+  background: #1C1C1E;
+}
+
+/* ================================================================
+   User message bubble — subtle shadow
+   ================================================================ */
+.bg-bg-user-msg {
+  box-shadow: 0 2px 8px var(--color-accent-glow);
+}
+
+.dark .bg-bg-user-msg {
+  box-shadow: 0 2px 12px var(--color-accent-glow);
+}
+
+/* Accent button treatment */
+.bg-accent {
+  box-shadow: 0 1px 4px var(--color-accent-glow);
+}
+
+.dark .bg-accent {
+  box-shadow: 0 1px 6px var(--color-accent-glow);
+}
+
+/* ================================================================
+   Accessibility & performance
+   ================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}
+
+/* ================================================================
+   Base styles
+   ================================================================ */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--little-claude-font-family, "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", Arial, sans-serif);
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Disable text selection and context menu globally for native app feel */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+:root[data-mono-follows-interface="true"] .font-mono,
+:root[data-mono-follows-interface="true"] .cm-editor .cm-scroller {
+  font-family: var(--little-claude-font-family, "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", Arial, sans-serif) !important;
+}
+
+/* Allow text selection only in input areas and message content */
+input, textarea, [contenteditable="true"],
+.message-content, .selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Scrollbar styling — thin, theme-aware, consistent across OS settings.
+   Works whether the OS is set to "always show", "when scrolling", or "auto".
+   WebKit: custom ::-webkit-scrollbar overrides the OS preference entirely,
+   so we get full control over width, color, and visibility.
+   Firefox: scrollbar-width + scrollbar-color for thin themed scrollbar. */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 0; /* Hide horizontal scrollbar globally */
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+/* Firefox: thin scrollbar, themed color */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-accent) 12%, transparent) transparent;
+}
+
+/* Accent text (formerly gradient-text) */
+.gradient-text {
+  color: var(--color-accent);
+}
+
+/* Pulse animation for streaming */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 1.5s ease-in-out infinite;
+  will-change: opacity;
+}
+
+/* Slow ping — 面试模式麦克风脉冲环 */
+@keyframes ping-slow {
+  0% { transform: scale(0.6); opacity: 0.8; }
+  80%, 100% { transform: scale(1.6); opacity: 0; }
+}
+.animate-ping-slow {
+  animation: ping-slow 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  will-change: transform, opacity;
+}
+
+/* Indeterminate progress bar */
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.animate-progress {
+  animation: progress-indeterminate 1.5s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Scale-in for cards */
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.animate-scale-in {
+  animation: scale-in 0.2s ease-out;
+}
+
+/* Slow spin for activity indicator asterisk */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.animate-spin-slow {
+  animation: spin-slow 2s linear infinite;
+  display: inline-block;
+  will-change: transform;
+}
+
+/* Smooth transitions for all interactive elements */
+.transition-smooth {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Fade in animation for modals */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out;
+}
+
+/* Title update animation (AI-generated title) */
+@keyframes title-update {
+  0% { opacity: 0.3; transform: translateY(4px); }
+  50% { opacity: 0.8; }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.animate-title-update {
+  animation: title-update 0.5s ease-out;
+}
+
+/* ================================================================
+   Prose / Typography overrides — map to theme CSS vars
+   ================================================================ */
+.prose {
+  --tw-prose-body: var(--color-text-primary);
+  --tw-prose-headings: var(--color-text-primary);
+  --tw-prose-lead: var(--color-text-muted);
+  --tw-prose-links: var(--color-accent);
+  --tw-prose-bold: var(--color-text-primary);
+  --tw-prose-counters: var(--color-text-tertiary);
+  --tw-prose-bullets: var(--color-text-tertiary);
+  --tw-prose-hr: var(--color-border);
+  --tw-prose-quotes: var(--color-text-muted);
+  --tw-prose-quote-borders: var(--color-border);
+  --tw-prose-captions: var(--color-text-muted);
+  --tw-prose-code: var(--color-syntax-keyword);
+  --tw-prose-pre-code: var(--color-text-primary);
+  --tw-prose-pre-bg: var(--color-bg-secondary);
+  --tw-prose-th-borders: var(--color-border);
+  --tw-prose-td-borders: var(--color-border-subtle);
+}
+
+/* Ensure prose does not add extra margins that clash with our layout */
+.prose :where(p):not(:where([class~="not-prose"],[class~="not-prose"] *)) {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose :where(ul, ol):not(:where([class~="not-prose"],[class~="not-prose"] *)) {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose :where(li):not(:where([class~="not-prose"],[class~="not-prose"] *)) {
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+}
+
+.prose :where(pre):not(:where([class~="not-prose"],[class~="not-prose"] *)) {
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.prose :where(blockquote):not(:where([class~="not-prose"],[class~="not-prose"] *)) {
+  border-left-color: var(--color-border);
+  color: var(--color-text-muted);
+  font-style: normal;
+}
+
+.prose :where(code):not(:where(pre *, [class~="not-prose"],[class~="not-prose"] *)) {
+  font-weight: 500;
+}
+
+/* ================================================================
+   highlight.js — theme-aware syntax highlighting (uses --syntax-* vars)
+   ================================================================ */
+.hljs {
+  background: var(--color-bg-secondary) !important;
+  color: var(--color-text-primary) !important;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--color-syntax-comment);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag {
+  color: var(--color-syntax-keyword);
+  font-weight: 600;
+}
+.hljs-type {
+  color: var(--color-syntax-type);
+  font-weight: 600;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-addition {
+  color: var(--color-syntax-string);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--color-syntax-number);
+}
+.hljs-title,
+.hljs-section,
+.hljs-name {
+  color: var(--color-syntax-function);
+}
+.hljs-built_in,
+.hljs-builtin-name {
+  color: var(--color-syntax-builtin);
+}
+.hljs-function > .hljs-title {
+  color: var(--color-syntax-function);
+}
+.hljs-deletion {
+  color: var(--color-syntax-delete);
+}
+.hljs-meta {
+  color: var(--color-syntax-meta);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+
+/* CodeMirror — ensure full height and theme integration */
+.cm-editor {
+  height: 100%;
+}
+.cm-editor .cm-scroller {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.7;
+}
+
+/* Resize handle for panels */
+.resize-handle {
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+/* Horizontal resize handle for vertical splits */
+.resize-handle-h {
+  cursor: row-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+/* ================================================================
+   Tiptap editor — chat input styling
+   ================================================================ */
+
+/* Remove default paragraph margins inside the editor */
+.tiptap p {
+  margin: 0;
+  padding: 0;
+}
+
+/* Placeholder text (via @tiptap/extension-placeholder) */
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+  height: 0;
+}
+
+/* Auto-size: min/max height for the editor area */
+.tiptap {
+  min-height: 24px;
+  max-height: 50vh;
+  overflow-y: auto;
+  outline: none;
+  line-height: 1.5;
+}
+
+/* ================================================================
+   Storybook watercolor skin
+   Inspired by a warm hand-drawn desk: paper, peach ink, soft leaves.
+   ================================================================ */
+:root,
+.dark,
+.theme-black,
+.theme-blue,
+.theme-orange,
+.theme-green,
+.theme-black.dark,
+.theme-blue.dark,
+.theme-orange.dark,
+.theme-green.dark {
+  --color-bg-primary: #FFF7E8;
+  --color-bg-secondary: #FFF0DF;
+  --color-bg-tertiary: #F8DEC9;
+  --color-bg-chat: #FFF8E9;
+  --color-bg-sidebar: #FFF1DF;
+  --color-bg-input: rgba(255, 250, 238, 0.92);
+  --color-bg-user-msg: #F5A9A6;
+  --color-bg-assistant-msg: rgba(255, 248, 233, 0.78);
+  --color-bg-tool: #F7EDD4;
+  --color-bg-thinking: #FFF2DE;
+  --color-bg-card: #FFF8E9;
+  --color-bg-nav-active: rgba(235, 139, 126, 0.18);
+
+  --color-text-primary: #5F4036;
+  --color-text-secondary: #7C5748;
+  --color-text-tertiary: #B28B76;
+  --color-text-inverse: #FFFDF4;
+  --color-text-muted: #8C6A5B;
+
+  --color-border: #E9B2A3;
+  --color-border-subtle: rgba(221, 157, 139, 0.58);
+  --color-border-focus: #E58F87;
+
+  --color-accent: #D9857A;
+  --color-accent-light: #F2B1A8;
+  --color-accent-hover: #C86B63;
+  --color-accent-glow: rgba(216, 133, 122, 0.18);
+  --color-success: #7EA45F;
+  --color-error: #D56A67;
+  --color-warning: #DA8A2D;
+
+  --color-gradient-start: #F4AAA6;
+  --color-gradient-mid: #FFE3C7;
+  --color-gradient-end: #B5C886;
+
+  --skin-body-background:
+    radial-gradient(circle at 12% 90%, rgba(174, 204, 142, 0.26), transparent 22%),
+    radial-gradient(circle at 92% 96%, rgba(145, 199, 207, 0.22), transparent 24%),
+    linear-gradient(135deg, #FFF8E8 0%, #FFF3DE 48%, #FFF8EA 100%);
+  --skin-app-background:
+    radial-gradient(circle at 10% 100%, rgba(165, 199, 132, 0.34), transparent 21%),
+    radial-gradient(circle at 95% 98%, rgba(155, 209, 212, 0.28), transparent 22%),
+    linear-gradient(180deg, #FFF8EA 0%, #FFF2DE 100%);
+  --skin-border-strong: rgba(218, 142, 126, 0.72);
+  --skin-border-soft: rgba(218, 142, 126, 0.50);
+  --skin-dashed-border: rgba(204, 121, 106, 0.40);
+  --skin-decor: "✿  ˚  ❀";
+  --skin-decor-color: rgba(214, 131, 113, 0.50);
+  --skin-grid-line-a: rgba(255, 255, 255, 0.22);
+  --skin-grid-line-b: rgba(255, 255, 255, 0.18);
+  --skin-accent-gradient: linear-gradient(180deg, #F3B4AD 0%, #E68F84 100%);
+  --skin-accent-border: rgba(199, 105, 96, 0.42);
+  --skin-hover-bg: rgba(244, 202, 183, 0.34);
+  --skin-table-head: rgba(188, 202, 133, 0.20);
+  --skin-resize-bg: rgba(237, 185, 166, 0.22);
+  --skin-resize-line: rgba(215, 133, 118, 0.46);
+  --skin-scrollbar: rgba(215, 134, 122, 0.36);
+  --skin-accent-text: #D47A72;
+  --skin-warning-text: #D98B30;
+  --skin-success-text: #769E5B;
+
+  --shadow-sm: 0 2px 0 rgba(184, 115, 98, 0.08),
+    0 5px 16px rgba(166, 108, 82, 0.08);
+  --shadow-md: 0 3px 0 rgba(184, 115, 98, 0.10),
+    0 12px 26px rgba(166, 108, 82, 0.10);
+  --shadow-lg: 0 4px 0 rgba(184, 115, 98, 0.12),
+    0 20px 42px rgba(166, 108, 82, 0.14);
+  --shadow-glow: 0 0 24px rgba(239, 154, 145, 0.24);
+
+  --color-icon-slash: #FFF9E9;
+}
+
+.bg-theme-sakura {
+  --color-bg-primary: #FFF6F8;
+  --color-bg-secondary: #FCEAF0;
+  --color-bg-tertiary: #F3D4DD;
+  --color-bg-chat: #FFF8FA;
+  --color-bg-sidebar: #FFF0F4;
+  --color-bg-input: rgba(255, 250, 251, 0.94);
+  --color-bg-user-msg: #DFA0B3;
+  --color-bg-assistant-msg: rgba(255, 248, 250, 0.78);
+  --color-bg-tool: #F5E7DD;
+  --color-bg-thinking: #FFF0F5;
+  --color-bg-card: #FFF8FA;
+  --color-bg-nav-active: rgba(201, 125, 152, 0.16);
+  --color-text-primary: #5B3D48;
+  --color-text-secondary: #7C5361;
+  --color-text-tertiary: #B98A9A;
+  --color-text-muted: #8A6570;
+  --color-border: #E9B2C3;
+  --color-border-subtle: rgba(214, 151, 171, 0.56);
+  --color-border-focus: #D88AA4;
+  --color-accent: #C97D98;
+  --color-accent-light: #F0B8C9;
+  --color-accent-hover: #B96785;
+  --color-accent-glow: rgba(201, 125, 152, 0.18);
+  --color-success: #7B9D78;
+  --color-warning: #C58A4A;
+  --skin-body-background:
+    radial-gradient(circle at 86% 14%, rgba(241, 176, 199, 0.32), transparent 22%),
+    radial-gradient(circle at 12% 92%, rgba(188, 207, 161, 0.22), transparent 24%),
+    linear-gradient(135deg, #FFF7FA 0%, #FBEAF1 48%, #FFF5ED 100%);
+  --skin-app-background:
+    radial-gradient(circle at 92% 10%, rgba(238, 174, 198, 0.34), transparent 23%),
+    radial-gradient(circle at 8% 98%, rgba(187, 205, 157, 0.24), transparent 22%),
+    linear-gradient(180deg, #FFF8FA 0%, #FBEAF1 100%);
+  --skin-border-strong: rgba(207, 127, 154, 0.68);
+  --skin-border-soft: rgba(207, 127, 154, 0.44);
+  --skin-dashed-border: rgba(192, 105, 135, 0.34);
+  --skin-decor: "✿  ♡  ❀";
+  --skin-decor-color: rgba(201, 125, 152, 0.44);
+  --skin-accent-gradient: linear-gradient(180deg, #F0BBCB 0%, #D98EA7 100%);
+  --skin-accent-border: rgba(189, 102, 132, 0.40);
+  --skin-hover-bg: rgba(236, 190, 204, 0.34);
+  --skin-table-head: rgba(228, 184, 196, 0.22);
+  --skin-resize-bg: rgba(230, 181, 196, 0.22);
+  --skin-resize-line: rgba(201, 125, 152, 0.45);
+  --skin-scrollbar: rgba(201, 125, 152, 0.34);
+  --skin-accent-text: #C97D98;
+  --skin-warning-text: #C58A4A;
+  --skin-success-text: #789B76;
+}
+
+.bg-theme-lake {
+  --color-bg-primary: #F4FBF8;
+  --color-bg-secondary: #E8F5F1;
+  --color-bg-tertiary: #D3E8E6;
+  --color-bg-chat: #F8FCFA;
+  --color-bg-sidebar: #ECF8F4;
+  --color-bg-input: rgba(249, 253, 250, 0.94);
+  --color-bg-user-msg: #79AFC3;
+  --color-bg-assistant-msg: rgba(248, 252, 250, 0.80);
+  --color-bg-tool: #DDEBE3;
+  --color-bg-thinking: #EEF8F5;
+  --color-bg-card: #F8FCFA;
+  --color-bg-nav-active: rgba(109, 156, 184, 0.16);
+  --color-text-primary: #35515A;
+  --color-text-secondary: #486A72;
+  --color-text-tertiary: #78959D;
+  --color-text-muted: #5E7B82;
+  --color-border: #9FC7C8;
+  --color-border-subtle: rgba(127, 178, 184, 0.50);
+  --color-border-focus: #6D9CB8;
+  --color-accent: #6D9CB8;
+  --color-accent-light: #A5CCD8;
+  --color-accent-hover: #5789A5;
+  --color-accent-glow: rgba(109, 156, 184, 0.18);
+  --color-success: #6B9E7C;
+  --color-warning: #B98743;
+  --skin-body-background:
+    radial-gradient(circle at 12% 88%, rgba(166, 205, 189, 0.34), transparent 24%),
+    radial-gradient(circle at 88% 16%, rgba(141, 191, 210, 0.28), transparent 24%),
+    linear-gradient(135deg, #F8FCFA 0%, #E4F2F0 52%, #F5F8EC 100%);
+  --skin-app-background:
+    radial-gradient(circle at 10% 100%, rgba(157, 202, 183, 0.34), transparent 22%),
+    radial-gradient(circle at 94% 10%, rgba(138, 190, 209, 0.26), transparent 23%),
+    linear-gradient(180deg, #F8FCFA 0%, #E8F5F1 100%);
+  --skin-border-strong: rgba(109, 156, 184, 0.64);
+  --skin-border-soft: rgba(109, 156, 184, 0.42);
+  --skin-dashed-border: rgba(83, 137, 156, 0.34);
+  --skin-decor: "✦  ~  ✧";
+  --skin-decor-color: rgba(109, 156, 184, 0.45);
+  --skin-accent-gradient: linear-gradient(180deg, #A5CDD9 0%, #72A8BD 100%);
+  --skin-accent-border: rgba(78, 134, 153, 0.40);
+  --skin-hover-bg: rgba(185, 217, 214, 0.34);
+  --skin-table-head: rgba(166, 202, 186, 0.22);
+  --skin-resize-bg: rgba(178, 211, 213, 0.22);
+  --skin-resize-line: rgba(109, 156, 184, 0.45);
+  --skin-scrollbar: rgba(109, 156, 184, 0.34);
+  --skin-accent-text: #5E93AE;
+  --skin-warning-text: #B98743;
+  --skin-success-text: #6B9E7C;
+}
+
+.bg-theme-dusk {
+  --color-bg-primary: #F8F3FA;
+  --color-bg-secondary: #EFE7F4;
+  --color-bg-tertiary: #DDD0E8;
+  --color-bg-chat: #FBF7FC;
+  --color-bg-sidebar: #F3EBF7;
+  --color-bg-input: rgba(252, 248, 253, 0.94);
+  --color-bg-user-msg: #A894C4;
+  --color-bg-assistant-msg: rgba(251, 247, 252, 0.80);
+  --color-bg-tool: #E8E1D8;
+  --color-bg-thinking: #F4EAF8;
+  --color-bg-card: #FBF7FC;
+  --color-bg-nav-active: rgba(154, 131, 184, 0.16);
+  --color-text-primary: #4F435F;
+  --color-text-secondary: #675779;
+  --color-text-tertiary: #9483A8;
+  --color-text-muted: #756783;
+  --color-border: #C9B5DA;
+  --color-border-subtle: rgba(177, 152, 199, 0.50);
+  --color-border-focus: #9A83B8;
+  --color-accent: #9A83B8;
+  --color-accent-light: #CFBCE2;
+  --color-accent-hover: #836CA4;
+  --color-accent-glow: rgba(154, 131, 184, 0.18);
+  --color-success: #7C9B80;
+  --color-warning: #C48A53;
+  --skin-body-background:
+    radial-gradient(circle at 84% 16%, rgba(211, 180, 201, 0.30), transparent 24%),
+    radial-gradient(circle at 12% 90%, rgba(197, 203, 156, 0.22), transparent 24%),
+    linear-gradient(135deg, #FAF5FC 0%, #EDE4F3 50%, #F5EDDF 100%);
+  --skin-app-background:
+    radial-gradient(circle at 92% 12%, rgba(210, 181, 202, 0.32), transparent 23%),
+    radial-gradient(circle at 8% 98%, rgba(196, 202, 156, 0.22), transparent 22%),
+    linear-gradient(180deg, #FBF7FC 0%, #EFE7F4 100%);
+  --skin-border-strong: rgba(154, 131, 184, 0.64);
+  --skin-border-soft: rgba(154, 131, 184, 0.42);
+  --skin-dashed-border: rgba(130, 105, 160, 0.34);
+  --skin-decor: "☾  ✧  ✦";
+  --skin-decor-color: rgba(154, 131, 184, 0.45);
+  --skin-accent-gradient: linear-gradient(180deg, #CFBDE2 0%, #A891C6 100%);
+  --skin-accent-border: rgba(132, 105, 163, 0.40);
+  --skin-hover-bg: rgba(211, 192, 222, 0.34);
+  --skin-table-head: rgba(201, 186, 213, 0.24);
+  --skin-resize-bg: rgba(210, 190, 222, 0.22);
+  --skin-resize-line: rgba(154, 131, 184, 0.45);
+  --skin-scrollbar: rgba(154, 131, 184, 0.34);
+  --skin-accent-text: #8B73AA;
+  --skin-warning-text: #C48A53;
+  --skin-success-text: #7C9B80;
+}
+
+.bg-theme-ink {
+  --color-bg-primary: #F7F4EC;
+  --color-bg-secondary: #ECE8DD;
+  --color-bg-tertiary: #DDD8CB;
+  --color-bg-chat: #FBF8F0;
+  --color-bg-sidebar: #F0EBDD;
+  --color-bg-input: rgba(252, 249, 240, 0.94);
+  --color-bg-user-msg: #8B949A;
+  --color-bg-assistant-msg: rgba(251, 248, 240, 0.80);
+  --color-bg-tool: #E5E0D2;
+  --color-bg-thinking: #F0EBDD;
+  --color-bg-card: #FBF8F0;
+  --color-bg-nav-active: rgba(126, 135, 146, 0.16);
+  --color-text-primary: #3F4548;
+  --color-text-secondary: #565E62;
+  --color-text-tertiary: #858D8E;
+  --color-text-muted: #687174;
+  --color-border: #B9B3A5;
+  --color-border-subtle: rgba(159, 154, 143, 0.50);
+  --color-border-focus: #7E8792;
+  --color-accent: #7E8792;
+  --color-accent-light: #B7BFC5;
+  --color-accent-hover: #66717A;
+  --color-accent-glow: rgba(126, 135, 146, 0.18);
+  --color-success: #758B68;
+  --color-warning: #AA7F48;
+  --skin-body-background:
+    radial-gradient(circle at 14% 88%, rgba(190, 196, 176, 0.26), transparent 24%),
+    radial-gradient(circle at 90% 14%, rgba(171, 178, 184, 0.20), transparent 24%),
+    linear-gradient(135deg, #F9F6ED 0%, #ECE8DD 52%, #F5F2E9 100%);
+  --skin-app-background:
+    radial-gradient(circle at 10% 100%, rgba(188, 195, 174, 0.28), transparent 22%),
+    radial-gradient(circle at 95% 12%, rgba(170, 178, 184, 0.22), transparent 23%),
+    linear-gradient(180deg, #FBF8F0 0%, #ECE8DD 100%);
+  --skin-border-strong: rgba(126, 135, 146, 0.58);
+  --skin-border-soft: rgba(126, 135, 146, 0.38);
+  --skin-dashed-border: rgba(98, 108, 116, 0.30);
+  --skin-decor: "◇  ·  ✧";
+  --skin-decor-color: rgba(126, 135, 146, 0.42);
+  --skin-accent-gradient: linear-gradient(180deg, #B7BFC5 0%, #84909A 100%);
+  --skin-accent-border: rgba(101, 111, 120, 0.38);
+  --skin-hover-bg: rgba(205, 201, 189, 0.34);
+  --skin-table-head: rgba(190, 188, 176, 0.24);
+  --skin-resize-bg: rgba(195, 192, 181, 0.22);
+  --skin-resize-line: rgba(126, 135, 146, 0.42);
+  --skin-scrollbar: rgba(126, 135, 146, 0.34);
+  --skin-accent-text: #717C86;
+  --skin-warning-text: #AA7F48;
+  --skin-success-text: #758B68;
+}
+
+.bg-theme-vscode {
+  --color-bg-primary: #1E1E1E;
+  --color-bg-secondary: #252526;
+  --color-bg-tertiary: #2D2D30;
+  --color-bg-chat: #1E1E1E;
+  --color-bg-sidebar: #252526;
+  --color-bg-input: #1E1E1E;
+  --color-bg-user-msg: #0E639C;
+  --color-bg-assistant-msg: #1E1E1E;
+  --color-bg-tool: #252526;
+  --color-bg-thinking: #252526;
+  --color-bg-card: #1E1E1E;
+  --color-bg-nav-active: rgba(0, 122, 204, 0.18);
+  --color-text-primary: #D4D4D4;
+  --color-text-secondary: #CCCCCC;
+  --color-text-tertiary: #858585;
+  --color-text-inverse: #FFFFFF;
+  --color-text-muted: #A6A6A6;
+  --color-border: #3C3C3C;
+  --color-border-subtle: #2D2D30;
+  --color-border-focus: #007ACC;
+  --color-accent: #007ACC;
+  --color-accent-light: #3794FF;
+  --color-accent-hover: #1177BB;
+  --color-accent-glow: rgba(0, 122, 204, 0.22);
+  --color-success: #89D185;
+  --color-error: #F48771;
+  --color-warning: #CCA700;
+  --color-gradient-start: #007ACC;
+  --color-gradient-mid: #168BD1;
+  --color-gradient-end: #3794FF;
+  --skin-body-background: #1E1E1E;
+  --skin-app-background: #1E1E1E;
+  --skin-border-strong: #2D2D30;
+  --skin-border-soft: #3C3C3C;
+  --skin-dashed-border: transparent;
+  --skin-decor: "";
+  --skin-decor-color: transparent;
+  --skin-grid-line-a: transparent;
+  --skin-grid-line-b: transparent;
+  --skin-accent-gradient: linear-gradient(180deg, #0E639C 0%, #007ACC 100%);
+  --skin-accent-border: rgba(55, 148, 255, 0.36);
+  --skin-hover-bg: #2A2D2E;
+  --skin-table-head: #252526;
+  --skin-resize-bg: #252526;
+  --skin-resize-line: #3C3C3C;
+  --skin-scrollbar: #424242;
+  --skin-accent-text: #3794FF;
+  --skin-warning-text: #CCA700;
+  --skin-success-text: #89D185;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-glow: none;
+  --color-icon-slash: #FFFFFF;
+}
+
+.bg-theme-minimal {
+  --color-bg-primary: #FFFFFF;
+  --color-bg-secondary: #F7F7F8;
+  --color-bg-tertiary: #EFEFF1;
+  --color-bg-chat: #FFFFFF;
+  --color-bg-sidebar: #F7F7F8;
+  --color-bg-input: #FFFFFF;
+  --color-bg-user-msg: #111827;
+  --color-bg-assistant-msg: #FFFFFF;
+  --color-bg-tool: #F7F7F8;
+  --color-bg-thinking: #F7F7F8;
+  --color-bg-card: #FFFFFF;
+  --color-bg-nav-active: rgba(17, 24, 39, 0.06);
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-tertiary: #9CA3AF;
+  --color-text-inverse: #FFFFFF;
+  --color-text-muted: #6B7280;
+  --color-border: #E5E7EB;
+  --color-border-subtle: #ECEEF2;
+  --color-border-focus: #111827;
+  --color-accent: #111827;
+  --color-accent-light: #374151;
+  --color-accent-hover: #030712;
+  --color-accent-glow: rgba(17, 24, 39, 0.08);
+  --color-success: #059669;
+  --color-error: #DC2626;
+  --color-warning: #D97706;
+  --color-gradient-start: #111827;
+  --color-gradient-mid: #1F2937;
+  --color-gradient-end: #374151;
+  --skin-body-background: #FFFFFF;
+  --skin-app-background: #FFFFFF;
+  --skin-border-strong: #E5E7EB;
+  --skin-border-soft: #ECEEF2;
+  --skin-dashed-border: transparent;
+  --skin-decor: "";
+  --skin-decor-color: transparent;
+  --skin-grid-line-a: transparent;
+  --skin-grid-line-b: transparent;
+  --skin-accent-gradient: linear-gradient(180deg, #1F2937 0%, #111827 100%);
+  --skin-accent-border: rgba(17, 24, 39, 0.18);
+  --skin-hover-bg: #F3F4F6;
+  --skin-table-head: #F9FAFB;
+  --skin-resize-bg: #F3F4F6;
+  --skin-resize-line: #E5E7EB;
+  --skin-scrollbar: #D1D5DB;
+  --skin-accent-text: #111827;
+  --skin-warning-text: #D97706;
+  --skin-success-text: #059669;
+  --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-md: 0 8px 24px rgba(17, 24, 39, 0.06);
+  --shadow-lg: 0 16px 42px rgba(17, 24, 39, 0.08);
+  --shadow-glow: none;
+  --color-icon-slash: #FFFFFF;
+}
+
+/* ── DeepSeek: identical to minimal, blue accent swapped for black ── */
+.bg-theme-deepseek {
+  --color-bg-primary: #FFFFFF;
+  --color-bg-secondary: #F7F7F8;
+  --color-bg-tertiary: #EFEFF1;
+  --color-bg-chat: #FFFFFF;
+  --color-bg-sidebar: #F7F7F8;
+  --color-bg-input: #FFFFFF;
+  --color-bg-user-msg: #87CEFA;
+  --color-bg-assistant-msg: #FFFFFF;
+  --color-bg-tool: #F7F7F8;
+  --color-bg-thinking: #F7F7F8;
+  --color-bg-card: #FFFFFF;
+  --color-bg-nav-active: rgba(135, 206, 250, 0.07);
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-tertiary: #9CA3AF;
+  --color-text-inverse: #FFFFFF;
+  --color-text-muted: #6B7280;
+  --color-border: #E5E7EB;
+  --color-border-subtle: #ECEEF2;
+  --color-border-focus: #87CEFA;
+  --color-accent: #87CEFA;
+  --color-accent-light: #B8E2F8;
+  --color-accent-hover: #6BAED9;
+  --color-accent-glow: rgba(135, 206, 250, 0.10);
+  --color-success: #059669;
+  --color-error: #DC2626;
+  --color-warning: #D97706;
+  --color-gradient-start: #87CEFA;
+  --color-gradient-mid: #A8D8F0;
+  --color-gradient-end: #C8E8F8;
+  --skin-body-background: #FFFFFF;
+  --skin-app-background: #FFFFFF;
+  --skin-border-strong: #E5E7EB;
+  --skin-border-soft: #ECEEF2;
+  --skin-dashed-border: transparent;
+  --skin-decor: "";
+  --skin-decor-color: transparent;
+  --skin-grid-line-a: transparent;
+  --skin-grid-line-b: transparent;
+  --skin-accent-gradient: linear-gradient(180deg, #87CEFA 0%, #6BAED9 100%);
+  --skin-accent-border: rgba(135, 206, 250, 0.18);
+  --skin-hover-bg: #F3F4F6;
+  --skin-table-head: #F9FAFB;
+  --skin-resize-bg: #F3F4F6;
+  --skin-resize-line: #E5E7EB;
+  --skin-scrollbar: #D1D5DB;
+  --skin-accent-text: #6BAED9;
+  --skin-warning-text: #D97706;
+  --skin-success-text: #059669;
+  --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-md: 0 8px 24px rgba(17, 24, 39, 0.06);
+  --shadow-lg: 0 16px 42px rgba(17, 24, 39, 0.08);
+  --shadow-glow: none;
+  --color-icon-slash: #FFFFFF;
+}
+
+.bg-theme-deepseek button {
+  text-shadow: none;
+}
+
+.bg-theme-deepseek .gradient-bg {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.bg-theme-deepseek .gradient-bg::before,
+.bg-theme-deepseek .gradient-bg::after {
+  display: none;
+}
+
+.bg-theme-deepseek .bg-bg-sidebar,
+.bg-theme-deepseek .bg-bg-chat,
+.bg-theme-deepseek .bg-bg-primary,
+.bg-theme-deepseek .bg-bg-card,
+.bg-theme-deepseek .bg-bg-input {
+  background-image: none;
+}
+
+body {
+  font-family: var(--little-claude-font-family, "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", Arial, sans-serif);
+  background: var(--skin-body-background);
+}
+
+.gradient-bg {
+  position: relative;
+  background: var(--skin-app-background);
+  border: 2px solid var(--skin-border-strong);
+  border-radius: 22px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
+.gradient-bg::before {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 4px;
+  z-index: 60;
+  border: 1px dashed var(--skin-dashed-border);
+  border-radius: 18px;
+}
+
+.gradient-bg::after {
+  content: var(--skin-decor);
+  pointer-events: none;
+  position: fixed;
+  right: 26px;
+  top: 128px;
+  z-index: 1;
+  color: var(--skin-decor-color);
+  font-size: 24px;
+  letter-spacing: 12px;
+  transform: rotate(-18deg);
+}
+
+.bg-bg-sidebar,
+.bg-bg-chat,
+.bg-bg-primary,
+.bg-bg-card,
+.bg-bg-input {
+  background-image:
+    linear-gradient(var(--skin-grid-line-a) 1px, transparent 1px),
+    linear-gradient(90deg, var(--skin-grid-line-b) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+.bg-bg-sidebar {
+  border-color: var(--skin-border-soft);
+}
+
+.border-border-subtle,
+.border-border {
+  border-color: var(--skin-border-soft) !important;
+}
+
+button,
+input,
+textarea,
+select,
+[contenteditable="true"] {
+  border-color: var(--skin-border-soft);
+}
+
+button {
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+.bg-theme-vscode button {
+  text-shadow: none;
+}
+
+.bg-theme-vscode .gradient-bg {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.bg-theme-vscode .gradient-bg::before,
+.bg-theme-vscode .gradient-bg::after {
+  display: none;
+}
+
+.bg-theme-vscode .bg-bg-sidebar,
+.bg-theme-vscode .bg-bg-chat,
+.bg-theme-vscode .bg-bg-primary,
+.bg-theme-vscode .bg-bg-card,
+.bg-theme-vscode .bg-bg-input {
+  background-image: none;
+}
+
+.bg-theme-minimal button {
+  text-shadow: none;
+}
+
+.bg-theme-minimal .gradient-bg {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.bg-theme-minimal .gradient-bg::before,
+.bg-theme-minimal .gradient-bg::after {
+  display: none;
+}
+
+.bg-theme-minimal .bg-bg-sidebar,
+.bg-theme-minimal .bg-bg-chat,
+.bg-theme-minimal .bg-bg-primary,
+.bg-theme-minimal .bg-bg-card,
+.bg-theme-minimal .bg-bg-input {
+  background-image: none;
+}
+
+.rounded-lg,
+.rounded-xl,
+.rounded-2xl,
+.rounded-\[20px\] {
+  border-radius: 18px;
+}
+
+.shadow-md,
+.shadow-lg,
+.shadow-2xl {
+  box-shadow: var(--shadow-md);
+}
+
+.bg-accent,
+.bg-bg-user-msg {
+  background: var(--skin-accent-gradient) !important;
+  color: #FFF9ED;
+  border: 1px solid var(--skin-accent-border);
+}
+
+.hover\:bg-bg-secondary:hover,
+.hover\:bg-bg-tertiary:hover,
+.hover\:bg-bg-hover:hover {
+  background-color: var(--skin-hover-bg) !important;
+}
+
+.text-accent {
+  color: var(--skin-accent-text) !important;
+}
+
+.text-warning {
+  color: var(--skin-warning-text) !important;
+}
+
+.text-success {
+  color: var(--skin-success-text) !important;
+}
+
+.prose table,
+table {
+  border-color: var(--skin-border-soft);
+}
+
+.prose th,
+.prose td,
+th,
+td {
+  border-color: var(--skin-border-soft);
+}
+
+.prose th,
+thead {
+  background: var(--skin-table-head);
+}
+
+.gradient-bg > div[class*="cursor-col-resize"] {
+  background: var(--skin-resize-bg);
+}
+
+.gradient-bg > div[class*="cursor-col-resize"] > div {
+  width: 1px !important;
+  background: var(--skin-resize-line) !important;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--skin-scrollbar);
+  border-radius: 999px;
+}
+
+.preview-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.preview-icon-btn:hover:not(:disabled) {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+
+.preview-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.preview-action-btn {
+  height: 32px;
+  min-width: 40px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.preview-action-btn:hover {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+
+/* ================================================================
+   Render optimization: skip off-screen content for long lists
+   ================================================================ */
+
+/* Message bubbles and conversation items — tell the browser it can
+   skip rendering elements far outside the viewport. */
+.chat-message-item {
+  /* content-visibility: auto disabled — caused avatar positioning drift in WebView2 */
+  /* contain-intrinsic-size: auto 80px; */
+}
+
+.conversation-list-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+}
+
+/* Scroll containers that don't need size containment from children */
+/* contain: layout style disabled — may cause avatar positioning drift in WebView2 */
+.chat-scroll-container {
+  /* contain: layout style; */
+}
+
+/* GPU-composited animations only use transform/opacity,
+   promote to own layer to avoid repainting other elements. */
+.animate-spin,
+.animate-ping {
+  will-change: transform;
+}
+
+/* Search result jump highlight — background flash, can't be clipped by overflow */
+@keyframes search-highlight-blink {
+  0%   { box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.7), 0 0 20px rgba(59, 130, 246, 0.3); }
+  15%  { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0.15), 0 0 30px rgba(59, 130, 246, 0.05); }
+  30%  { box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.65), 0 0 18px rgba(59, 130, 246, 0.25); }
+  50%  { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.1), 0 0 12px rgba(59, 130, 246, 0.05); }
+  70%  { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.4), 0 0 10px rgba(59, 130, 246, 0.15); }
+  100% { box-shadow: 0 0 0 0px rgba(59, 130, 246, 0), 0 0 0px rgba(59, 130, 246, 0); }
+}
+.search-highlight-blink {
+  animation: search-highlight-blink 2s ease-out;
+  position: relative;
+  z-index: 100000; /* above DynamicBackground wallpaper (z-99999) */
+}
