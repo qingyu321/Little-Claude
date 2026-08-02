@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": []
+    "targets": "all"
   },
   "plugins": {}
 }

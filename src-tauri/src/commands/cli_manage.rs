@@ -5,10 +5,11 @@ use tokio::process::Command;
 use futures_util::StreamExt;
 
 use crate::{
-    build_enriched_path, build_smart_http_client, claude_needs_cmd_wrapper, cli_download_dir,
-    find_claude_binary, strip_ansi, app_data_dir, git_download_dir, extract_node_archive,
-    find_claude_binary_ordered, find_git_bash, CLI_GCS_BASE, CLI_MIRROR_BASE,
+    build_enriched_path, build_smart_http_client, cli_download_dir, find_claude_binary, strip_ansi,
+    app_data_dir, extract_node_archive, find_claude_binary_ordered, CLI_GCS_BASE, CLI_MIRROR_BASE,
 };
+#[cfg(target_os = "windows")]
+use crate::{claude_needs_cmd_wrapper, find_git_bash, git_download_dir};
 use crate::backends;
 use crate::commands::cli_resolver;
 use crate::commands::session::{encode_project_name, load_tracked_sessions, tracked_sessions_path};

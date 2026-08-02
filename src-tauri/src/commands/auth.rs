@@ -5,7 +5,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use std::process::Stdio;
 
-use crate::{build_enriched_path, claude_needs_cmd_wrapper, find_claude_binary, strip_ansi};
+use crate::{build_enriched_path, find_claude_binary, strip_ansi};
+#[cfg(target_os = "windows")]
+use crate::claude_needs_cmd_wrapper;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::shell_single_quote;
 
