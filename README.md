@@ -23,11 +23,11 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 ### v1.0.1 ~ v1.1.0
 
 - 以早期功能基线重新发布，版本号从 `1.0.x` 开始
-- 完整更新说明见 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases)
+- 完整更新说明见 [GitHub Releases](https://github.com/qingyu321/Little-Claude-Updater/releases)
 
 ## 下载
 
-请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载对应平台的安装包：
+请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude-Updater/releases) 下载对应平台的安装包：
 
 - Windows：NSIS 安装版 / 便携版（x64）
 - macOS：Apple Silicon / Intel（dmg）

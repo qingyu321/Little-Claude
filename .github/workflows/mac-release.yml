@@ -75,7 +75,16 @@ jobs:
           shasum -a 256 release-assets/* > "release-assets/little-claude-${{ inputs.tag }}-macos-${{ matrix.arch }}.sha256.txt"
           ls -lh release-assets
 
+      # 发布到公开的 Little-Claude-Updater 仓库（匿名可下载，驱动自动更新）
       - name: Upload release assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" release-assets/* --repo "${{ github.repository }}" --clobber
+          GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
+          UPDATER_REPO: qingyu321/Little-Claude-Updater
+        run: |
+          if gh release view "${{ inputs.tag }}" --repo "$UPDATER_REPO" >/dev/null 2>&1; then
+            gh release upload "${{ inputs.tag }}" release-assets/* --repo "$UPDATER_REPO" --clobber
+          else
+            gh release create "${{ inputs.tag }}" release-assets/* \
+              --repo "$UPDATER_REPO" --title "Little Claude ${{ inputs.tag }}" \
+              --draft --notes "See the assets to download and install this version."
+          fi

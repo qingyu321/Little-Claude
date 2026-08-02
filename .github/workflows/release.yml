@@ -89,21 +89,22 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ steps.edition.outputs.release_name }}
-          releaseBody: 'See the assets to download and install this version.'
-          releaseDraft: true
-          prerelease: ${{ steps.edition.outputs.prerelease == 'true' }}
+          # 只构建，不在私有仓库创建 release；产物由各平台后续步骤
+          # 上传到公开的 Little-Claude-Updater 仓库（匿名可下载，驱动自动更新）
           args: ${{ matrix.args }} ${{ steps.edition.outputs.extra_args }}
 
-      # Windows only: sign the NSIS installer with the updater private key
-      # and push an updated latest.json to main (drives in-app auto-update).
-      - name: Sign installer and update latest.json (Windows)
+      # Windows only: sign the NSIS installer with the updater private key,
+      # publish it (with latest.json) to the PUBLIC updater repo
+      # qingyu321/Little-Claude-Updater, which drives in-app auto-update.
+      - name: Publish Windows installer to updater repo (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
+          UPDATER_REPO: qingyu321/Little-Claude-Updater
+          RELEASE_TITLE: ${{ steps.edition.outputs.release_name }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -114,7 +115,7 @@ jobs:
           VERSION="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           FILENAME="$(basename "$SETUP")"
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${FILENAME}"
+          URL="https://github.com/${UPDATER_REPO}/releases/download/${TAG}/${FILENAME}"
           export SIG VERSION PUB_DATE URL
           node - <<'NODE'
           const fs = require('fs');
@@ -130,10 +131,42 @@ jobs:
           };
           fs.writeFileSync('latest.json', JSON.stringify(json, null, 4) + '\n');
           NODE
-          git fetch origin main
-          git checkout -B main origin/main
+          # create-or-upload release in the public updater repo
+          if gh release view "$TAG" --repo "$UPDATER_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$SETUP" "$SETUP.sig" --repo "$UPDATER_REPO" --clobber
+          else
+            gh release create "$TAG" "$SETUP" "$SETUP.sig" \
+              --repo "$UPDATER_REPO" --title "$RELEASE_TITLE" \
+              --draft --notes "See the assets to download and install this version."
+          fi
+          # push latest.json to the public updater repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${UPDATER_REPO}.git" updater-repo
+          cp latest.json updater-repo/
+          cd updater-repo
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add latest.json
           git commit -m "chore(updater): update latest.json for ${TAG}" || echo "No latest.json changes"
           git push origin main
+
+      # Non-Windows: publish platform artifacts (dmg/AppImage/deb/rpm) to
+      # the same PUBLIC updater repo, so installers stay downloadable.
+      - name: Publish artifacts to updater repo
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
+          UPDATER_REPO: qingyu321/Little-Claude-Updater
+          RELEASE_TITLE: ${{ steps.edition.outputs.release_name }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mapfile -t ASSETS < <(find src-tauri/target -path '*/release/bundle/*' -type f)
+          echo "Uploading ${#ASSETS[@]} artifacts"
+          if gh release view "$TAG" --repo "$UPDATER_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "$UPDATER_REPO" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --repo "$UPDATER_REPO" --title "$RELEASE_TITLE" \
+              --draft --notes "See the assets to download and install this version."
+          fi
