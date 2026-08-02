@@ -1,0 +1,15 @@
+{
+    "version": "1.1.1",
+    "notes": "",
+    "pub_date": "2026-08-02T16:17:09Z",
+    "platforms": {
+        "windows-x86_64-nsis": {
+            "url": "https://github.com/qingyu321/Little-Claude/releases/download/v1.1.1-alpha.1/Little Claude Alpha_1.1.1_x64-setup.exe",
+            "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZVTkVkb1J6WkRVbEZHZG5sNlFuZEtUMUl3UTI4dlVuRlRNRVJIYm1OYVRuQlhTMjlXYWt0MmJXbDFkSEpyZFRabWFrRnZVRXBSV0dGS1ltUndNMmtyYTBoVGNtVnZNMjFHVDFSTFJsaDBNRkF5VWpSWFdGRlNNVFY0ZUhaQ2QxRlpQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnMU5qZzNOREk0Q1dacGJHVTZUR2wwZEd4bElFTnNZWFZrWlNCQmJIQm9ZVjh4TGpFdU1WOTROalF0YzJWMGRYQXVaWGhsQ2twcVVrMHZjMjFtV0d0ek9IVTRaR2hyVDBWT2QwcFdUMngyV1VSc2JTc3hibTQ0SzA5U2JHTnFXVU16UmtOclJIcDBNaTlDYW5wNFdEVkdjelprUjNOV1FtSmFUR041V25kdGF5OVplamhyZFdwMFowRjNQVDBL"
+        },
+        "windows-x86_64": {
+            "url": "https://github.com/qingyu321/Little-Claude/releases/download/v1.1.1-alpha.1/Little Claude Alpha_1.1.1_x64-setup.exe",
+            "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZVTkVkb1J6WkRVbEZHZG5sNlFuZEtUMUl3UTI4dlVuRlRNRVJIYm1OYVRuQlhTMjlXYWt0MmJXbDFkSEpyZFRabWFrRnZVRXBSV0dGS1ltUndNMmtyYTBoVGNtVnZNMjFHVDFSTFJsaDBNRkF5VWpSWFdGRlNNVFY0ZUhaQ2QxRlpQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnMU5qZzNOREk0Q1dacGJHVTZUR2wwZEd4bElFTnNZWFZrWlNCQmJIQm9ZVjh4TGpFdU1WOTROalF0YzJWMGRYQXVaWGhsQ2twcVVrMHZjMjFtV0d0ek9IVTRaR2hyVDBWT2QwcFdUMngyV1VSc2JTc3hibTQ0SzA5U2JHTnFXVU16UmtOclJIcDBNaTlDYW5wNFdEVkdjelprUjNOV1FtSmFUR041V25kdGF5OVplamhyZFdwMFowRjNQVDBL"
+        }
+    }
+}
