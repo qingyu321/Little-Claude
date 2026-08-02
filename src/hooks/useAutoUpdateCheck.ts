@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
+import { APP_VERSION } from '../lib/version';
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const APP_VERSION = '1.1.0'; // synced with tauri.conf.json
 
 // Primary: GitHub Releases API
 const GITHUB_API = 'https://api.github.com/repos/qingyu321/Little-Claude/releases/latest';

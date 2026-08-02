@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
 import { APP_NAME } from '../../lib/edition';
+import { APP_VERSION } from '../../lib/version';
 import { ChangelogModal } from '../shared/ChangelogModal';
 import { isPermissionError, isNetworkError } from './settingsUtils';
 import { GeneralTab } from './GeneralTab';
@@ -196,7 +197,6 @@ export function SettingsPanel() {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UpdateStatus = 'idle' | 'checking' | 'available' | 'latest' | 'error';
-const APP_VERSION = '1.0.8'; // synced with tauri.conf.json
 
 // Primary: GitHub Releases API
 const GITHUB_API = 'https://api.github.com/repos/qingyu321/Little-Claude/releases/latest';

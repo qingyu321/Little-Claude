@@ -2,11 +2,16 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import JavaScriptObfuscator from "javascript-obfuscator";
+import { readFileSync } from 'node:fs';
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const edition = process.env.EDITION || 'stable';
+// Single source of truth for the app version (mirrors src-tauri/tauri.conf.json)
+const pkgVersion = (JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf-8'),
+)).version as string;
 
 /** Production-only JS obfuscation: makes extracted frontend code unreadable. */
 function obfuscatePlugin(): import('vite').Plugin {
@@ -48,6 +53,7 @@ export default defineConfig(async () => ({
   define: {
     __APP_EDITION__: JSON.stringify(edition),
     __APP_NAME__: JSON.stringify(edition === 'alpha' ? 'Little Claude Alpha' : 'Little Claude'),
+    __APP_VERSION__: JSON.stringify(pkgVersion),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
