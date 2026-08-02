@@ -75,10 +75,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      # 直接 shell 构建（含 bundle 安装包产物）。不用 tauri-action：
+      # 它的 build-only 模式（无 tagName）会自动追加 --no-bundle，
+      # 导致 release/bundle 目录不存在，后续签名/发布步骤找不到安装包。
       - name: Build the app
-        uses: tauri-apps/tauri-action@v0
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EDITION: ${{ steps.edition.outputs.edition }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -88,10 +90,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          # 只构建，不在私有仓库创建 release；产物由各平台后续步骤
-          # 上传到公开的 Little-Claude 仓库（匿名可下载，驱动自动更新）
-          args: ${{ matrix.args }} ${{ steps.edition.outputs.extra_args }}
+        run: pnpm tauri build ${{ matrix.args }} ${{ steps.edition.outputs.extra_args }}
 
       # Windows only: sign the NSIS installer with the updater private key,
       # publish it (with latest.json) to the PUBLIC updater repo
