@@ -51,6 +51,14 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **版本号构建时注入** — 修复设置页与更新检查显示旧版本号的漂移问题
 - **发布链路迁移** — 自动更新检查与发布目标统一指向公开仓库，更新链路由 CI 全自动维护
 
+**8月3日修复批次：**
+
+- **回退不丢上下文** — Rewind 回退后保留 CLI 会话上下文（截断会话历史而非丢弃），回退到任意轮次续聊，Claude 都记得回退点之前的内容
+- **头像持久化** — 修复重启后自定义头像丢失的问题（zustand persist 恢复时机缺陷，名字/主题正常而头像缺失的根因）
+- **发布链路全线打通** — CI 自动构建、签名、发布安装包并维护 `latest.json`，修复资产名 sanitize 匹配、stable 构建缺图标、alpha 预发布标记等发布链问题
+- **会话删除清理** — 删除会话后关联标签页自动解绑，不再尝试恢复已删除的会话
+- **个人统计头像显示** — 个人统计弹窗头像与全局一致显示（data URL → blob URL 转换补齐）
+
 ### v1.1.0-alpha.1 (2026-08-02) — 自动更新就位
 
 - 全新的更新签名密钥，CI 自动为安装包签名并维护 `latest.json`，应用内一键升级
@@ -112,3 +120,34 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 1. 从 Releases 下载并安装对应平台的安装包。
 2. 打开 Little Claude，在设置中配置 API Provider（或使用本机已安装的 Claude Code CLI）。
 3. 选择项目文件夹，开始对话。
+
+## 本地开发
+
+环境要求：
+
+- Node.js、pnpm、Rust（Tauri 2 构建环境）
+- Windows 打包需要 MSVC Build Tools
+
+常用命令：
+
+```bash
+pnpm install        # 安装依赖
+pnpm build          # 前端类型检查 + Vite 构建
+pnpm tauri dev      # 开发模式（Vite dev server + Tauri 应用）
+pnpm tauri build    # 构建生产应用
+```
+
+Rust 侧检查：
+
+```bash
+cd src-tauri && cargo check && cargo clippy
+```
+
+## 许可证
+
+本项目基于 **Apache License 2.0** 授权，请阅读 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
+## 致谢
+
+- [TOKENICODE](https://github.com/yiliqi78/TOKENICODE)（TinyZ / yiliqi78）：本项目的代码基础，感谢原作者的辛勤付出与开源贡献
+- [Tauri](https://tauri.app)、[React](https://react.dev) 与 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 生态
