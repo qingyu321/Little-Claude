@@ -1359,8 +1359,11 @@ export function InputBar() {
 
     // Permission prompts are now handled via SDK control protocol (P1-03/P1-04).
     // The Rust backend intercepts control_request messages from stdout and emits
-    // them on the claude:permission_request channel, which is handled by
-    // onPermissionRequest above. Stderr is now purely for diagnostic logging.
+    // them as special messages (type: little_claude_permission_request) on the
+    // regular claude:stream:{stdinId} channel, which useStreamProcessor handles
+    // (foreground + background routing). The claude:permission_request channel
+    // is no longer emitted by the backend; onPermissionRequest above is kept
+    // for legacy sessions only. Stderr is now purely for diagnostic logging.
   }, []);
 
   // Keep stderr ref in sync so auto-retry logic in handleStreamMessage can call it

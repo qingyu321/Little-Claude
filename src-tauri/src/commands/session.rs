@@ -737,8 +737,14 @@ pub async fn start_claude_session(
                             );
 
                             // Emit as a special stream message (reuses the working stream channel)
+                            // NOTE: type MUST match what the frontend expects in
+                            // useStreamProcessor (KNOWN_STREAM_TYPES / switch cases).
+                            // It was left as "tokenicode_permission_request" when the
+                            // frontend was renamed to "little_claude_permission_request",
+                            // silently dropping every permission request (PermissionCard
+                            // / QuestionCard / plan auto-approve never appeared).
                             let perm_payload = serde_json::json!({
-                                "type": "tokenicode_permission_request",
+                                "type": "little_claude_permission_request",
                                 "request_id": request_id,
                                 "tool_name": tool_name,
                                 "input": input,
