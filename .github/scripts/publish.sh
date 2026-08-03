@@ -51,16 +51,24 @@ echo "release id: $RID"
 
 for f in "${ASSETS[@]}"; do
   name="$(basename "$f")"
+  # GitHub sanitizes asset names on upload (spaces -> dots, illegal chars
+  # -> underscores).  Match and upload the SANITIZED name so clobber finds
+  # assets left by earlier runs — the v1.1.1-alpha.1 failure was exactly
+  # this: clobber matched the raw space name, GitHub had stored the dot
+  # name, so the upload 422'd on the same-name asset five times.
+  asset_name="${name// /\.}"
   # clobber: drop a same-name asset left by an earlier run
   gh api "repos/${REPO}/releases/${RID}/assets" --paginate -q \
-    ".[] | select(.name == \"${name}\") | .id" | while read -r aid; do
+    ".[] | select(.name == \"${asset_name}\") | .id" | while read -r aid; do
       gh api -X DELETE "repos/${REPO}/releases/assets/${aid}" >/dev/null || true
     done
-  enc="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$name")"
+  enc="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$asset_name")"
   ok=0
   for try in 1 2 3 4 5; do
+    # stderr is NOT swallowed so a failing upload shows gh's HTTP error
+    # (e.g. "HTTP 422") in the Actions log instead of a bare retry line.
     if gh api -X POST -H "Content-Type: application/octet-stream" --input "$f" \
-        "uploads.github.com/repos/${REPO}/releases/${RID}/assets?name=${enc}" >/dev/null 2>&1; then
+        "uploads.github.com/repos/${REPO}/releases/${RID}/assets?name=${enc}" >/dev/null; then
       ok=1
       break
     fi
