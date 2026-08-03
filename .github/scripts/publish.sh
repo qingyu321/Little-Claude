@@ -11,13 +11,14 @@
 #    the LIST endpoint (which sees drafts) and upload with clobber semantics
 #    (delete same-name asset first) plus retries.
 #
-# Usage: publish.sh <tag> <repo> <title>
+# Usage: publish.sh <tag> <repo> <title> [prerelease]
 # Env:  GH_TOKEN must have write access to <repo>.
 set -euo pipefail
 
 TAG="$1"
 REPO="$2"
 TITLE="$3"
+PRERELEASE="${4:-false}"
 
 mapfile -t ASSETS < <(find src-tauri/target -path '*/release/bundle/*' -type f \( \
   -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o \
@@ -30,12 +31,16 @@ echo "Uploading ${#ASSETS[@]} assets:"
 for f in "${ASSETS[@]}"; do echo "  $f"; done
 
 release_id() {
-  gh api "repos/${REPO}/releases" --paginate -q ".[] | select(.tag_name == \"${TAG}\") | .id" | head -1
+  # `|| true`: with pipefail, `head -1` exiting early SIGPIPEs gh once the
+  # release list grows past one page (>31 releases) — without it the pipeline
+  # fails and set -e kills the script.
+  gh api "repos/${REPO}/releases" --paginate -q ".[] | select(.tag_name == \"${TAG}\") | .id" | head -1 || true
 }
 
 RID="$(release_id)"
 if [ -z "$RID" ]; then
   if RID="$(gh release create "$TAG" --repo "$REPO" --title "$TITLE" --draft \
+      --prerelease "$PRERELEASE" \
       --notes "See the assets to download and install this version." --json id -q .id 2>/dev/null)"; then
     echo "created release $TAG (id=$RID)"
   else

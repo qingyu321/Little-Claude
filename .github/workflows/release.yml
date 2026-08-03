@@ -80,6 +80,7 @@ jobs:
           GH_TOKEN: ${{ secrets.UPDATER_REPO_TOKEN }}
           UPDATER_REPO: qingyu321/Little-Claude
           RELEASE_TITLE: ${{ steps.edition.outputs.release_name }}
+          PRERELEASE: ${{ steps.edition.outputs.prerelease }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -87,7 +88,7 @@ jobs:
           echo "Signing installer: $SETUP"
           npx tauri signer sign "$SETUP" >/dev/null
           # idempotent create/upload via the shared publisher (clobbers stale assets)
-          bash .github/scripts/publish.sh "$TAG" "$UPDATER_REPO" "$RELEASE_TITLE"
+          bash .github/scripts/publish.sh "$TAG" "$UPDATER_REPO" "$RELEASE_TITLE" "$PRERELEASE"
           SIG="$(base64 -w0 "$SETUP.sig")"
           VERSION="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
