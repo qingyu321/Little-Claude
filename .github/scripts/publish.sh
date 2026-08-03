@@ -48,13 +48,29 @@ release_id() {
 
 RID="$(release_id)"
 if [ -z "$RID" ]; then
-  if RID="$(gh release create "$TAG" --repo "$REPO" --title "$TITLE" --draft \
-      "${PRERELEASE_ARGS[@]}" \
-      --notes "See the assets to download and install this version." --json id -q .id 2>/dev/null)"; then
-    echo "created release $TAG (id=$RID)"
+  # 常态是 tag 触发——tag 已存在但无 release 对象时，gh release create 只报
+  # "raced with a parallel job" 然后放弃（run 11 即此），而 GitHub API 允许
+  # 直接 POST 把 release 挂到已存在的 tag 上（v1.0.1~v1.1.0 就是这么发布的）。
+  # 所以 API 优先，gh release create 退为 tag 不存在（workflow_dispatch）时的兜底。
+  PRERELEASE_BOOL=false
+  if [ "$PRERELEASE" = "true" ]; then
+    PRERELEASE_BOOL=true
+  fi
+  if RID="$(gh api -X POST "repos/${REPO}/releases" \
+      -f tag_name="$TAG" -f name="$TITLE" -F draft=true \
+      -F prerelease="$PRERELEASE_BOOL" \
+      -f body="See the assets to download and install this version." \
+      -q .id 2>/dev/null)"; then
+    echo "created release $TAG via API (id=$RID)"
   else
-    echo "release create raced with a parallel job; resolving via list..."
-    RID="$(release_id)"
+    if RID="$(gh release create "$TAG" --repo "$REPO" --title "$TITLE" --draft \
+        "${PRERELEASE_ARGS[@]}" \
+        --notes "See the assets to download and install this version." --json id -q .id 2>/dev/null)"; then
+      echo "created release $TAG (id=$RID)"
+    else
+      echo "release create raced with a parallel job; resolving via list..."
+      RID="$(release_id)"
+    fi
   fi
 fi
 if [ -z "$RID" ]; then
