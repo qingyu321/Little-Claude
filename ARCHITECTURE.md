@@ -228,7 +228,7 @@ User types follow-up → bridge.sendStdin(sessionId, message)
 ### Permission Request Flow (SDK Control Protocol)
 ```
 CLI stdout: control_request { subtype: "can_use_tool", tool_name, input }
-  → Rust intercepts, emits tokenicode_permission_request on stream channel
+  → Rust intercepts, emits little_claude_permission_request on stream channel
   → Frontend renders PermissionCard with approve/deny buttons
   → User clicks → bridge.respondPermission(sessionId, requestId, allow, updatedInput)
   → Rust sends control_response via StdinManager → CLI proceeds
