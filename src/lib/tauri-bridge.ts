@@ -683,6 +683,16 @@ export const bridge = {
       invoke<string>('rewind_files', { sessionId, checkpointUuid: userMessageId, cwd }),
     ),
 
+  // Truncate the CLI session JSONL to just before the given user turn (1-based),
+  // so `--resume` after a rewind rebuilds only the pre-rewind history.
+  // Returns null when the whole history was cleared (file deleted).
+  truncateSessionHistory: (sessionId: string, projectDir: string, truncateBeforeTurn: number) =>
+    invoke<number | null>('truncate_session_history', {
+      sessionId,
+      projectDir,
+      truncateBeforeTurn,
+    }),
+
   // Set macOS dock icon from base64-encoded PNG
   setDockIcon: (pngBase64: string) =>
     invoke<void>('set_dock_icon', { pngBase64 }),

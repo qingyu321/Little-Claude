@@ -21,6 +21,7 @@ type LogChannel =
   | 'auto-compact'
   | 'provider'
   | 'file-tree'
+  | 'rewind'
   | 'general';
 
 const isProduction: boolean = import.meta.env.PROD;

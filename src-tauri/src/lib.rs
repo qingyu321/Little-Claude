@@ -7,7 +7,7 @@ mod protocol;
 use commands::{ApiProvider, ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager, WatcherManager};
 use commands::session::cleanup_tracked_sessions;
 use commands::video_analysis::install_bundled_video_analysis_skill;
-use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, dismiss_video_analysis_runtime_prompt, download_speech_runtime, download_video_analysis_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_video_analysis_multimodal_config, get_video_analysis_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_video_analysis_skill_dir, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_temp_file, save_video_analysis_multimodal_config, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, set_video_analysis_acceleration, set_video_analysis_asr_model, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
+use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, dismiss_video_analysis_runtime_prompt, download_speech_runtime, download_video_analysis_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_video_analysis_multimodal_config, get_video_analysis_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_video_analysis_skill_dir, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_temp_file, save_video_analysis_multimodal_config, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, set_video_analysis_acceleration, set_video_analysis_asr_model, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
 use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
@@ -1846,6 +1846,7 @@ pub fn run() {
             translate_skill_markdown,
             run_git_command,
             rewind_files,
+            truncate_session_history,
             set_dock_icon,
             run_claude_command,
             run_claude_plugin_command,
@@ -1923,7 +1924,9 @@ pub fn run() {
 #[cfg(test)]
 mod decode_tests {
     use crate::commands::provider::provider_messages_endpoint;
-    use crate::commands::session::{decode_project_name, encode_project_name};
+    use crate::commands::session::{
+        decode_project_name, encode_project_name, truncate_jsonl_content,
+    };
 
     // ── encode_project_name tests ─────────────────────────────
 
@@ -2055,5 +2058,81 @@ mod decode_tests {
         std::fs::create_dir_all(&target).unwrap();
         assert_roundtrip(&target);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── truncate_jsonl_content tests ─────────────────────────────
+
+    const TURN1: &str = r#"{"type":"user","userType":"external","message":{"role":"user","content":[{"type":"text","text":"q1"}]}}"#;
+    const ASST1: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a1"}]}}"#;
+    // Real CLI 2.1.220 SDK-mode shape: tool_result lines are ALSO
+    // userType:"external" — only their content (tool_result blocks) gives
+    // them away. They must NOT count as user turns.
+    const TOOLRES: &str = r#"{"type":"user","userType":"external","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#;
+    // System-injected continuation summary (compaction) — not a user turn.
+    const SYSINJ: &str = r#"{"type":"user","userType":"external","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+    const TURN2: &str = r#"{"type":"user","userType":"external","message":{"role":"user","content":[{"type":"text","text":"q2"}]}}"#;
+    const ASST2: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a2"}]}}"#;
+    const TURN3: &str = r#"{"type":"user","userType":"external","message":{"role":"user","content":[{"type":"text","text":"q3"}]}}"#;
+
+    fn session_jsonl() -> String {
+        format!("{}\n{}\n{}\n{}\n{}\n{}\n", TURN1, ASST1, TOOLRES, TURN2, ASST2, TURN3)
+    }
+
+    #[test]
+    fn test_truncate_keeps_before_turn() {
+        // 3 real turns → truncate before turn 3 keeps turns 1-2 complete
+        // (including the tool_result line, which must NOT count as a turn).
+        let content = session_jsonl();
+        let kept = truncate_jsonl_content(&content, 3).unwrap().unwrap();
+        let expected = format!("{}\n{}\n{}\n{}\n{}\n", TURN1, ASST1, TOOLRES, TURN2, ASST2);
+        assert_eq!(kept, expected);
+    }
+
+    #[test]
+    fn test_truncate_tool_result_not_a_turn() {
+        // A session whose only "user" lines are tool_results has zero turns.
+        let content = format!("{}\n{}\n", TOOLRES, TOOLRES);
+        let err = truncate_jsonl_content(&content, 1).unwrap_err();
+        assert!(err.contains("only 0 user turns"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_truncate_system_injection_not_a_turn() {
+        // A continuation summary between real turns must not shift the count:
+        // turns are TURN1, TURN2, TURN3 — the injected line is skipped.
+        let content = format!("{}\n{}\n{}\n{}\n{}\n", TURN1, ASST1, SYSINJ, TURN2, TURN3);
+        let kept = truncate_jsonl_content(&content, 3).unwrap().unwrap();
+        // Truncate before turn 3 → drop TURN3, keep everything before it.
+        let expected = format!("{}\n{}\n{}\n{}\n", TURN1, ASST1, SYSINJ, TURN2);
+        assert_eq!(kept, expected);
+    }
+
+    #[test]
+    fn test_truncate_keeps_crlf_line_endings() {
+        // Windows CLI writes \r\n; the truncated file must keep them so the
+        // CLI's own parser sees byte-identical lines.
+        let content = format!("{}\r\n{}\r\n{}\r\n", TURN1, ASST1, TURN2);
+        let kept = truncate_jsonl_content(&content, 2).unwrap().unwrap();
+        assert_eq!(kept, format!("{}\r\n{}\r\n", TURN1, ASST1));
+    }
+
+    #[test]
+    fn test_truncate_first_turn_deletes_all() {
+        // Rewound before turn 1: entire history dropped → None (caller deletes file).
+        let content = session_jsonl();
+        assert_eq!(truncate_jsonl_content(&content, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn test_truncate_turn_out_of_range() {
+        let content = session_jsonl(); // 3 turns
+        let err = truncate_jsonl_content(&content, 5).unwrap_err();
+        assert!(err.contains("only 3 user turns"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_truncate_zero_rejected() {
+        let err = truncate_jsonl_content("x\n", 0).unwrap_err();
+        assert!(err.contains("must be >= 1"), "unexpected error: {}", err);
     }
 }

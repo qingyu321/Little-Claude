@@ -1036,12 +1036,15 @@ export function InputBar() {
         // If we have an existing sessionId (loaded historical session), resume it.
         // Only use it as resume_session_id if it looks like a real CLI session ID (UUID),
         // not a desk-generated ID like "desk_xxx".
-        // Also verify that the tab was explicitly bound to this sessionId —
-        // otherwise it's a stale ID from a previous session in this tab.
+        // The tab's own sessionMeta is the binding — comparing tabId (a
+        // draft_*/desk_* tab handle) against the CLI UUID wrongly rejected
+        // most tabs (only sessions opened from the conversation list matched),
+        // so after a rewind (process killed, history truncated) the next
+        // message would spawn a fresh context-less session instead of
+        // --resume'ing the pre-rewind history.
         const rawSessionId = getActiveTabState().sessionMeta.sessionId;
         let existingSessionId: string | undefined = rawSessionId
           && !rawSessionId.startsWith('desk_')
-          && tabId === rawSessionId  // only if tab was opened FOR this session
           ? rawSessionId
           : undefined;
 

@@ -1879,3 +1879,179 @@ pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
     }
     Ok(messages)
 }
+
+/// System-injected user lines the frontend's session-loader filters out
+/// (mirror of `isSystemText` in session-loader.ts): continuation summaries,
+/// `<task-notification>` payloads, tool-definition dumps, raw "Human:" leaks.
+/// These must NOT count as user turns, or rewind truncation would land one
+/// turn off whenever a compaction happened mid-session.
+fn is_system_text(t: &str) -> bool {
+    let t = t.trim_start();
+    t.starts_with('<')
+        || t.starts_with("This session is being continued")
+        || t.starts_with("Analysis:")
+        || t.starts_with("Summary:")
+        || t.starts_with("In this environment you have access to")
+        || t.starts_with("Human:")
+        || t.contains("<system-reminder>")
+        || t.contains("</system-reminder>")
+}
+
+/// Does this user line represent a REAL user turn (as the frontend counts
+/// them)? True only for lines whose message content is plain text (string or
+/// `text` blocks) that is non-empty and not system-injected. Tool-result
+/// lines are `"type":"user"` with `"userType":"external"` in CLI 2.1.220's
+/// SDK mode, but their content is `tool_result` blocks — not a turn.
+fn is_real_user_turn(v: &Value) -> bool {
+    let Some(content) = v.pointer("/message/content") else {
+        return false;
+    };
+    let text = if let Some(s) = content.as_str() {
+        s.to_string()
+    } else if let Some(arr) = content.as_array() {
+        let mut buf = String::new();
+        for b in arr {
+            let Some(bt) = b.get("type").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if bt == "tool_result" {
+                return false;
+            }
+            if bt == "text" {
+                if let Some(tx) = b.get("text").and_then(|x| x.as_str()) {
+                    buf.push_str(tx);
+                }
+            }
+        }
+        buf
+    } else {
+        return false;
+    };
+    !text.trim().is_empty() && !is_system_text(&text)
+}
+
+/// Pure truncation logic for a CLI session JSONL string, separated from the
+/// command's IO so it can be unit-tested.
+///
+/// Drops every line from the `truncate_before_turn`-th user turn (1-based)
+/// onward. "User turn" uses the same definition as the frontend's
+/// session-loader (plain-text, non-system-injected `type:"user"` +
+/// `userType:"external"` lines), so the turn index aligns with the
+/// RewindPanel's turn list.
+///
+/// Returns `Some(kept)` with the truncated content, or `None` when the
+/// history is completely empty (rewound before turn 1 → the caller should
+/// delete the file rather than write an empty one).
+///
+/// Rejects when the requested turn doesn't exist in the file.
+pub(crate) fn truncate_jsonl_content(
+    content: &str,
+    truncate_before_turn: usize,
+) -> Result<Option<String>, String> {
+    if truncate_before_turn == 0 {
+        return Err("truncate_before_turn must be >= 1".to_string());
+    }
+
+    // Split keeping original line endings (\r\n on Windows) so the written
+    // file stays byte-compatible with the CLI's own parser.
+    let raw_lines: Vec<&str> = content.split_inclusive('\n').collect();
+    if raw_lines.is_empty() {
+        return Err("Session file is empty".to_string());
+    }
+
+    // Walk lines counting real user turns.
+    let mut user_turns = 0usize;
+    let mut cut_at: Option<usize> = None; // index into raw_lines of the first line to drop
+    for (idx, raw) in raw_lines.iter().enumerate() {
+        // Trailing \r from Windows line endings is legal JSON whitespace.
+        let trimmed = raw.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+            let is_turn = v.get("type").and_then(|t| t.as_str()) == Some("user")
+                && v.get("userType").and_then(|t| t.as_str()) == Some("external")
+                && is_real_user_turn(&v);
+            if is_turn {
+                user_turns += 1;
+                if user_turns == truncate_before_turn {
+                    cut_at = Some(idx);
+                    break;
+                }
+            }
+        }
+    }
+
+    let cut_at = cut_at.ok_or_else(|| format!(
+        "Session has only {} user turns; cannot truncate before turn {}",
+        user_turns, truncate_before_turn
+    ))?;
+
+    if cut_at == 0 {
+        // Rewound to the very first turn: the whole history is dropped.
+        return Ok(None);
+    }
+
+    Ok(Some(raw_lines[..cut_at].concat()))
+}
+
+/// Truncate a Claude CLI session's JSONL file to just before the given user
+/// turn, so `claude --resume <session_id>` afterwards rebuilds only the
+/// pre-rewind history (the rewind feature's file restore rewinds checkpoints
+/// but NOT the conversation — the CLI session file still holds every turn).
+///
+/// Returns:
+/// - `Ok(Some(kept_lines))` — file truncated in place
+/// - `Ok(None)` — history fully cleared (rewound to turn 1); file deleted,
+///   the frontend must clear sessionId so nothing tries to resume it
+#[tauri::command]
+pub async fn truncate_session_history(
+    session_id: String,
+    project_dir: String,
+    truncate_before_turn: usize,
+) -> Result<Option<usize>, String> {
+    // UUID-like validation (mirrors rewind_files) — also keeps the path
+    // join below inside ~/.claude/projects/ (no traversal possible).
+    fn is_uuid_like(s: &str) -> bool {
+        s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    }
+    if !is_uuid_like(&session_id) {
+        return Err(format!("Invalid session_id format: {}", session_id));
+    }
+
+    let home = dirs::home_dir().ok_or("Cannot find home dir")?;
+    let projects_root = home.join(".claude").join("projects");
+    let encoded = encode_project_name(&project_dir);
+    let path = projects_root
+        .join(&encoded)
+        .join(format!("{}.jsonl", session_id));
+
+    // Cap size (mirrors load_session) so a huge file can't OOM the read.
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to stat session file: {}", e))?;
+    if meta.len() > 50 * 1024 * 1024 {
+        return Err(format!(
+            "Session file too large to truncate ({} bytes, max 50 MiB)",
+            meta.len()
+        ));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+
+    match truncate_jsonl_content(&content, truncate_before_turn)? {
+        None => {
+            // Whole history gone — delete the file instead of writing an
+            // empty one; the CLI would fail to resume a missing/empty session.
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to delete session file: {}", e))?;
+            Ok(None)
+        }
+        Some(kept) => {
+            let kept_lines = kept.split_inclusive('\n').count();
+            std::fs::write(&path, kept)
+                .map_err(|e| format!("Failed to write truncated session: {}", e))?;
+            Ok(Some(kept_lines))
+        }
+    }
+}

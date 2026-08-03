@@ -18,6 +18,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { bridge } from '../lib/tauri-bridge';
 import { parseTurns, type Turn } from '../lib/turns';
 import { t } from '../lib/i18n';
+import { debugLog } from '../lib/debug-log';
 import { showToast } from '../components/shared/Toast';
 
 export type RewindAction = 'restore_all' | 'restore_conversation' | 'restore_code' | 'summarize';
@@ -73,13 +74,19 @@ export function useRewind() {
   }, []);
 
   /** Reset session state after rewind.
-   *  Clears both stdinId (process link) AND sessionId (CLI UUID) so the next
-   *  message starts a fresh session instead of --resume'ing the old context. */
-  const resetSession = useCallback(() => {
+   *  Clears stdinId (the dead process link) always. sessionId (the CLI UUID)
+   *  is KEPT by default — executeRewind truncates the CLI session JSONL to
+   *  the rewind point first, so the next message `--resume`s the pre-rewind
+   *  history instead of starting a fresh, context-less session. Only when
+   *  truncation failed (or history is fully cleared) does the caller pass
+   *  clearSessionId=true to fall back to a fresh session. */
+  const resetSession = useCallback((clearSessionId = false) => {
     const tid = useSessionStore.getState().selectedSessionId;
     if (!tid) return;
     useChatStore.getState().setSessionStatus(tid, 'idle');
-    useChatStore.getState().setSessionMeta(tid, { stdinId: undefined, sessionId: undefined });
+    useChatStore.getState().setSessionMeta(tid, clearSessionId
+      ? { stdinId: undefined, sessionId: undefined }
+      : { stdinId: undefined });
   }, []);
 
   /** Save rewound state to tab cache */
@@ -122,6 +129,29 @@ export function useRewind() {
       console.warn('[useRewind] Failed to kill process:', err);
     }
 
+    // Truncate the CLI session JSONL to the rewind point so the next message
+    // --resume's ONLY the pre-rewind history (real CLI context: previous tool
+    // results, code state — not the rewind-discarded turns). Truncation
+    // failures fall back to the old behavior: clear sessionId and start fresh.
+    // restore_code keeps the full conversation, so the JSONL is untouched and
+    // resume brings back the complete history (which is its intended semantic).
+    let clearSessionId = false;
+    const rewindSessionId = state.sessionMeta.sessionId;
+    const rewindCwd = useSettingsStore.getState().workingDirectory;
+    if (action !== 'restore_code' && rewindSessionId && !rewindSessionId.startsWith('desk_') && rewindCwd) {
+      try {
+        const kept = await bridge.truncateSessionHistory(rewindSessionId, rewindCwd, turn.index);
+        if (kept === null) {
+          // Rewound to turn 1: the file was deleted, nothing to resume.
+          clearSessionId = true;
+        }
+        debugLog('rewind', 'truncated CLI session history', { keptLines: kept, turn: turn.index });
+      } catch (err) {
+        console.warn('[useRewind] truncateSessionHistory failed — falling back to fresh session:', err);
+        clearSessionId = true;
+      }
+    }
+
     // Grab original text before truncating
     const originalUserText = state.messages[turn.startMsgIdx]?.content || '';
 
@@ -129,7 +159,7 @@ export function useRewind() {
       switch (action) {
         case 'restore_all': {
           useChatStore.getState().rewindToTurn(tid, turn.startMsgIdx);
-          resetSession();
+          resetSession(clearSessionId);
           useChatStore.getState().setInputDraft(tid, originalUserText);
 
           const successMsg = fileRestoreOk
@@ -150,7 +180,7 @@ export function useRewind() {
         case 'restore_conversation': {
           // Only restore conversation (keep code as-is) — instant, no CLI call
           useChatStore.getState().rewindToTurn(tid, turn.startMsgIdx);
-          resetSession();
+          resetSession(clearSessionId);
           useChatStore.getState().setInputDraft(tid, originalUserText);
 
           useChatStore.getState().addMessage(tid, {
@@ -166,7 +196,8 @@ export function useRewind() {
         }
 
         case 'restore_code': {
-          // Don't truncate messages — keep full conversation
+          // Don't truncate messages — keep full conversation; sessionId kept
+          // so the next message resumes the complete (untruncated) history.
           resetSession();
           useChatStore.getState().setInputDraft(tid, originalUserText);
 
@@ -204,7 +235,7 @@ export function useRewind() {
 
           // Truncate to selected point
           useChatStore.getState().rewindToTurn(tid, turn.startMsgIdx);
-          resetSession();
+          resetSession(clearSessionId);
 
           // Add summary as a system message (preserves context without full messages)
           const totalTurns = turns.length;
