@@ -110,6 +110,8 @@ jobs:
           SETUP="$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*setup.exe' | head -1)"
           echo "Signing installer: $SETUP"
           npx tauri signer sign "$SETUP" >/dev/null
+          # idempotent create/upload via the shared publisher (clobbers stale assets)
+          bash .github/scripts/publish.sh "$TAG" "$UPDATER_REPO" "$RELEASE_TITLE"
           SIG="$(base64 -w0 "$SETUP.sig")"
           VERSION="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -130,14 +132,6 @@ jobs:
           };
           fs.writeFileSync('latest.json', JSON.stringify(json, null, 4) + '\n');
           NODE
-          # create-or-upload release in the public updater repo
-          if gh release view "$TAG" --repo "$UPDATER_REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$SETUP" "$SETUP.sig" --repo "$UPDATER_REPO" --clobber
-          else
-            gh release create "$TAG" "$SETUP" "$SETUP.sig" \
-              --repo "$UPDATER_REPO" --title "$RELEASE_TITLE" \
-              --draft --notes "See the assets to download and install this version."
-          fi
           # push latest.json to the public updater repo
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${UPDATER_REPO}.git" updater-repo
           cp latest.json updater-repo/
@@ -160,12 +154,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          mapfile -t ASSETS < <(find src-tauri/target -path '*/release/bundle/*' -type f)
-          echo "Uploading ${#ASSETS[@]} artifacts"
-          if gh release view "$TAG" --repo "$UPDATER_REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${ASSETS[@]}" --repo "$UPDATER_REPO" --clobber
-          else
-            gh release create "$TAG" "${ASSETS[@]}" \
-              --repo "$UPDATER_REPO" --title "$RELEASE_TITLE" \
-              --draft --notes "See the assets to download and install this version."
-          fi
+          # idempotent create/upload via the shared publisher (narrow suffix
+          # matching — the old broad find pulled in deb intermediates,
+          # linuxdeploy caches and icons, which is what 404'd the uploads)
+          bash .github/scripts/publish.sh "$TAG" "$UPDATER_REPO" "$RELEASE_TITLE"
