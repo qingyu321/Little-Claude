@@ -17,8 +17,6 @@ Claude Code 桌面 GUI 客户端 — 基于 Tauri 2 原生构建，免安装便�
 请到 [Releases](https://github.com/qingyu321/Little-Claude/releases) 下载最新版本：
 
 - Windows：便携版（单 EXE，免安装）/ 安装版（NSIS）
-- macOS：dmg（Apple Silicon / Intel）
-- Linux：deb / AppImage / rpm
 
 历史版本（v1.0.1 ~ v1.1.0）的资源也保留在 Releases 中，可随时回退下载。
 
