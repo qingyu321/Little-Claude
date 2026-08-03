@@ -1027,6 +1027,42 @@ export function ChatPanel() {
   const streamStateRef = useRef({ partialText: '', partialThinking: '', isStreaming: false });
   streamStateRef.current = { partialText, partialThinking, isStreaming };
 
+  // When the stream ends, the answer "pops" into the list in the same commit
+  // the streaming Footer collapses (clearPartial + final message insert).
+  // Virtuoso re-measures asynchronously and transiently reports atBottom=false
+  // in between — with no partial content left (isStreaming already false) the
+  // deferred detach below would read the resulting distance as "user scrolled
+  // up" and kill tracking exactly when the answer appears. Two guards fix it:
+  //   · re-pin once Virtuoso has measured the final message into the list
+  //   · let the pending-detach verification know the stream just ended
+  const streamEndedAtRef = useRef(0);
+  const prevStreamingRef = useRef(false);
+  const lastStreamTabRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastStreamTabRef.current !== null && lastStreamTabRef.current !== selectedSessionId) {
+      // Tab switched mid-stream — don't read the new tab's (non-)streaming
+      // state as this tab's stream ending, and don't yank the new view.
+      lastStreamTabRef.current = selectedSessionId;
+      prevStreamingRef.current = isStreaming;
+      return;
+    }
+    lastStreamTabRef.current = selectedSessionId;
+    if (prevStreamingRef.current && !isStreaming) {
+      streamEndedAtRef.current = Date.now();
+      prevStreamingRef.current = false;
+      // Re-pin once Virtuoso has measured the final message; a one-shot
+      // scroll now would land at the pre-measure bottom (mid-history on long
+      // answers). Skipped if the user scrolled away meanwhile.
+      const id = window.setTimeout(() => {
+        if (!userScrolledAwayRef.current) {
+          virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+        }
+      }, 200);
+      return () => clearTimeout(id);
+    }
+    prevStreamingRef.current = isStreaming;
+  }, [isStreaming, selectedSessionId]);
+
   useEffect(() => {
     return () => {
       if (pendingDetachRef.current !== null) {
@@ -1189,6 +1225,11 @@ export function ChatPanel() {
           // actively streaming in.
           const live = streamStateRef.current;
           if (live.isStreaming && (live.partialText || live.partialThinking)) return;
+          // Stream just ended: the answer popped into the list and the Footer
+          // collapsed in the same commit — the transient atBottom=false here
+          // is growth, not a user scroll-up (real scroll-ups detach
+          // synchronously in onWheel). Give the re-pin above time to land.
+          if (Date.now() - streamEndedAtRef.current < 1500) return;
         }
         userScrolledAwayRef.current = true;
       }, 200);
