@@ -20,6 +20,15 @@ REPO="$2"
 TITLE="$3"
 PRERELEASE="${4:-false}"
 
+# `--prerelease` is a boolean flag — it must NOT take a value. Passing
+# `--prerelease false` makes gh parse "false" as a positional (file) argument,
+# the file doesn't exist, and the create call fails (run 10: "could not create
+# or resolve release for v1.1.1"). Emit the flag only when prerelease is true.
+PRERELEASE_ARGS=()
+if [ "$PRERELEASE" = "true" ]; then
+  PRERELEASE_ARGS=(--prerelease)
+fi
+
 mapfile -t ASSETS < <(find src-tauri/target -path '*/release/bundle/*' -type f \( \
   -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o \
   -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.exe' -o -name '*.exe.sig' \))
@@ -40,7 +49,7 @@ release_id() {
 RID="$(release_id)"
 if [ -z "$RID" ]; then
   if RID="$(gh release create "$TAG" --repo "$REPO" --title "$TITLE" --draft \
-      --prerelease "$PRERELEASE" \
+      "${PRERELEASE_ARGS[@]}" \
       --notes "See the assets to download and install this version." --json id -q .id 2>/dev/null)"; then
     echo "created release $TAG (id=$RID)"
   else
