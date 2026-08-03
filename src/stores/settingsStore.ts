@@ -597,25 +597,34 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'tokenicode-settings',
       version: 21,
+      // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
+      // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
+      // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
+      // useSettingsStore 处于 TDZ，访问会抛 ReferenceError，导致头像与
+      // 加密 key 的解密从不执行（症状：头像每次重启丢失、名字正常——
+      // 名字由 hydrate 的 set() 恢复，头像只能靠 post 回调）。
+      merge: (persistedState, currentState) => ({
+        ...currentState,
+        ...(persistedState as Record<string, unknown>),
+        ...(loadAvatars() ?? {}),
+      }),
       // S3: Encryption is handled by _enc_* companion fields + encryptApiKey in setters.
-      // Decryption happens here on hydration.
+      // Decryption happens here on hydration. Must be deferred past module
+      // initialization (TDZ), so it runs in a microtask after create() returns.
       onRehydrateStorage: () => {
         return (_state: unknown, error: unknown) => {
           if (error) {
             console.warn('[settingsStore] Rehydration failed:', error);
             return;
           }
-          const current = useSettingsStore.getState() as unknown as Record<string, unknown>;
-          decryptStoredApiKeys(current).then((updates) => {
-            if (Object.keys(updates).length > 0) {
-              useSettingsStore.setState(updates as Partial<SettingsState>);
-            }
+          queueMicrotask(() => {
+            const current = useSettingsStore.getState() as unknown as Record<string, unknown>;
+            decryptStoredApiKeys(current).then((updates) => {
+              if (Object.keys(updates).length > 0) {
+                useSettingsStore.setState(updates as Partial<SettingsState>);
+              }
+            });
           });
-          // 报告B10: merge avatar data URLs back from their own storage key.
-          const avatars = loadAvatars();
-          if (avatars) {
-            useSettingsStore.setState(avatars);
-          }
         };
       },
       migrate: (persistedState: unknown, version: number) => {
