@@ -1069,6 +1069,10 @@ export function ChatPanel() {
         clearTimeout(pendingDetachRef.current);
         pendingDetachRef.current = null;
       }
+      if (jumpTimerRef.current !== null) {
+        clearTimeout(jumpTimerRef.current);
+        jumpTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -1237,6 +1241,13 @@ export function ChatPanel() {
     setShowScrollBtn(!atBottom);
   }, []);
 
+  // Guards the "jump to latest" re-pin: async height measurements (Footer
+  // ResizeObserver, image loads) can grow the total height right after the
+  // jump, leaving the viewport short of the true bottom — Virtuoso then
+  // reports atBottom=false and the button pops back ("bounces up"). The
+  // delayed re-pin lands the view once measurements settle.
+  const jumpTimerRef = useRef<number | null>(null);
+
   const scrollToBottom = useCallback(() => {
     // Explicit "jump to latest" — resume following.
     userScrolledAwayRef.current = false;
@@ -1249,6 +1260,15 @@ export function ChatPanel() {
     virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
     setShowScrollBtn(false);
     setActiveTurnId(turns[turns.length - 1]?.userMessageId);
+    if (jumpTimerRef.current !== null) clearTimeout(jumpTimerRef.current);
+    // Re-pin once height measurements settle (see comment above) — unless
+    // the user scrolled away meanwhile.
+    jumpTimerRef.current = window.setTimeout(() => {
+      jumpTimerRef.current = null;
+      if (!userScrolledAwayRef.current) {
+        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+      }
+    }, 200);
   }, [turns]);
 
   const jumpToTurn = useCallback((turn: Turn) => {
