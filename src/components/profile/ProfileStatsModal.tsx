@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { bridge, ProfileStats } from '../../lib/tauri-bridge';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
+import { dataUrlToBlobUrl } from '../../lib/blob-url';
 
 interface Props {
   open: boolean;
@@ -157,7 +158,8 @@ export function ProfileStatsModal({ open, onClose }: Props) {
           <div className="text-center">
             <div className="mx-auto w-20 h-20 rounded-[24px] overflow-hidden shadow-sm border border-border-subtle bg-bg-secondary">
               {userAvatarUrl ? (
-                <img src={userAvatarUrl} alt="" className="w-full h-full object-cover" />
+                // WebView2 blocks data: URIs under tauri:// — convert like UserAvatar/AiAvatar do
+                <img src={dataUrlToBlobUrl(userAvatarUrl)} alt="" className="w-full h-full object-cover" />
               ) : (
                 <img src="/app-icon.png" alt="" className="w-full h-full object-cover" />
               )}

@@ -618,12 +618,24 @@ export const useSettingsStore = create<SettingsState>()(
             return;
           }
           queueMicrotask(() => {
-            const current = useSettingsStore.getState() as unknown as Record<string, unknown>;
-            decryptStoredApiKeys(current).then((updates) => {
-              if (Object.keys(updates).length > 0) {
-                useSettingsStore.setState(updates as Partial<SettingsState>);
+            const before = useSettingsStore.getState() as unknown as Record<string, unknown>;
+            decryptStoredApiKeys(before).then((updates) => {
+              // Guard against racing the user: decrypt is async (IPC round
+              // trip); if the user typed a new key between the snapshot and
+              // now, the ciphertext changed and applying the stale plaintext
+              // would overwrite it. Skip fields whose _enc_* moved.
+              const after = useSettingsStore.getState() as unknown as Record<string, unknown>;
+              const safe: Record<string, string> = {};
+              for (const [plain, enc] of [
+                ['videoAnalysisApiKey', '_enc_videoAnalysisApiKey'],
+                ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
+              ] as const) {
+                if (updates[plain] && after[enc] === before[enc]) safe[plain] = updates[plain];
               }
-            });
+              if (Object.keys(safe).length > 0) {
+                useSettingsStore.setState(safe as Partial<SettingsState>);
+              }
+            }).catch((e) => console.error('[settingsStore] decrypt after hydration failed:', e));
           });
         };
       },

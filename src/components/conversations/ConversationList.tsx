@@ -401,6 +401,10 @@ export function ConversationList() {
         setSelected(null);
         useChatStore.getState().resetTab(sessionId);
       }
+      // Unbind this sessionId from EVERY tab (a draft tab that ran this
+      // session keeps sessionMeta.sessionId — without this it would try to
+      // `--resume` the just-deleted session and error out on the next message).
+      useChatStore.getState().clearSessionBinding(sessionId);
       useChatStore.getState().removeFromCache(sessionId);
       fetchSessions();
     } catch (err) {

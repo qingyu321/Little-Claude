@@ -218,6 +218,9 @@ interface ChatState {
   /** Full reset: clear everything including sessionMeta (for new session / /clear) */
   resetTab: (tabId: string) => void;
   setSessionMeta: (tabId: string, meta: Partial<SessionMeta>) => void;
+  /** Unbind `sessionId` from every tab that references it (used when a session
+   *  is deleted from the list — a stale binding would resume a deleted session). */
+  clearSessionBinding: (sessionId: string) => void;
   setInputDraft: (tabId: string, text: string) => void;
   setPendingAttachments: (tabId: string, files: FileAttachment[]) => void;
   addPendingMessage: (tabId: string, text: string) => void;
@@ -531,6 +534,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         sessionMeta: { ...tab.sessionMeta, ...meta },
       }));
       return result ?? {};
+    }),
+
+  clearSessionBinding: (sessionId) =>
+    set((state) => {
+      let changed = false;
+      const tabs = new Map(state.tabs);
+      for (const [tabId, tab] of tabs) {
+        if (tab.sessionMeta.sessionId === sessionId) {
+          tabs.set(tabId, {
+            ...tab,
+            sessionMeta: { ...tab.sessionMeta, sessionId: undefined },
+          });
+          changed = true;
+        }
+      }
+      return changed ? { tabs } : {};
     }),
 
   setInputDraft: (tabId, text) =>
