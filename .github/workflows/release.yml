@@ -92,7 +92,12 @@ jobs:
           VERSION="$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           FILENAME="$(basename "$SETUP")"
-          URL="https://github.com/${UPDATER_REPO}/releases/download/${TAG}/${FILENAME}"
+          # GitHub sanitizes asset names on upload (spaces -> dots, illegal
+          # chars -> underscores). The download URL must use the sanitized
+          # name or it 404s — v1.1.1-alpha.1's latest.json shipped the raw
+          # filename with spaces and auto-update downloads failed.
+          URL_FILENAME="${FILENAME// /\.}"
+          URL="https://github.com/${UPDATER_REPO}/releases/download/${TAG}/${URL_FILENAME}"
           export SIG VERSION PUB_DATE URL
           node - <<'NODE'
           const fs = require('fs');
