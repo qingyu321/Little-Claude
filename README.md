@@ -82,11 +82,9 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 下载
 
-请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载对应平台的安装包：
+请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包：
 
 - Windows：NSIS 安装版 / 便携版（x64）
-- macOS：Apple Silicon / Intel（dmg）
-- Linux：deb / AppImage / rpm
 
 ## 快速开始
 
