@@ -7,9 +7,9 @@ license = "UNLICENSED"
 edition = "2021"
 
 [features]
-default = ["local-asr"]
+default = ["local-asr", "video-analysis"]
 local-asr = ["sherpa-onnx"]
-# video-analysis module (ffmpeg/whisper/multimodal + bundled skill) — OFF by default.
+# video-analysis module (ffmpeg/whisper/multimodal + bundled skill) — ON by default.
 video-analysis = []
 
 [lib]
