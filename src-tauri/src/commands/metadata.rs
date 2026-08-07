@@ -84,6 +84,19 @@ pub async fn generate_session_title(
 
     let enriched_path = build_enriched_path();
 
+    // M2 (security): run the one-shot CLI in an isolated temp directory instead
+    // of the app's working directory. Claude Code auto-loads {cwd}/CLAUDE.md
+    // and the `--dangerously-skip-permissions` flag (kept so a would-be tool
+    // call cannot block the unattended title generation on an unanswerable
+    // permission prompt) would otherwise let it act on project files. Title
+    // generation needs no project context — an empty temp cwd leaves nothing
+    // sensitive for a tool call to touch, and `--max-turns 1` plus the prompt
+    // ("only the title text") keep it to a single response.
+    let mut title_cwd = std::env::temp_dir();
+    title_cwd.push(format!("little-claude-title-gen-{}", std::process::id()));
+    std::fs::create_dir_all(&title_cwd)
+        .map_err(|e| format!("Failed to create temp dir for title gen: {}", e))?;
+
     // Spawn a one-shot CLI process: -p for single prompt, --output-format json for structured output
     let mut args = vec![
         "-p".to_string(),
@@ -141,6 +154,7 @@ pub async fn generate_session_title(
 
     let mut cmd = tokio::process::Command::new(&claude_bin);
     cmd.args(&args)
+        .current_dir(&title_cwd)
         .env("PATH", &enriched_path)
         .env_remove("CLAUDECODE") // Allow nested CLI launch
         .env_remove("CLAUDE_CODE_ENTRY") // Remove any other nesting guards

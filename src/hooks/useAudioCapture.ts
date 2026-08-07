@@ -115,6 +115,26 @@ export function useAudioCapture(
   // 流获取意图：prepare/start 置 true，stop 置 false。
   // 预热后用户马上停止时，借此立即释放迟到的 getUserMedia 结果，防止麦克风流悬挂。
   const wantStreamRef = useRef(false);
+  // 共享的 in-flight getUserMedia：prepare 与 start 并发时只发起一次获取，
+  // 否则两路流会同时存在，后 resolve 的覆盖 streamRef.current，先到的那路
+  // 麦克风流将永远停不掉（隐私问题）。resolve/reject 后立即置 null；
+  // reject（如权限拒绝）后 start 会重新获取，prepared 失败不阻塞 start。
+  const pendingStreamRef = useRef<Promise<MediaStream> | null>(null);
+
+  /** 发起（或复用 in-flight 的）麦克风流获取。成功/失败后都清空 pending 槽，
+   *  以便下一次调用重新获取。 */
+  const acquireStream = useCallback((): Promise<MediaStream> => {
+    if (!pendingStreamRef.current) {
+      pendingStreamRef.current = navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    }
+    return pendingStreamRef.current;
+  }, []);
   // 用 ref 保存最新 callback，避免 setInterval 捕获 stale closure
   const onChunkRef = useRef(onChunk);
   onChunkRef.current = onChunk;
@@ -123,6 +143,7 @@ export function useAudioCapture(
   useEffect(() => {
     return () => {
       wantStreamRef.current = false;
+      pendingStreamRef.current = null;
       if (chunkTimerRef.current !== null) {
         clearInterval(chunkTimerRef.current);
         chunkTimerRef.current = null;
@@ -138,6 +159,7 @@ export function useAudioCapture(
   const stop = useCallback(() => {
     recordingRef.current = false;
     wantStreamRef.current = false;
+    pendingStreamRef.current = null;
     setIsRecording(false);
     if (chunkTimerRef.current !== null) {
       clearInterval(chunkTimerRef.current);
@@ -162,13 +184,8 @@ export function useAudioCapture(
     if (recordingRef.current || streamRef.current?.active) return;
     wantStreamRef.current = true;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      const stream = await acquireStream();
+      pendingStreamRef.current = null;
       // 等待期间用户已停止（如退出面试）→ 立即释放，不让麦克风流悬挂
       if (!wantStreamRef.current) {
         stream.getTracks().forEach((t) => t.stop());
@@ -188,9 +205,10 @@ export function useAudioCapture(
         try { await ctx.suspend(); } catch { /* 忽略 */ }
       }
     } catch {
-      // 权限拒绝/无设备：留给 start() 重试并报错，预热失败不算错误
+      // 权限拒绝/无设备：清空共享槽让 start() 重新获取并报错，预热失败不算错误
+      pendingStreamRef.current = null;
     }
-  }, []);
+  }, [acquireStream]);
 
   const flushBuffer = useCallback(() => {
     const buffers = bufferRef.current;
@@ -222,17 +240,21 @@ export function useAudioCapture(
     bufferRef.current = [];
 
     try {
-      // 1. 麦克风流：优先复用预热流，没有则现场获取
+      // 1. 麦克风流：优先复用预热流（或 prepare 尚未完成的共享获取），
+      //    没有则现场获取。共享 pending promise 保证 prepare/start 并发时
+      //    只有一路 getUserMedia，不会出现两路流互相覆盖导致流停不掉。
       let stream = streamRef.current;
       if (!stream || !stream.active) {
         wantStreamRef.current = true;
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
+        try {
+          stream = await acquireStream();
+        } catch {
+          // 共享获取失败（如 prepare 阶段权限被拒）→ 清空槽位重新获取一次
+          pendingStreamRef.current = null;
+          stream = await acquireStream();
+        } finally {
+          pendingStreamRef.current = null;
+        }
         // 竞态保护：等待权限期间用户可能已停止录音 —— 立即释放刚拿到的流，
         // 否则麦克风流会在"已停止"后继续存活（隐私泄漏）
         if (!recordingRef.current) {
@@ -303,7 +325,7 @@ export function useAudioCapture(
       setError(msg);
       stop();
     }
-  }, [chunkIntervalMs, flushBuffer, stop]);
+  }, [chunkIntervalMs, flushBuffer, stop, acquireStream]);
 
   return { isRecording, prepare, start, stop, error };
 }

@@ -34,38 +34,45 @@ export interface Turn {
 export function parseTurns(messages: ChatMessage[]): Turn[] {
   const turns: Turn[] = [];
   let turnIndex = 0;
+  // The turn opened by the most recent user message; its codeChanges range
+  // [startMsgIdx + 1, end) is only known once the NEXT user message (or the
+  // end of the array) is reached. Holding it as a pending value keeps the
+  // whole parse a single linear pass — the previous loop re-scanned each
+  // turn's range twice (findNextUserIndex + extractCodeChanges), and while
+  // those ranges are disjoint (so still linear overall), deferring the scan
+  // halves the work and needs only O(1) extra memory.
+  let pending: Turn | null = null;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== 'user') continue;
 
+    // Close the previous turn: its range ends where this user message begins.
+    if (pending) {
+      pending.codeChanges = extractCodeChanges(messages, pending.startMsgIdx + 1, i);
+      turns.push(pending);
+    }
+
     turnIndex++;
     const content = msg.content || '';
-    const nextUserIdx = findNextUserIndex(messages, i + 1);
-
-    turns.push({
+    pending = {
       index: turnIndex,
       userMessageId: msg.id,
       userContent: content.length > 80 ? content.slice(0, 80) + '…' : content,
       timestamp: msg.timestamp,
       startMsgIdx: i,
-      codeChanges: extractCodeChanges(messages, i + 1, nextUserIdx),
+      codeChanges: [], // filled in when the next user message (or array end) is found
       checkpointUuid: msg.checkpointUuid,
-    });
+    };
+  }
+
+  // Close the last turn at the end of the array.
+  if (pending) {
+    pending.codeChanges = extractCodeChanges(messages, pending.startMsgIdx + 1, messages.length);
+    turns.push(pending);
   }
 
   return turns;
-}
-
-/**
- * Find the index of the next user message starting from `fromIdx`.
- * Returns `messages.length` if no more user messages exist.
- */
-function findNextUserIndex(messages: ChatMessage[], fromIdx: number): number {
-  for (let j = fromIdx; j < messages.length; j++) {
-    if (messages[j].role === 'user') return j;
-  }
-  return messages.length;
 }
 
 /**

@@ -6,6 +6,8 @@ import { stripAnsi } from '../../lib/strip-ansi';
 import { AiAvatar } from '../shared/AiAvatar';
 import {
   bridge,
+  cancelDownload,
+  invokeWithCancellation,
   onDownloadProgress,
 } from '../../lib/tauri-bridge';
 
@@ -53,6 +55,8 @@ export function SetupWizard() {
 
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [downloadPhase, setDownloadPhase] = useState<string>('');
+  // 当前安装任务的取消 scope（非空时显示取消按钮）
+  const [installScopeId, setInstallScopeId] = useState<string | null>(null);
 
   // Auto-detect CLI on mount — skip wizard entirely if found
   useEffect(() => {
@@ -87,14 +91,17 @@ export function SetupWizard() {
     setDownloadPercent(0);
     setDownloadPhase('');
 
+    // 生成取消 scope：安装过程中展示取消按钮，点击后后端轮询令牌提前退出
+    const scopeId = `setup-install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setInstallScopeId(scopeId);
+
     const unlistenProgress = await onDownloadProgress((event) => {
       setDownloadPercent(event.percent);
       setDownloadPhase(event.phase);
     });
 
     try {
-      await bridge.installClaudeCli();
-      unlistenProgress();
+      await invokeWithCancellation('install_claude_cli', {}, scopeId);
 
       // Verify installation
       const status = await bridge.checkClaudeCli();
@@ -107,9 +114,11 @@ export function SetupWizard() {
         setStep('install_failed');
       }
     } catch (err) {
-      unlistenProgress();
       setError(stripAnsi(String(err)));
       setStep('install_failed');
+    } finally {
+      unlistenProgress();
+      setInstallScopeId(null);
     }
   }, []);
 
@@ -209,6 +218,17 @@ export function SetupWizard() {
             </div>
             {downloadPercent > 0 && (
               <span className="text-xs text-text-tertiary">{downloadPercent}%</span>
+            )}
+            {/* 取消安装（CancellationToken）：停止下载并清理本次新建的文件 */}
+            {installScopeId && (
+              <button
+                onClick={() => cancelDownload(installScopeId)}
+                className="px-4 py-2 rounded-xl text-sm font-medium
+                  border border-border-subtle text-text-muted
+                  hover:bg-bg-tertiary transition-smooth cursor-pointer"
+              >
+                {t('common.cancel')}
+              </button>
             )}
           </div>
         )}

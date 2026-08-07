@@ -14,7 +14,6 @@ export interface SpeechRuntimeSectionProps {
 
 /**
  * Shared runtime diagnostics + install UI for the offline speech model.
- * Follows the same pattern as VideoAnalysisRuntimeSection.
  */
 export function SpeechRuntimeSection({
   showConfirm = true,
@@ -70,7 +69,7 @@ export function SpeechRuntimeSection({
     return () => clearInterval(id);
   }, [refresh, installing]);
 
-  // Listen for download progress (reuse existing video-analysis event)
+  // Listen for download progress events
   useEffect(() => {
     let cancelled = false;
     onSkillRuntimeDownloadProgress((e: SkillRuntimeDownloadProgress) => {
@@ -207,7 +206,7 @@ export function SpeechRuntimeSection({
           >
             {missing.length > 0
               ? t('settings.speech.install')
-              : t('settings.videoAnalysisRecheck')}
+              : t('settings.speech.recheck')}
           </button>
         )}
         {showInstallBtn && !autoInstallSupported && (

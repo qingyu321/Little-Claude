@@ -110,7 +110,7 @@ export interface RecentProject {
 export interface FileChangeEvent {
   kind: 'created' | 'modified' | 'removed';
   paths: string[];
-  root: string;
+  path: string; // watch root（后端载荷字段为 path）
 }
 
 export interface SlashCommand {
@@ -155,6 +155,44 @@ export interface SkillTranslationConfig {
   proxyUrl?: string;
 }
 
+/** Result from system audio (WASAPI loopback) transcription. */
+export interface SystemAudioResult {
+  sessionId: string;
+  chunkId: string;
+  transcript: string;
+  /** chunk 峰值 (0..1)，用于前端二次门控过滤底噪幻觉 */
+  peak?: number;
+}
+
+/** Compressed wallpaper stored in ~/.tokenicode/wallpapers/ */
+export interface WallpaperInfo {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  durationSecs: number;
+  compressed: boolean;
+}
+
+/** Progress event emitted during wallpaper compression */
+export interface WallpaperProgress {
+  stage: string;      // "probing" | "compressing" | "done" | "error"
+  progress: number;    // 0-100
+  message: string;
+  encoder: string;     // "nvidia" | "intel" | "amd" | "cpu"
+  inputSize: number;
+  outputSize?: number;
+}
+
+export interface SkillRuntimeDownloadProgress {
+  skill: string;
+  phase: string;
+  url: string;
+  percent: number;
+  message: string;
+  downloaded?: number;
+  total?: number;
+}
+
 /** Runtime package status for the bundled video-analysis skill. */
 export interface SkillRuntimeStatus {
   skillName: string;
@@ -197,45 +235,6 @@ export interface RuntimeDepCheck {
   detail?: string | null;
 }
 
-/** Result from system audio (WASAPI loopback) transcription. */
-export interface SystemAudioResult {
-  sessionId: string;
-  chunkId: string;
-  transcript: string;
-  /** chunk 峰值 (0..1)，用于前端二次门控过滤底噪幻觉 */
-  peak?: number;
-}
-
-/** Compressed wallpaper stored in ~/.tokenicode/wallpapers/ */
-export interface WallpaperInfo {
-  name: string;
-  path: string;
-  sizeBytes: number;
-  durationSecs: number;
-  compressed: boolean;
-}
-
-/** Progress event emitted during wallpaper compression */
-export interface WallpaperProgress {
-  stage: string;      // "probing" | "compressing" | "done" | "error"
-  progress: number;    // 0-100
-  message: string;
-  encoder: string;     // "nvidia" | "intel" | "amd" | "cpu"
-  inputSize: number;
-  outputSize?: number;
-}
-
-export interface SkillRuntimeDownloadProgress {
-  skill: string;
-  phase: string;
-  url: string;
-  percent: number;
-  message: string;
-  downloaded?: number;
-  total?: number;
-}
-
-/** Default multimodal (vision) model for video-analysis Mode B. */
 export interface VideoAnalysisMultimodalConfig {
   baseUrl: string;
   /** Direct API key (optional if apiKeyEnv is set). */
@@ -398,6 +397,70 @@ export interface UnifiedCommand {
 }
 
 // --- Bridge ---
+
+// ── 超时包装的 invoke ──────────────────────────────────────────
+// 裸 invoke 在 Rust 命令挂死时前端 promise 永不 settle、UI 永久转圈。
+// 仅对下载/安装/网络测试类高风险命令包一层超时（普通 IPC 命令毫秒级返回，
+// 不需要也不应该加超时）。
+
+/** 默认超时：60 秒 */
+const DEFAULT_INVOKE_TIMEOUT_MS = 60_000;
+/** 安装/下载类命令超时：10 分钟（大模型/运行时下载在慢网络下耗时很长） */
+export const INSTALL_INVOKE_TIMEOUT_MS = 10 * 60_000;
+/** 测试/探测类命令超时：30 秒 */
+export const TEST_INVOKE_TIMEOUT_MS = 30_000;
+
+/** 给后端命令加超时的 invoke：超时后 reject 中文错误，避免 UI 永久转圈。
+ *  @param cmd        后端命令名（同 invoke 的第一个参数）
+ *  @param args       invoke 参数（可选）
+ *  @param timeoutMs  超时毫秒数，默认 60 秒 */
+export function invokeWithTimeout<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+  timeoutMs: number = DEFAULT_INVOKE_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`后端命令 ${cmd} 超时，请重试`));
+    }, timeoutMs);
+    invoke<T>(cmd, args).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
+// ── 可取消 invoke（CancellationToken）─────────────────────────────
+// 后端注册中心：commands/download_cancel.rs。前端生成 scopeId → 传入命令 →
+// 需要中断时调 cancelDownload(scopeId)，后端在等待循环/chunk 循环中轮询令牌，
+// 提前返回“已取消”错误并清理临时文件。仅新增函数，不改动既有调用。
+
+/**
+ * 请求后端取消指定 scope 的下载/安装任务（幂等：未知 scopeId 返回 Ok）。
+ * 取消后后端命令会以「已取消下载」错误 reject。
+ */
+export function cancelDownload(scopeId: string): Promise<void> {
+  return invoke<void>('cancel_download', { scopeId });
+}
+
+/** 自带 scopeId 的 invoke + 超时：给安装/下载命令注入取消令牌。
+ *  取消语义由后端轮询承担，本函数只负责传参与超时兜底。 */
+export function invokeWithCancellation<T>(
+  cmd: string,
+  args: Record<string, unknown>,
+  scopeId: string,
+  timeoutMs: number = INSTALL_INVOKE_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`后端命令 ${cmd} 超时，请重试`));
+    }, timeoutMs);
+    invoke<T>(cmd, { ...args, scopeId }).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 export const bridge = {
   previewOpenUrl: (url: string) =>
@@ -600,7 +663,7 @@ export const bridge = {
 
   /** Download/install offline speech recognition model. */
   downloadSpeechRuntime: () =>
-    invoke<SpeechRuntimeStatus>('download_speech_runtime'),
+    invokeWithTimeout<SpeechRuntimeStatus>('download_speech_runtime', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Open skill directory for manual speech model install. */
   openSpeechSkillDir: () =>
@@ -654,7 +717,7 @@ export const bridge = {
   // ── Local ASR (sherpa-onnx) — model management ──
   checkLocalAsrRuntime: () => invoke<{ available: boolean; engine: string; version: string }>('check_local_asr_runtime'),
   checkLocalAsrModel: () => invoke<{ installed: boolean; model_dir: string; files: string[] }>('check_local_asr_model'),
-  downloadLocalAsrModel: (mirrorIndex?: number) => invoke<string>('download_local_asr_model', { mirrorIndex: mirrorIndex ?? null }),
+  downloadLocalAsrModel: (mirrorIndex?: number) => invokeWithTimeout<string>('download_local_asr_model', { mirrorIndex: mirrorIndex ?? null }, INSTALL_INVOKE_TIMEOUT_MS),
   deleteLocalAsrModel: () => invoke<string>('delete_local_asr_model'),
   testLocalAsr: (modelDir?: string) => invoke<string>('test_local_asr', { modelDir: modelDir ?? null }),
   // ── Local ASR (sherpa-onnx) — streaming session ──
@@ -752,22 +815,22 @@ export const bridge = {
   deleteCli: (path: string) => invoke<string>('delete_cli', { path }),
 
   installClaudeCli: () =>
-    invoke<void>('install_claude_cli'),
+    invokeWithTimeout<void>('install_claude_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Update CLI to latest version via npm (bypasses "already installed" skip) */
   updateClaudeCli: () =>
-    invoke<string>('update_claude_cli'),
+    invokeWithTimeout<string>('update_claude_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Check if a newer CLI version is available */
   checkCliUpdate: () =>
     invoke<{ current: string | null; latest: string | null; update_available: boolean }>('check_cli_update'),
 
   installCodexCli: () =>
-    invoke<void>('install_codex_cli'),
+    invokeWithTimeout<void>('install_codex_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Update Codex CLI to latest version via npm */
   updateCodexCli: () =>
-    invoke<string>('update_codex_cli'),
+    invokeWithTimeout<string>('update_codex_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Check if a newer Codex CLI version is available */
   checkCodexUpdate: () =>
@@ -784,10 +847,10 @@ export const bridge = {
     invoke<string>('export_claude_to_codex', { sessionId, projectDir }),
 
   checkNodeEnv: () =>
-    invoke<NodeEnvStatus>('check_node_env'),
+    invokeWithTimeout<NodeEnvStatus>('check_node_env', undefined, TEST_INVOKE_TIMEOUT_MS),
 
   installNodeEnv: () =>
-    invoke<void>('install_node_env'),
+    invokeWithTimeout<void>('install_node_env', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   checkLocalModelService: () =>
     invoke<LocalModelServiceStatus>('check_local_model_service'),
@@ -827,7 +890,7 @@ export const bridge = {
     invoke<void>('sync_providers', { data }),
 
   testProviderConnection: (baseUrl: string, apiFormat: string, apiKey: string, model: string, proxyUrl?: string) =>
-    invoke<ConnectionTestResult>('test_provider_connection', { baseUrl, apiFormat, apiKey, model, proxyUrl: proxyUrl || null }),
+    invokeWithTimeout<ConnectionTestResult>('test_provider_connection', { baseUrl, apiFormat, apiKey, model, proxyUrl: proxyUrl || null }, TEST_INVOKE_TIMEOUT_MS),
 
   /** Fetch model IDs available at the provider endpoint. Tries the format-native
    *  /models endpoint, then the OpenAI-compatible twin path for /anthropic gateways. */
@@ -1011,12 +1074,41 @@ export function onSkillRuntimeDownloadProgress(
   );
 }
 
+// 防御性进度监听：SetupWizard / CliTab 的 onDownloadProgress 只在安装完成后
+// unlisten，组件中途卸载会泄漏原生 listener（每次安装叠加一个，无限累积）。
+// 统一入口做防御：每个 channel 只注册一个原生 listener，回调多播；返回的
+// unlisten 只摘除本回调。原生监听数量恒为 1，泄漏的至多是空闭包。
+const singletonListenerCallbacks = new Map<string, Set<(payload: unknown) => void>>();
+
+function subscribeSingletonListener<T>(
+  channel: string,
+  callback: (payload: T) => void,
+): UnlistenFn {
+  let callbacks = singletonListenerCallbacks.get(channel);
+  if (!callbacks) {
+    callbacks = new Set();
+    singletonListenerCallbacks.set(channel, callbacks);
+    listen<T>(channel, (event) => {
+      const set = singletonListenerCallbacks.get(channel);
+      if (set) {
+        for (const cb of [...set]) cb(event.payload);
+      }
+    }).catch(() => {
+      // 原生监听注册失败：静默（后端未就绪时退化为无事件，不抛未处理 rejection）
+    });
+  }
+  const cb = callback as (payload: unknown) => void;
+  callbacks.add(cb);
+  return () => {
+    callbacks.delete(cb);
+  };
+}
+
 export function onDownloadProgress(
   callback: (event: DownloadProgressEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<DownloadProgressEvent>(
-    'setup:download:progress',
-    (event) => callback(event.payload),
+  return Promise.resolve(
+    subscribeSingletonListener<DownloadProgressEvent>('setup:download:progress', callback),
   );
 }
 

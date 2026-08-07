@@ -167,7 +167,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'panel.close': '关闭面板',
     'panel.interview': '面试',
 
-    // InterviewMode — 面试模式
+    // Interview — 面试模式
     'interview.title': '面试模式',
     'interview.confirm.title': '进入面试模式',
     'interview.confirm.subtitle': '面试官开口，答案秒出',
@@ -480,9 +480,11 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.advanced': '高级设置',
     'settings.tab.general': '通用',
     'settings.tab.provider': 'API 提供商',
-    'settings.tab.videoAnalysis': '视频分析',
     'settings.tab.cli': 'CLI 管理',
     'settings.tab.mcp': 'MCP 服务器',
+
+    // --- Speech-to-Text settings ---
+    'settings.tab.videoAnalysis': '视频分析',
     'settings.videoAnalysisMultimodal': '视频分析 · 多模态默认模型',
     'settings.videoAnalysisMultimodalHint': '调用 video-analysis 技能时默认使用此处配置的视觉模型（OpenAI 兼容端点）。需填端点、模型名，以及「API Key」或「密钥环境变量」二者之一；都留空则每次询问。',
     'settings.videoAnalysisBaseUrl': 'API 端点（Base URL）',
@@ -519,8 +521,6 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.videoAnalysisAsrModelLargeV3': '高准确率（v3 架构）',
     'settings.videoAnalysisAsrModelLargeV3Turbo': '高准确率 + 优化速度',
     'settings.videoAnalysisAsrModelSwitchHint': '切换模型后需在新对话中重新下载对应模型文件。',
-
-    // --- Speech-to-Text settings ---
     'settings.tab.speech': '语音识别',
     'settings.speech.title': '语音转文字输入',
     'settings.speech.hint': '开启后在输入栏显示麦克风按钮，点击即可语音输入。可使用系统内置语音识别（零安装），也可下载离线 whisper 模型获得更高准确率。',
@@ -535,6 +535,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.speech.install': '一键安装离线模型',
     'settings.speech.downloading': '正在下载...',
     'settings.speech.manualHint': '当前平台不支持一键安装。请手动安装 whisper 模型文件。',
+    'settings.speech.recheck': '重新检查',
+    'settings.speech.saved': '已保存，新对话生效',
 
     // --- Speech input UI ---
     'speech.listening': '正在聆听...',
@@ -835,6 +837,7 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // Skills panel
     'skills.title': '技能',
+    'skills.runtimeTitle': 'video-analysis 运行环境',
     'skills.refresh': '刷新',
     'skills.create': '创建',
     'skills.cancel': '取消',
@@ -868,7 +871,6 @@ const messages: Record<Locale, Record<string, string>> = {
     'skills.model': '模型',
     'skills.context': '上下文',
     'skills.version': '版本',
-    'skills.runtimeTitle': 'video-analysis 运行环境',
     'skills.runtimeBodyInstalled': '技能本体已内置并安装，可在对话中调用。',
     'skills.runtimeNeedDownload': '完整分析还需要 ffmpeg / 语音模型 / Python 依赖包。是否现在下载？',
     'skills.runtimeReady': '运行环境已就绪。',
@@ -1194,7 +1196,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'panel.close': 'Close panel',
     'panel.interview': 'Interview',
 
-    // InterviewMode — interview assistant
+    // Interview — interview mode
     'interview.title': 'Interview Mode',
     'interview.confirm.title': 'Enter Interview Mode',
     'interview.confirm.subtitle': 'Answers the moment they ask',
@@ -1507,9 +1509,11 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.advanced': 'Advanced',
     'settings.tab.general': 'General',
     'settings.tab.provider': 'API Provider',
-    'settings.tab.videoAnalysis': 'Video analysis',
     'settings.tab.cli': 'CLI',
     'settings.tab.mcp': 'MCP Servers',
+
+    // --- Speech-to-Text settings ---
+    'settings.tab.videoAnalysis': 'Video analysis',
     'settings.videoAnalysisMultimodal': 'Video analysis · default multimodal model',
     'settings.videoAnalysisMultimodalHint': 'Default vision model for the video-analysis skill (OpenAI-compatible). Requires endpoint, model name, and either API Key or a key env-var name; leave empty to ask each run.',
     'settings.videoAnalysisBaseUrl': 'API endpoint (Base URL)',
@@ -1546,8 +1550,6 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.videoAnalysisAsrModelLargeV3': 'high accuracy (v3 architecture)',
     'settings.videoAnalysisAsrModelLargeV3Turbo': 'high accuracy + optimized speed',
     'settings.videoAnalysisAsrModelSwitchHint': 'Changing model requires re-downloading the model files in a new session.',
-
-    // --- Speech-to-Text settings ---
     'settings.tab.speech': 'Speech',
     'settings.speech.title': 'Speech-to-Text Input',
     'settings.speech.hint': 'When enabled, a microphone button appears in the input toolbar. Use the built-in system speech recognition (zero install) or download an offline whisper model for higher accuracy.',
@@ -1562,6 +1564,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.speech.install': 'Install offline model',
     'settings.speech.downloading': 'Downloading...',
     'settings.speech.manualHint': 'Auto-install is not supported on this platform. Please manually install the whisper model.',
+    'settings.speech.recheck': 'Re-check',
+    'settings.speech.saved': 'Saved — takes effect in new chats',
 
     // --- Speech input UI ---
     'speech.listening': 'Listening...',
@@ -1862,6 +1866,7 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // Skills panel
     'skills.title': 'Skills',
+    'skills.runtimeTitle': 'video-analysis runtime',
     'skills.refresh': 'Refresh',
     'skills.create': 'Create',
     'skills.cancel': 'Cancel',
@@ -1895,7 +1900,6 @@ const messages: Record<Locale, Record<string, string>> = {
     'skills.model': 'Model',
     'skills.context': 'Context',
     'skills.version': 'Version',
-    'skills.runtimeTitle': 'video-analysis runtime',
     'skills.runtimeBodyInstalled': 'Skill body is bundled and installed for chat use.',
     'skills.runtimeNeedDownload': 'Full analysis also needs ffmpeg / ASR model / Python deps. Download now?',
     'skills.runtimeReady': 'Runtime environment is ready.',

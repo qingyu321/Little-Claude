@@ -508,6 +508,10 @@ export function InterviewPanel() {
     if (elapsed < SILENCE_DURATION_MS) return;
 
     if (backend === 'local') {
+      // 从未捕获到非静音帧（纯静音环境）→ 跳过空推理，避免每 ~1.5s 一次
+      // 空 ASR 推理空转 CPU。mimoQuestionStartedRef 在非静音帧置位、
+      // finalizeLocalAsr 开头复位，与 mimo 分支的"曾有人声"语义一致。
+      if (!mimoQuestionStartedRef.current) return;
       await finalizeLocalAsr();
       return;
     }

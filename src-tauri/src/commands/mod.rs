@@ -2,6 +2,7 @@ pub mod anthropic_proxy;
 pub mod auth;
 pub mod claude_process;
 pub mod cli_resolver;
+pub mod download_cancel;
 pub mod export;
 pub mod external;
 pub mod files;
@@ -18,7 +19,9 @@ pub mod session;
 pub mod skill_translation;
 pub mod skills;
 pub mod speech;
+pub mod speech_runtime;
 pub mod ui;
+#[cfg(feature = "video-analysis")]
 pub mod video_analysis;
 pub mod cli_manage;
 pub mod wallpaper;
@@ -43,6 +46,7 @@ pub use skill_translation::*;
 pub use skills::*;
 pub use speech::*;
 pub use ui::*;
+#[cfg(feature = "video-analysis")]
 pub use video_analysis::*;
 pub use wallpaper::*;
 

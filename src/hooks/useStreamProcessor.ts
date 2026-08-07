@@ -287,12 +287,29 @@ function _maybeRefreshFileTree(tabId: string, toolUseId?: string, toolName?: str
   }
 }
 
+// H2: per-tab ExitPlanMode tracking.
+// The ref is created by InputBar as a plain boolean (useRef(false)) and reset
+// to `false` on every new session spawn. We lazily upgrade it to a
+// Record<string, boolean> keyed by tabId on first touch, treating any
+// non-object value (e.g. the InputBar reset `current = false`) as an empty
+// map. Keying by tabId prevents a BACKGROUND tab's ExitPlanMode from
+// triggering the FOREGROUND tab's silent auto-restart ("Continue." resubmit).
+function _getExitPlanMap(ref: MutableRefObject<Record<string, boolean> | boolean>): Record<string, boolean> {
+  if (typeof ref.current !== 'object' || ref.current === null) {
+    ref.current = {};
+  }
+  return ref.current;
+}
+
 /**
  * Configuration refs and callbacks that the stream processor needs
  * from the parent InputBar component.
  */
 export interface StreamProcessorConfig {
-  exitPlanModeSeenRef: MutableRefObject<boolean>;
+  /** H2: per-tab ExitPlanMode-seen flags (tabId → true), lazily upgraded from
+   *  the boolean created in InputBar. Union type keeps InputBar's
+   *  `useRef(false)` / `current = false` reset compiling unchanged. */
+  exitPlanModeSeenRef: MutableRefObject<Record<string, boolean> | boolean>;
   autoCompactFiredRef: MutableRefObject<boolean>;
   silentRestartRef: MutableRefObject<boolean>;
   handleSubmitRef: MutableRefObject<() => void>;
@@ -724,7 +741,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             // Code mode: suppress EnterPlanMode/ExitPlanMode (transparent to user)
             if (getEffectiveMode(store.getTab(tabId)?.sessionMeta) === 'code'
                 && (block.name === 'EnterPlanMode' || block.name === 'ExitPlanMode')) {
-              if (block.name === 'ExitPlanMode') exitPlanModeSeenRef.current = true;
+              // H2: record in THIS tab's slot — never the shared flag, so a
+              // background session's ExitPlanMode can't auto-restart the
+              // foreground tab's conversation.
+              if (block.name === 'ExitPlanMode') _getExitPlanMap(exitPlanModeSeenRef)[tabId] = true;
               continue;
             }
             if (block.name === 'AskUserQuestion') {
@@ -993,13 +1013,31 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         break;
       }
       case 'process_exit': {
+        // H1: stale-exit ownership guard — same hazard as the foreground
+        // branch: a background tab whose process was killed and replaced may
+        // still deliver the OLD process's process_exit late (after the new
+        // stdinId is in sessionMeta). Guard before touching any tab state.
+        const bgStdinId = msg.__stdinId as string | undefined;
+        const bgCurTab = store.getTab(tabId);
+        const bgCurStdinId = bgCurTab?.sessionMeta.stdinId;
+        const bgIsStaleExit = !!bgStdinId
+          && bgStdinId !== bgCurStdinId
+          && (bgCurStdinId !== undefined || bgCurTab?.sessionStatus === 'running');
+        if (bgIsStaleExit) {
+          // Old-process cleanup ONLY — leave the replacement session's status,
+          // stdinId, pending messages and draft untouched.
+          flushStreamBuffer(bgStdinId);
+          cleanupStreamListener(bgStdinId);
+          useSessionStore.getState().unregisterStdinTab(bgStdinId);
+          break;
+        }
+
         // Flush any remaining stream buffer before cleanup (#64)
         flushStreamBuffer(msg.__stdinId);
 
         // P0-5: Clean up Tauri event listeners for background tab.
         // __claudeUnlisteners is keyed by stdinId (desk_xxx), NOT tabId (session uuid).
         // Use msg.__stdinId (tagged by the listener closure) to find the correct entry.
-        const bgStdinId = msg.__stdinId;
         if (bgStdinId) {
           cleanupStreamListener(bgStdinId);
         }
@@ -1045,6 +1083,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           store.setInputDraft(tabId, bgExitDraft ? `${bgExitDraft}\n\n${bgPendingText}` : bgPendingText);
           store.clearPendingMessages(tabId);
         }
+        // H2: process is gone — drop this tab's ExitPlanMode-seen slot.
+        delete _getExitPlanMap(exitPlanModeSeenRef)[tabId];
         useSessionStore.getState().fetchSessions();
         break;
       }
@@ -1286,8 +1326,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
     // Helper: clear accumulated partial text (it will be replaced by the full message)
     const clearPartial = () => {
-      // Flush any buffered text so the final tokens aren't lost
-      flushStreamBuffer();
+      // L1: flush ONLY this tab's stream buffer. The no-arg flushStreamBuffer()
+      // previously wiped every session's buffer, clobbering concurrently
+      // streaming tabs' partial text. Prefer the message's own stdinId, then
+      // fall back to the tab's current stdinId; skip entirely if neither is
+      // available (the buffer is drained by the interval fallback anyway).
+      const flushId = msgStdinId || useChatStore.getState().getTab(tabId)?.sessionMeta.stdinId;
+      if (flushId) flushStreamBuffer(flushId);
       // Clear streams (lightweight — no tabs Map copy needed)
       const newStreams = new Map(useChatStore.getState().streams);
       newStreams.set(tabId, { partialText: '', partialThinking: '', isStreaming: false });
@@ -1574,7 +1619,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             // Don't show tool cards; track ExitPlanMode for auto-restart if CLI exits.
             if (getEffectiveMode(useChatStore.getState().getTab(tabId)?.sessionMeta) === 'code'
                 && (block.name === 'EnterPlanMode' || block.name === 'ExitPlanMode')) {
-              if (block.name === 'ExitPlanMode') exitPlanModeSeenRef.current = true;
+              // H2: per-tab slot (see _getExitPlanMap) — the restart check
+              // reads only THIS tab's flag.
+              if (block.name === 'ExitPlanMode') _getExitPlanMap(exitPlanModeSeenRef)[tabId] = true;
               continue;
             }
             setActivityStatus({ phase: 'tool', toolName: block.name });
@@ -2036,9 +2083,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Code mode: Auto-restart when ExitPlanMode caused CLI exit.
         // In stream-json mode, ExitPlanMode is treated as a permission denial,
         // causing the CLI to exit. Silently restart with --resume to continue.
-        if (exitPlanModeSeenRef.current && getEffectiveMode(useChatStore.getState().getTab(tabId)?.sessionMeta) === 'code'
+        // H2: read only THIS tab's flag — a background tab's ExitPlanMode must
+        // never trigger a silent "Continue." resubmit (extra billable turn) in
+        // the foreground conversation.
+        if (_getExitPlanMap(exitPlanModeSeenRef)[tabId]
+            && getEffectiveMode(useChatStore.getState().getTab(tabId)?.sessionMeta) === 'code'
             && msg.subtype !== 'success') {
-          exitPlanModeSeenRef.current = false;
+          delete _getExitPlanMap(exitPlanModeSeenRef)[tabId];
           debugLog('session', 'Code mode ExitPlanMode exit detected — auto-restarting with --resume');
           // Clean up dead process
           const oldStdinId = useChatStore.getState().getTab(tabId)?.sessionMeta.stdinId;
@@ -2055,7 +2106,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           requestAnimationFrame(() => handleSubmitRef.current());
           break;
         }
-        exitPlanModeSeenRef.current = false;
+        // H2: turn over without auto-restart — drop this tab's flag slot.
+        delete _getExitPlanMap(exitPlanModeSeenRef)[tabId];
 
         // Mark pending processing card (CLI slash command) as completed
         const pendingCmdMsgId = useChatStore.getState().getTab(tabId)?.sessionMeta.pendingCommandMsgId;
@@ -2328,6 +2380,39 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       }
 
       case 'process_exit': {
+        // H1: stale-exit ownership guard. When a tab's old process is killed
+        // and immediately replaced (Stop → resend, envFingerprint / mode /
+        // model change auto-kill-rebuild), the OLD process's process_exit can
+        // arrive LATE (Windows reaps the process tree slowly) — after the new
+        // stdinId is already written to sessionMeta. Treating that late event
+        // as the current process's exit would set the NEW session idle, clear
+        // its stdinId (later stream events never restore it), and roll pending
+        // messages back into the draft. Same guard pattern as InputBar's
+        // onSessionExit safety net ("Only act if this is still the active
+        // stdinId (avoid stale cleanup)").
+        const exitStdinId = msg.__stdinId as string | undefined;
+        const exitCurTab = useChatStore.getState().getTab(tabId);
+        const exitCurStdinId = exitCurTab?.sessionMeta.stdinId;
+        // Stale when the event names a stdinId that differs from the tab's
+        // current one. If the tab's stdinId was already cleared, only the Stop
+        // flow (status 'completed') is a genuine exit; a cleared stdinId while
+        // still 'running' means an in-flight kill-rebuild whose full cleanup
+        // would clobber the replacement process.
+        const isStaleExit = !!exitStdinId
+          && exitStdinId !== exitCurStdinId
+          && (exitCurStdinId !== undefined || exitCurTab?.sessionStatus === 'running');
+        if (isStaleExit) {
+          // Old-process cleanup ONLY: its event listeners, stdinId→tab mapping
+          // and stream buffer. Do NOT touch sessionStatus / sessionMeta.stdinId
+          // / pendingUserMessages / inputDraft / streams — they belong to the
+          // replacement process.
+          debugLog('session', 'stale process_exit ignored (stdinId mismatch)', { old: exitStdinId, current: exitCurStdinId });
+          flushStreamBuffer(exitStdinId);
+          cleanupStreamListener(exitStdinId);
+          useSessionStore.getState().unregisterStdinTab(exitStdinId);
+          break;
+        }
+
         // The CLI process has exited — clear the stdin handle but keep sessionId for resume
         clearPartial();
         debugLog('session', 'process_exit received', { stdinId: msg.__stdinId });
@@ -2424,6 +2509,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         setSessionMeta({ stdinId: undefined, lastProgressAt: undefined });
         // Session exited — stop any live token speed badge.
         useTokenSpeedStore.getState().end(tabId);
+        // H2: process is gone — drop this tab's ExitPlanMode-seen slot so the
+        // per-tab map cannot grow across session restarts.
+        delete _getExitPlanMap(exitPlanModeSeenRef)[tabId];
         // Clean up stdinId → tabId mapping to prevent memory leak
         if (exitingStdinId) {
           useSessionStore.getState().unregisterStdinTab(exitingStdinId);
@@ -2460,7 +2548,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
     } catch (err) {
       // P1-4: catch-all for unexpected errors in stream message processing
       console.error('[LITTLECLAUDE] handleStreamMessage error:', err, 'msg:', msg?.type, msg?.subtype);
-      const errTabId = useSessionStore.getState().selectedSessionId;
+      // L2: write the error into the tab that OWNS this stream — a background
+      // session's processing error must not appear inside the foreground
+      // conversation. resolveOwnerTab handles stdinId→tab (with self-healing);
+      // fall back to the selected tab only when no owner resolves.
+      const errTabId = resolveOwnerTab(msg?.__stdinId) || useSessionStore.getState().selectedSessionId;
       if (errTabId) {
         useChatStore.getState().addMessage(errTabId, {
           id: generateMessageId(),

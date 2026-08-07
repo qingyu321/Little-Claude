@@ -312,7 +312,23 @@ function TreeNode({
   const hasChildChanges = useFileStore((s) =>
     node.is_dir ? s.changedPrefixes.has(node.path) : false
   );
+  // R1 lazy loading: a dir whose children were invalidated by watcher events
+  // is stale; expanded stale dirs refetch in place (children are preserved so
+  // the subtree never collapses).
+  const isStale = useFileStore((s) => (node.is_dir ? s.staleDirs.has(node.path) : false));
+  const childrenVersion = useFileStore((s) => s.childrenVersion);
+  const loadDirChildren = useFileStore((s) => s.loadDirChildren);
   const isSelected = selectedFile === node.path;
+
+  // R1: fetch a directory's children on first expand, and refetch whenever it
+  // turns stale (or an invalidation bumped childrenVersion while a fetch was
+  // in flight, discarding it). Children live in the store tree — this effect
+  // is the only place that triggers a load.
+  useEffect(() => {
+    if (node.is_dir && expanded && (isStale || !node.children)) {
+      loadDirChildren(node.path, isStale);
+    }
+  }, [expanded, isStale, childrenVersion, node.is_dir, node.path, node.children, loadDirChildren]);
 
   // Track active drag listeners for cleanup on unmount
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -506,6 +522,11 @@ export function FileExplorer() {
   const rootPath = useFileStore((s) => s.rootPath);
   const changedFiles = useFileStore((s) => s.changedFiles);
   const clearChangedFiles = useFileStore((s) => s.clearChangedFiles);
+  // R1: search runs over a full-depth tree loaded on demand (the lazy tree
+  // only contains loaded/expanded levels)
+  const searchTree = useFileStore((s) => s.searchTree);
+  const isSearchLoading = useFileStore((s) => s.isSearchLoading);
+  const loadSearchTree = useFileStore((s) => s.loadSearchTree);
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
 
   const refreshTree = useFileStore((s) => s.refreshTree);
@@ -518,6 +539,13 @@ export function FileExplorer() {
   const [searchQuery, setSearchQuery] = useState('');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const searchActive = searchQuery.trim().length > 0;
+
+  // R1: load the full-depth search tree when a query starts (once per session)
+  useEffect(() => {
+    if (searchActive && searchTree.length === 0) loadSearchTree();
+  }, [searchActive, searchTree.length, loadSearchTree]);
 
   // Right-click menu state
   const [clipboardPath, setClipboardPath] = useState<string | null>(null);
@@ -831,33 +859,33 @@ export function FileExplorer() {
           </div>
         )}
         <div className="h-full overflow-y-auto py-1">
-        {isLoading && filteredTree.length === 0 ? (
+        {(isLoading && (searchActive ? searchTree.length === 0 : filteredTree.length === 0)) ||
+          (searchActive && isSearchLoading && searchTree.length === 0) ? (
           <div className="flex items-center justify-center py-8">
             <div className="w-5 h-5 border-2 border-accent/30
               border-t-accent rounded-full animate-spin" />
           </div>
+        ) : searchActive ? (
+          // --- Flat search results (full-depth tree, loaded on demand) ---
+          (() => {
+            const matches = collectMatches(searchTree, searchQuery.toLowerCase(), rootPath || '');
+            return matches.length > 0 ? (
+              <div className="py-1">
+                {matches.map((m) => (
+                  <SearchResultItem
+                    key={m.node.path}
+                    match={m}
+                    onContextMenu={handleContextMenu}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-xs text-text-tertiary">
+                {t('files.noFiles')}
+              </div>
+            );
+          })()
         ) : filteredTree.length > 0 ? (
-          searchQuery ? (
-            // --- Flat search results ---
-            (() => {
-              const matches = collectMatches(filteredTree, searchQuery.toLowerCase(), rootPath || '');
-              return matches.length > 0 ? (
-                <div className="py-1">
-                  {matches.map((m) => (
-                    <SearchResultItem
-                      key={m.node.path}
-                      match={m}
-                      onContextMenu={handleContextMenu}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8 text-xs text-text-tertiary">
-                  {t('files.noFiles')}
-                </div>
-              );
-            })()
-          ) : (
             // --- Normal tree view ---
             <>
               {/* Inline creation input at root level */}
@@ -904,7 +932,7 @@ export function FileExplorer() {
               ))}
             </>
           )
-        ) : (
+        : (
           <div className="text-center py-8 text-xs text-text-tertiary">
             {t('files.noFiles')}
           </div>

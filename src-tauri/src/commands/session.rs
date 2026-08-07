@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::commands::claude_process::{ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager};
 use crate::commands::metadata::session_names_path;
+#[cfg(feature = "video-analysis")]
 use crate::commands::video_analysis::inject_video_analysis_multimodal_env;
 use crate::{cli_download_dir, inject_proxy_env_vars, resolve_proxy_url, truncate_large_content};
 use crate::backends;
@@ -19,6 +20,56 @@ use crate::login_shell_proxy_env;
 use crate::shell_single_quote;
 #[cfg(target_os = "windows")]
 use crate::resolve_git_bash;
+
+// ── M4 (security): pending permission request registry ──────────────────────
+// respond_permission validates that the request_id it answers was actually
+// emitted to the frontend (see register_pending_permission_request in the
+// stdout reader below). This prevents injecting an arbitrary control_response
+// into a session's stdin. Entries expire after 5 minutes to avoid unbounded
+// growth. Note: codex sessions register their requests in start_codex_session
+// (lib.rs, out of scope) — the codex branch of respond_permission therefore
+// validates format only.
+const PERMISSION_REQUEST_TTL_SECS: u64 = 5 * 60;
+
+static PENDING_PERMISSION_REQUESTS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> =
+    OnceLock::new();
+
+fn pending_permission_requests() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    PENDING_PERMISSION_REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn permission_key(session_id: &str, request_id: &str) -> String {
+    format!("{}:{}", session_id, request_id)
+}
+
+/// Sweep expired entries and return whether `request_id` for `session_id` is a
+/// known pending permission request.
+fn pending_permission_request_exists(session_id: &str, request_id: &str) -> bool {
+    let mut map = pending_permission_requests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    map.retain(|_, t| now.saturating_duration_since(*t).as_secs() < PERMISSION_REQUEST_TTL_SECS);
+    map.contains_key(&permission_key(session_id, request_id))
+}
+
+/// Record a permission request that was forwarded to the frontend.
+fn register_pending_permission_request(session_id: &str, request_id: &str) {
+    let mut map = pending_permission_requests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    map.retain(|_, t| now.saturating_duration_since(*t).as_secs() < PERMISSION_REQUEST_TTL_SECS);
+    map.insert(permission_key(session_id, request_id), now);
+}
+
+/// Forget the request once its response has been written to the CLI.
+fn consume_pending_permission_request(session_id: &str, request_id: &str) {
+    let mut map = pending_permission_requests()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.remove(&permission_key(session_id, request_id));
+}
 
 #[tauri::command]
 pub async fn start_claude_session(
@@ -196,6 +247,7 @@ pub async fn start_claude_session(
     );
 
     // Inject default multimodal model for video-analysis skill (if user configured it).
+    #[cfg(feature = "video-analysis")]
     inject_video_analysis_multimodal_env(&mut resolved_env);
 
     // Build --settings JSON.
@@ -409,6 +461,7 @@ pub async fn start_claude_session(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .creation_flags(0x08000000)
+                .kill_on_drop(true) // future 被 drop（窗口关闭等）时不留孤儿进程
                 .spawn()
         };
 
@@ -468,6 +521,7 @@ pub async fn start_claude_session(
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .kill_on_drop(true) // future 被 drop 时不留孤儿进程
                 .spawn()
         };
 
@@ -736,6 +790,10 @@ pub async fn start_claude_session(
                                 tool_name, request_id
                             );
 
+                            // M4: record the request so respond_permission can
+                            // validate that it was really routed to the frontend.
+                            register_pending_permission_request(&sid_clone, &request_id);
+
                             // Emit as a special stream message (reuses the working stream channel)
                             // NOTE: type MUST match what the frontend expects in
                             // useStreamProcessor (KNOWN_STREAM_TYPES / switch cases).
@@ -963,6 +1021,23 @@ pub async fn send_raw_stdin(
     session_id: String,
     message: String,
 ) -> Result<(), String> {
+    // M3 (security): this raw stdin channel is only used by the legacy
+    // interactive-approval fallback — PermissionCard sends exactly 'y'/'n'
+    // when a permission request has no structured request_id (see
+    // src/components/chat/PermissionCard.tsx). Arbitrary NDJSON / control
+    // payload injection through this command is rejected: structured traffic
+    // must go through send_stdin / send_control_request / respond_permission.
+    if session_id.is_empty() || session_id.len() > 128 {
+        return Err("Invalid session_id".to_string());
+    }
+    let trimmed = message.trim();
+    if trimmed != "y" && trimmed != "n" {
+        return Err(
+            "send_raw_stdin only accepts 'y' or 'n' (legacy interactive approval); \
+             use send_stdin / respond_permission for structured input"
+                .to_string(),
+        );
+    }
     stdin_mgr.send(&session_id, &message).await
 }
 
@@ -987,6 +1062,16 @@ pub async fn respond_permission(
     let backend_name = process_mgr.get_backend(&session_id).await;
 
     if backend_name.as_deref() == Some("codex") {
+        // M4: codex permission requests are registered in start_codex_session
+        // (lib.rs, out of scope for this module's registry). Their request_ids
+        // are JSON-RPC integer ids (backends/codex.rs translate_approval_request)
+        // — enforce that format as the codex-side guard.
+        if request_id.is_empty()
+            || request_id.len() > 64
+            || !request_id.chars().all(|c| c.is_ascii_digit())
+        {
+            return Err(format!("Invalid codex permission request id: {}", request_id));
+        }
         // Codex: use JSON-RPC response format
         let backend = crate::backends::resolve_backend(Some("codex"));
         let behavior = if allow {
@@ -1002,6 +1087,18 @@ pub async fn respond_permission(
         );
         stdin_mgr.send(&session_id, &msg).await
     } else {
+        // M4: only answer permission requests that were actually routed to the
+        // frontend (registered in the stdout reader when the can_use_tool
+        // event was emitted). Unknown or expired request_ids are rejected —
+        // an arbitrary control_response can no longer be injected. The entry
+        // is consumed only after the write succeeds so a transient send
+        // failure does not break the frontend retry flow.
+        if !pending_permission_request_exists(&session_id, &request_id) {
+            return Err(format!(
+                "Unknown or expired permission request: {}",
+                request_id
+            ));
+        }
         // Claude: use SDK control protocol format
         let mut inner = serde_json::Map::new();
         if allow {
@@ -1030,7 +1127,11 @@ pub async fn respond_permission(
             }
         });
         let json_str = resp.to_string();
-        stdin_mgr.send(&session_id, &json_str).await
+        let result = stdin_mgr.send(&session_id, &json_str).await;
+        if result.is_ok() {
+            consume_pending_permission_request(&session_id, &request_id);
+        }
+        result
     }
 }
 
@@ -1137,7 +1238,7 @@ pub async fn list_active_processes(state: State<'_, ProcessManager>) -> Result<V
 /// Path to the file tracking Little Claude-managed session IDs
 pub(crate) fn tracked_sessions_path() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".tokenicode").join("tracked_sessions.txt")
+    home.join(crate::safe_data_dir_name()).join("tracked_sessions.txt")
 }
 
 /// Load the set of tracked session IDs.
@@ -1244,7 +1345,7 @@ pub async fn track_session(session_id: String) -> Result<(), String> {
     let path = tracked_sessions_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .tokenicode dir: {}", e))?;
+            .map_err(|e| format!("Failed to create safe data dir: {}", e))?;
     }
     // File is append-only; dedupe here (instead of only at startup cleanup)
     // to prevent duplicate lines accumulating over long-running sessions.

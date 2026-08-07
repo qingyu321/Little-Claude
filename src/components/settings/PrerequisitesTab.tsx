@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { bridge, type PrerequisiteItem, onPrereqInstallProgress, onLocalAsrDownloadProgress } from '../../lib/tauri-bridge';
+import { bridge, cancelDownload, invokeWithCancellation, type PrerequisiteItem, onPrereqInstallProgress, onLocalAsrDownloadProgress } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
@@ -117,6 +117,8 @@ export function PrerequisitesTab() {
   const [asrDownloading, setAsrDownloading] = useState(false);
   const [asrDownloadProgress, setAsrDownloadProgress] = useState('');
   const [asrDownloadError, setAsrDownloadError] = useState('');
+  // 当前 ASR 下载任务的取消 scope（下载中显示取消按钮，点击后删除 .part 停止下载）
+  const [asrDownloadScopeId, setAsrDownloadScopeId] = useState<string | null>(null);
 
   const checkAsrStatus = useCallback(() => {
     bridge.checkLocalAsrRuntime().then(setAsrRuntime).catch(() => {});
@@ -142,11 +144,16 @@ export function PrerequisitesTab() {
     setAsrDownloading(true);
     setAsrDownloadProgress('');
     setAsrDownloadError('');
+    // 取消 scope：下载中展示取消按钮，点击后后端停止下载并删除 .part 临时文件
+    const scopeId = `asr-download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setAsrDownloadScopeId(scopeId);
     try {
-      await bridge.downloadLocalAsrModel(undefined); // 自动尝试所有镜像
+      await invokeWithCancellation('download_local_asr_model', { mirrorIndex: null }, scopeId); // 自动尝试所有镜像
     } catch (e: any) {
       setAsrDownloadError(typeof e === 'string' ? e : e?.message || String(e));
       setAsrDownloading(false);
+    } finally {
+      setAsrDownloadScopeId(null);
     }
   }, []);
 
@@ -308,7 +315,7 @@ export function PrerequisitesTab() {
               <p className="text-xs text-green-500/70 mt-0.5 truncate">{asrModel.model_dir}</p>
             )}
           </div>
-          <div className="flex-shrink-0">
+          <div className="flex-shrink-0 flex items-center gap-2">
             {!asrModel?.installed && !asrDownloading && (
               <button
                 onClick={handleDownloadAsr}
@@ -316,6 +323,14 @@ export function PrerequisitesTab() {
               >
                 <IconInstall />
                 {t('settings.localAsr.download') || '下载模型'}
+              </button>
+            )}
+            {asrDownloading && asrDownloadScopeId && (
+              <button
+                onClick={() => cancelDownload(asrDownloadScopeId)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${btnOutline}`}
+              >
+                {t('common.cancel')}
               </button>
             )}
             {asrModel?.installed && (

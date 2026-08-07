@@ -12,12 +12,21 @@ use crate::{
 use crate::{claude_needs_cmd_wrapper, find_git_bash, git_download_dir};
 use crate::backends;
 use crate::commands::cli_resolver;
+use crate::commands::download_cancel::{self, CancelScope};
 use crate::commands::session::{encode_project_name, load_tracked_sessions, tracked_sessions_path};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::shell_single_quote;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+/// UUID-like validation: at least 32 chars, hex digits and hyphens only.
+/// Values passing this check are safe to embed in file names and in
+/// tracked_sessions.txt (no path separators, dots, or newlines possible).
+/// Mirrors the local helper used in session.rs / rewind.rs.
+fn is_uuid_like(s: &str) -> bool {
+    s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
 
 // ── Setup: CLI Detection, Installation & Login ──────────────────────────────
 
@@ -73,16 +82,19 @@ pub async fn run_claude_plugin_command(
     let mut cmd = if claude_needs_cmd_wrapper(&binary) {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(&binary).arg("plugin");
+        c.kill_on_drop(true);
         c
     } else {
         let mut c = Command::new(&binary);
         c.arg("plugin");
+        c.kill_on_drop(true);
         c
     };
     #[cfg(not(target_os = "windows"))]
     let mut cmd = {
         let mut c = Command::new(&binary);
         c.arg("plugin");
+        c.kill_on_drop(true);
         c
     };
     cmd.args(&args);
@@ -141,12 +153,14 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                         .args(["/C", &path, "--version"])
                         .env("PATH", &enriched_path)
                         .creation_flags(0x08000000)
+                        .kill_on_drop(true)
                         .output()
                 } else {
                     Command::new(&path)
                         .arg("--version")
                         .env("PATH", &enriched_path)
                         .creation_flags(0x08000000)
+                        .kill_on_drop(true)
                         .output()
                 };
                 match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
@@ -186,6 +200,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                 Command::new(&path)
                     .arg("--version")
                     .env("PATH", &enriched_path)
+                    .kill_on_drop(true)
                     .output(),
             )
             .await
@@ -322,12 +337,14 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
                         .args(["/C", &path, "--version"])
                         .env("PATH", &enriched_path)
                         .creation_flags(0x08000000)
+                        .kill_on_drop(true)
                         .output()
                 } else {
                     Command::new(&path)
                         .arg("--version")
                         .env("PATH", &enriched_path)
                         .creation_flags(0x08000000)
+                        .kill_on_drop(true)
                         .output()
                 };
                 match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
@@ -348,6 +365,7 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
                 let fut = Command::new(&path)
                     .arg("--version")
                     .env("PATH", &enriched_path)
+                    .kill_on_drop(true)
                     .output();
                 match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
                     Ok(r) => r,
@@ -480,6 +498,7 @@ async fn install_codex_via_npm(app: &AppHandle, china: bool) -> Result<(), Strin
             cmd.env("PATH", &enriched_path)
                 .stdin(Stdio::null())
                 .creation_flags(0x08000000);
+            cmd.kill_on_drop(true);
             tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
         };
         #[cfg(not(target_os = "windows"))]
@@ -488,6 +507,7 @@ async fn install_codex_via_npm(app: &AppHandle, china: bool) -> Result<(), Strin
             cmd.args(&args_str)
                 .env("PATH", &enriched_path)
                 .stdin(Stdio::null());
+            cmd.kill_on_drop(true);
             tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
         };
 
@@ -546,7 +566,9 @@ pub async fn install_codex_cli(app: AppHandle) -> Result<(), String> {
     let has_npm = is_system_npm_available().await || get_local_node_bin().is_some();
     if !has_npm {
         eprintln!("[install_codex_cli] npm not available, deploying Node.js locally...");
-        install_node_env_inner(&app, china).await.map_err(|e| {
+        // Codex 安装暂不支持取消（scope_id 不传入），传空作用域
+        let no_scope = CancelScope::new(None);
+        install_node_env_inner(&app, china, &no_scope).await.map_err(|e| {
             format!(
                 "Failed to install Node.js runtime: {}. Please install Node.js manually.",
                 e
@@ -628,6 +650,7 @@ pub async fn update_codex_cli(app: AppHandle) -> Result<String, String> {
             cmd.env("PATH", &enriched_path)
                 .stdin(Stdio::null())
                 .creation_flags(0x08000000);
+            cmd.kill_on_drop(true);
             tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
         };
         #[cfg(not(target_os = "windows"))]
@@ -636,6 +659,7 @@ pub async fn update_codex_cli(app: AppHandle) -> Result<String, String> {
             cmd.args(&args_str)
                 .env("PATH", &enriched_path)
                 .stdin(Stdio::null());
+            cmd.kill_on_drop(true);
             tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
         };
 
@@ -756,33 +780,61 @@ pub async fn export_codex_to_claude(
 ) -> Result<String, String> {
     // Extract sessionId from the first JSONL line that has one.
     // The reconstructJsonl() frontend function embeds the same UUID in every line.
+    // H2: only UUID-like ids are accepted — anything else (path separators,
+    // newlines, dots) is skipped with a warning and never used in a file path.
     let session_uuid = jsonl_content
         .lines()
         .find_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            v.get("sessionId")
+            let id = v
+                .get("sessionId")
                 .or_else(|| v.get("session_id"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
+                .and_then(|v| v.as_str())?;
+            if is_uuid_like(id) {
+                Some(id.to_string())
+            } else {
+                eprintln!(
+                    "[LITTLECLAUDE:export] 跳过无效的 sessionId: {:?}",
+                    id
+                );
+                None
+            }
         })
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Defense in depth: the extracted (or freshly generated) id must be
+    // UUID-like before it is used as a file name or registered in
+    // tracked_sessions.txt.
+    if !is_uuid_like(&session_uuid) {
+        return Err(format!("无效的会话 ID 格式: {}", session_uuid));
+    }
 
     let encoded_cwd = encode_project_name(&cwd);
     eprintln!(
         "[LITTLECLAUDE:export] export_codex_to_claude: cwd={}, encoded={}, jsonl_len={}, uuid={}",
         cwd, encoded_cwd, jsonl_content.len(), session_uuid
     );
-    let dir = dirs::home_dir()
-        .ok_or("无法获取用户目录")?
-        .join(".claude")
-        .join("projects")
-        .join(&encoded_cwd);
+    let home = dirs::home_dir().ok_or("无法获取用户目录")?;
+    let projects_root = home.join(".claude").join("projects");
+    let dir = projects_root.join(&encoded_cwd);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
-    let file_path = dir.join(format!("{}.jsonl", session_uuid));
+
+    // H2: canonicalize the target dir and the projects root — the final
+    // path must stay inside ~/.claude/projects/ (the cwd itself is already
+    // encode_project_name'd, this check is the final backstop).
+    let dir_canonical =
+        dir.canonicalize().map_err(|e| format!("导出目录校验失败: {}", e))?;
+    let root_canonical = projects_root
+        .canonicalize()
+        .map_err(|e| format!("导出目录校验失败: {}", e))?;
+    if !dir_canonical.starts_with(&root_canonical) {
+        return Err("导出目录不在 ~/.claude/projects/ 目录内".to_string());
+    }
+
+    let file_path = dir_canonical.join(format!("{}.jsonl", session_uuid));
     std::fs::write(&file_path, &jsonl_content).map_err(|e| format!("写入文件失败: {}", e))?;
 
     // Write origin marker for UI hint
-    let origin_path = dir.join(format!("{}.codex-origin", session_uuid));
+    let origin_path = dir_canonical.join(format!("{}.codex-origin", session_uuid));
     std::fs::write(&origin_path, "codex").ok();
 
     // Register in tracked_sessions.txt
@@ -805,12 +857,31 @@ pub async fn export_claude_to_codex(
     // Use projectDir directly  --?it IS the directory name on disk
     // (created by Claude CLI). Re-encoding the cwd would mismatch
     // because Claude CLI encodes spaces/dots differently.
-    let file_path = dirs::home_dir()
-        .ok_or("无法获取用户目录")?
-        .join(".claude")
-        .join("projects")
-        .join(&project_dir)
-        .join(format!("{}.jsonl", session_id));
+    // H3: project_dir must be a bare directory-name fragment (the encoded
+    // form never contains separators or dots, so ".." traversal and absolute
+    // paths are impossible), and the session id must be UUID-like.
+    if project_dir.contains('/') || project_dir.contains('\\') || project_dir.contains('.') {
+        return Err(format!("无效的项目目录名: {}", project_dir));
+    }
+    if !is_uuid_like(&session_id) {
+        return Err(format!("无效的会话 ID 格式: {}", session_id));
+    }
+
+    let home = dirs::home_dir().ok_or("无法获取用户目录")?;
+    let projects_root = home.join(".claude").join("projects");
+    let dir = projects_root.join(&project_dir);
+    // H3: canonicalize the target dir and ensure it stays inside the
+    // ~/.claude/projects/ root (also catches symlinks escaping it).
+    let dir_canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("读取会话文件失败: {}", e))?;
+    let root_canonical = projects_root
+        .canonicalize()
+        .map_err(|e| format!("读取会话文件失败: {}", e))?;
+    if !dir_canonical.starts_with(&root_canonical) {
+        return Err("会话文件不在 ~/.claude/projects/ 目录内".to_string());
+    }
+    let file_path = dir_canonical.join(format!("{}.jsonl", session_id));
 
     eprintln!(
         "[LITTLECLAUDE:export] export_claude_to_codex: session={}, project_dir={}, path={}",
@@ -843,6 +914,7 @@ pub async fn diagnose_cli() -> Result<Vec<cli_resolver::CliCandidate>, String> {
                     .stdin(Stdio::null())
                     .stderr(Stdio::null())
                     .creation_flags(0x08000000)
+                    .kill_on_drop(true)
                     .output()
             } else {
                 Command::new(&candidate.path)
@@ -851,6 +923,7 @@ pub async fn diagnose_cli() -> Result<Vec<cli_resolver::CliCandidate>, String> {
                     .stdin(Stdio::null())
                     .stderr(Stdio::null())
                     .creation_flags(0x08000000)
+                    .kill_on_drop(true)
                     .output()
             };
             tokio::time::timeout(std::time::Duration::from_secs(3), fut).await
@@ -863,6 +936,7 @@ pub async fn diagnose_cli() -> Result<Vec<cli_resolver::CliCandidate>, String> {
                 .env("PATH", &enriched_path)
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())
+                .kill_on_drop(true)
                 .output(),
         )
         .await;
@@ -937,7 +1011,7 @@ static CHINA_NETWORK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Path for persisting the network environment detection result.
 fn network_env_cache_path() -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("Home directory not found")?;
-    Ok(home.join(".tokenicode").join("network_env"))
+    Ok(home.join(crate::safe_data_dir_name()).join("network_env"))
 }
 
 async fn detect_china_network() -> bool {
@@ -1001,10 +1075,147 @@ pub(crate) async fn is_china_network() -> bool {
     result
 }
 
-/// Install Claude CLI via npm. Supports system npm or local Node.js npm.
+/// Fetch the latest published CLI version from version sources.
+/// Sources: herear.cn mirror (China-first) → GCS → npm registry (non-China only).
+async fn fetch_latest_cli_version(client: &reqwest::Client, china: bool) -> Option<String> {
+    let version_urls: Vec<String> = if china {
+        vec![
+            format!("{}/latest", CLI_MIRROR_BASE),
+            format!("{}/latest", CLI_GCS_BASE),
+        ]
+    } else {
+        vec![
+            format!("{}/latest", CLI_GCS_BASE),
+            format!("{}/latest", CLI_MIRROR_BASE),
+        ]
+    };
+
+    for url in &version_urls {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let v = text.trim().to_string();
+                    if !v.is_empty() {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback: npm registry (skip in China — npm is typically blocked)
+    if !china {
+        if let Ok(resp) = client
+            .get("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            let json: serde_json::Value = resp.json().await.unwrap_or_default();
+            if let Some(v) = json.get("version").and_then(|v| v.as_str()) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read the installed version directly from npm-global's package.json.
+/// Faster and more reliable than spawning `claude --version` (which has a 2s
+/// timeout and may resolve to a pinned/system CLI instead of ours).
+fn npm_global_installed_version() -> Option<String> {
+    let pkg = npm_global_dir().ok()?.join("node_modules").join("@anthropic-ai").join("claude-code").join("package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+/// npm package spec for installation: pinned to `target` when known so mirror
+/// `@latest` cache staleness (npmmirror served 2.1.216 as "latest" on 2026-08-06)
+/// can never install a stale version; falls back to @latest when unknown.
+fn cli_pkg_spec(target: &Option<String>) -> String {
+    match target {
+        Some(v) => format!("@anthropic-ai/claude-code@{v}"),
+        None => "@anthropic-ai/claude-code@latest".to_string(),
+    }
+}
+
+/// 带取消检查的子进程等待：npm/pip 等长命令执行期间周期轮询取消令牌。
+/// 用户取消时返回 Err(download_cancel::CANCELLED_ERROR)，调用方应清理
+/// 已创建的文件并向上传播该错误（前端据此识别"用户取消"）。
+///
+/// 用 spawn + wait 而非 output()：取消时能拿到子进程 pid，在 Windows 上
+/// 以 taskkill /T 连杀整个进程树——`cmd /C npm.cmd` 派生的 node 等孙进程
+/// 不受 kill_on_drop 控制，只杀直接子进程会让 npm 在后台继续装完。
+/// stdout/stderr 置空：所有调用方只检查 exit status，不读输出内容。
+async fn await_command_with_cancel(
+    cmd: &mut Command,
+    timeout_secs: u64,
+    scope: &CancelScope,
+) -> Result<std::process::Output, String> {
+    let mut child = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run command: {}", e))?;
+    let pid = child.id();
+
+    let wait = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait());
+    tokio::pin!(wait);
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if scope.is_cancelled() {
+                    kill_process_tree(pid);
+                    // 等进程树退出，调用方的 cleanup_created_dir 才能删掉目录
+                    // （Windows 上文件句柄未释放时 remove_dir_all 会失败）
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    return Err(download_cancel::CANCELLED_ERROR.to_string());
+                }
+            }
+            res = &mut wait => {
+                return match res {
+                    Ok(Ok(status)) => Ok(std::process::Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    }),
+                    Ok(Err(e)) => Err(format!("Failed to wait for command: {}", e)),
+                    Err(_) => Err(format!("Command timed out after {}s", timeout_secs)),
+                };
+            }
+        }
+    }
+}
+
+/// 终止子进程树。Windows：taskkill /T /F 连杀孙进程（cmd /C 包装的 node 等）；
+/// 其他平台 kill_on_drop 已覆盖直接子进程，无需额外处理。
+#[cfg(target_os = "windows")]
+fn kill_process_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_process_tree(_pid: Option<u32>) {}
+
 /// Install Claude CLI via npm. Supports system npm or local Node.js npm.
 /// Uses --prefix to install into app-local directory when using local Node.js.
-async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String> {
+/// 用户取消时清理本次安装创建的目录（只删本次新建的，避免误删既有安装）。
+fn cleanup_created_dir(existed_before: bool, dir: &std::path::Path) {
+    if !existed_before {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+async fn install_cli_via_npm(app: &AppHandle, china: bool, scope: &CancelScope) -> Result<(), String> {
     let _ = app.emit(
         "setup:download:progress",
         serde_json::json!({
@@ -1034,14 +1245,39 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
     // This avoids polluting system npm globals and ensures finalize_cli_install_paths
     // can reliably add the bin directory to PATH (fixes PowerShell not finding `claude`).
     let prefix_dir = npm_global_dir()?;
+    // 取消时只清理本次安装新建的目录（避免误删既有安装）
+    let prefix_existed = prefix_dir.exists();
     std::fs::create_dir_all(&prefix_dir)
         .map_err(|e| format!("Failed to create npm-global dir: {}", e))?;
 
     // Use app-local npm cache to avoid EPERM when system cache dir is locked
     // (common on Windows with antivirus or concurrent npm processes).
     let cache_dir = npm_cache_dir()?;
+    let cache_existed = cache_dir.exists();
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Failed to create npm-cache dir: {}", e))?;
+
+    // Resolve the target version once so we can pin the npm package spec.
+    // Pinning defeats mirror `@latest` cache staleness (npmmirror once served
+    // an old version as "latest"); post-install we verify the installed version.
+    let target_version = {
+        let c = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        fetch_latest_cli_version(&c, china).await
+    };
+    let pkg_spec = cli_pkg_spec(&target_version);
+    eprintln!(
+        "[install_cli_via_npm] target version {:?}, installing '{}'",
+        target_version, pkg_spec
+    );
+
+    if scope.is_cancelled() {
+        cleanup_created_dir(prefix_existed, &prefix_dir);
+        cleanup_created_dir(cache_existed, &cache_dir);
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
 
     let registries: Vec<&str> = if china {
         vec![
@@ -1059,6 +1295,13 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
 
     let mut last_err = String::new();
     for registry in &registries {
+        // 每次尝试前检查取消（npm 运行期间由 await_command_with_cancel 轮询）
+        if scope.is_cancelled() {
+            cleanup_created_dir(prefix_existed, &prefix_dir);
+            cleanup_created_dir(cache_existed, &cache_dir);
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
         eprintln!(
             "Trying npm install with registry: {} (prefix: {}, cache: {})",
             registry,
@@ -1077,7 +1320,7 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
         let args: Vec<String> = vec![
             "install".to_string(),
             "-g".to_string(),
-            "@anthropic-ai/claude-code".to_string(),
+            pkg_spec.clone(),
             format!("--registry={}", registry),
             format!("--prefix={}", prefix_dir.display()),
             format!("--cache={}", cache_dir.display()),
@@ -1093,7 +1336,8 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
             cmd.env("PATH", &enriched_path)
                 .stdin(Stdio::null())
                 .creation_flags(0x08000000);
-            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+            cmd.kill_on_drop(true);
+            await_command_with_cancel(&mut cmd, 300, scope).await
         };
         #[cfg(not(target_os = "windows"))]
         let result = {
@@ -1101,12 +1345,68 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
             cmd.args(&args_str)
                 .env("PATH", &enriched_path)
                 .stdin(Stdio::null());
-            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+            cmd.kill_on_drop(true);
+            await_command_with_cancel(&mut cmd, 300, scope).await
         };
 
         match result {
-            Ok(Ok(output)) if output.status.success() => {
-                eprintln!("npm install succeeded via {}", registry);
+            Ok(output) if output.status.success() => {
+                let mut installed = npm_global_installed_version();
+                if installed.is_none() {
+                    installed = check_claude_cli().await.ok().and_then(|c| c.version);
+                }
+                eprintln!(
+                    "npm install succeeded via {} (installed: {:?})",
+                    registry, installed
+                );
+                // Post-install verification. If the version sources were all
+                // down at install time (target unknown), retry the fetch once
+                // now — a stale mirror install must not pass silently. An
+                // unreadable installed version is a loud failure, never Ok.
+                let target = match target_version.as_ref() {
+                    Some(t) => Some(t.clone()),
+                    None => {
+                        let c = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()
+                            .unwrap_or_default();
+                        fetch_latest_cli_version(&c, china).await
+                    }
+                };
+                match (target.as_ref(), installed.as_ref()) {
+                    (Some(t), Some(got)) => {
+                        if got != t && version_gt(t, got) {
+                            last_err = format!(
+                                "Mirror {} installed v{} but latest is v{}",
+                                registry, got, t
+                            );
+                            eprintln!("[install_cli_via_npm] {}", last_err);
+                            continue;
+                        }
+                    }
+                    (Some(t), None) => {
+                        last_err = format!(
+                            "npm install succeeded via {} but installed version could not be read (target v{})",
+                            registry, t
+                        );
+                        eprintln!("[install_cli_via_npm] {}", last_err);
+                        return Err(last_err);
+                    }
+                    (None, Some(_)) => {
+                        eprintln!(
+                            "[install_cli_via_npm] version sources unavailable; installed via {} without verification",
+                            registry
+                        );
+                    }
+                    (None, None) => {
+                        last_err = format!(
+                            "npm install succeeded via {} but installed version could not be read",
+                            registry
+                        );
+                        eprintln!("[install_cli_via_npm] {}", last_err);
+                        return Err(last_err);
+                    }
+                }
                 let _ = app.emit(
                     "setup:download:progress",
                     serde_json::json!({
@@ -1115,19 +1415,26 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
                 );
                 return Ok(());
             }
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 last_err = format!("npm install failed ({}): {}", registry, stderr);
                 eprintln!("{}", last_err);
             }
-            Ok(Err(e)) => {
-                last_err = format!("npm not found or failed to run: {}", e);
-                eprintln!("{}", last_err);
-                return Err(last_err);
-            }
-            Err(_) => {
-                last_err = format!("npm install timed out ({})", registry);
-                eprintln!("{}", last_err);
+            Err(e) => {
+                // 用户取消：清理本次新建的目录后原样传播（前端据此识别）
+                if e == download_cancel::CANCELLED_ERROR {
+                    cleanup_created_dir(prefix_existed, &prefix_dir);
+                    cleanup_created_dir(cache_existed, &cache_dir);
+                    return Err(download_cancel::CANCELLED_ERROR.to_string());
+                }
+                if e.starts_with("Command timed out") {
+                    last_err = format!("npm install timed out ({})", registry);
+                    eprintln!("{}", last_err);
+                } else {
+                    last_err = format!("npm not found or failed to run: {}", e);
+                    eprintln!("{}", last_err);
+                    return Err(last_err);
+                }
             }
         }
     }
@@ -1152,11 +1459,21 @@ fn version_gt(a: &str, b: &str) -> bool {
     };
     let va = parse(a);
     let vb = parse(b);
-    // Only compare if both parsed to the same number of segments
-    if va.len() != vb.len() && (va.is_empty() || vb.is_empty()) {
+    // A version that fails to parse entirely (empty/garbage) is never
+    // "greater" — don't let dirty data drive an upgrade or a downgrade.
+    if va.is_empty() || vb.is_empty() {
         return false;
     }
-    va > vb
+    // Compare segment-wise, treating missing trailing segments as 0
+    // ("2.10.0" == "2.10", "2.10.1" > "2.10").
+    for i in 0..va.len().max(vb.len()) {
+        let x = va.get(i).copied().unwrap_or(0);
+        let y = vb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 /// Return the platform key matching the server manifest (e.g. "win32-x64").
@@ -1190,10 +1507,13 @@ fn native_platform_key() -> &'static str {
 /// Try to update the CLI by downloading a native binary from GCS.
 /// Only used for non-China users (GCS is fast globally; herear.cn bandwidth is too small
 /// for ~230MB binaries). China users go straight to npm fallback with version verification.
-async fn try_native_cli_update(china: bool) -> Result<String, String> {
+async fn try_native_cli_update(china: bool, scope: &CancelScope) -> Result<String, String> {
     // Skip native binary download for China  --?GCS may be blocked, herear.cn bandwidth too small
     if china {
         return Err("Native binary download skipped for China network".to_string());
+    }
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
     }
 
     let client = reqwest::Client::builder()
@@ -1265,6 +1585,11 @@ async fn try_native_cli_update(china: bool) -> Result<String, String> {
 
     let mut downloaded = false;
     for base in &sources {
+        if scope.is_cancelled() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
         let url = format!("{}/{}/{}/{}", base, version, platform, binary_name);
         eprintln!("[native_update] downloading from {}", url);
 
@@ -1281,16 +1606,28 @@ async fn try_native_cli_update(china: bool) -> Result<String, String> {
         };
 
         let mut stream = resp.bytes_stream();
-        let mut file =
-            std::fs::File::create(&tmp_path).map_err(|e| format!("Cannot create tmp file: {e}"))?;
-
-        use std::io::Write;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Download stream error: {e}"))?;
-            file.write_all(&chunk)
-                .map_err(|e| format!("Write error: {e}"))?;
+        // 写盘期间周期检查取消令牌（块结束时 file 关闭，之后才能删临时文件）
+        let mut download_err: Option<String> = None;
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)
+                .map_err(|e| format!("Cannot create tmp file: {e}"))?;
+            while let Some(chunk) = stream.next().await {
+                if scope.is_cancelled() {
+                    download_err = Some(download_cancel::CANCELLED_ERROR.to_string());
+                    break;
+                }
+                let chunk = chunk.map_err(|e| format!("Download stream error: {e}"))?;
+                if let Err(e) = file.write_all(&chunk) {
+                    download_err = Some(format!("Write error: {e}"));
+                    break;
+                }
+            }
         }
-        drop(file);
+        if let Some(e) = download_err {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
 
         // 5. Verify SHA-256 checksum
         if !expected_checksum.is_empty() {
@@ -1345,11 +1682,12 @@ async fn try_native_cli_update(china: bool) -> Result<String, String> {
 ///   Non-China: native binary from GCS  --?npm fallback
 ///   China: npm with multi-registry + version verification (npmmirror  --?npm official)
 #[tauri::command]
-pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
+pub async fn update_claude_cli(app: AppHandle, scope_id: Option<String>) -> Result<String, String> {
+    let scope = CancelScope::new(scope_id.as_deref());
     let china = is_china_network().await;
 
     // Phase 1: Try native binary download (non-China only, GCS CDN)
-    match try_native_cli_update(china).await {
+    match try_native_cli_update(china, &scope).await {
         Ok(version) => {
             eprintln!(
                 "[update_claude_cli] native binary update success: v{}",
@@ -1358,6 +1696,10 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
             return Ok(version);
         }
         Err(e) => {
+            // 用户取消：不降级到 npm 流程，直接传播
+            if e == download_cancel::CANCELLED_ERROR {
+                return Err(e);
+            }
             eprintln!(
                 "[update_claude_cli] native binary skipped/failed: {}, using npm",
                 e
@@ -1389,34 +1731,21 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
     let cache_dir = npm_cache_dir()?;
     std::fs::create_dir_all(&cache_dir).ok();
 
-    // Fetch target version for post-install verification (herear.cn for China, GCS for others)
+    // Fetch target version for post-install verification (herear.cn for China, GCS for others).
+    // Record the pre-update version too so a mirror can never downgrade the CLI.
     let target_version = {
         let c = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-        let urls = if china {
-            vec![
-                format!("{}/latest", CLI_MIRROR_BASE),
-                format!("{}/latest", CLI_GCS_BASE),
-            ]
-        } else {
-            vec![format!("{}/latest", CLI_GCS_BASE)]
-        };
-        let mut ver: Option<String> = None;
-        for url in &urls {
-            if let Ok(resp) = c.get(url).send().await {
-                if let Ok(text) = resp.text().await {
-                    let v = text.trim().to_string();
-                    if !v.is_empty() {
-                        ver = Some(v);
-                        break;
-                    }
-                }
-            }
-        }
-        ver
+        fetch_latest_cli_version(&c, china).await
     };
+    let before_version = npm_global_installed_version();
+    let pkg_spec = cli_pkg_spec(&target_version);
+    eprintln!(
+        "[update_claude_cli] target {:?}, before {:?}, installing '{}'",
+        target_version, before_version, pkg_spec
+    );
 
     let registries: Vec<&str> = if china {
         vec![
@@ -1440,7 +1769,7 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
         let args: Vec<String> = vec![
             "install".to_string(),
             "-g".to_string(),
-            "@anthropic-ai/claude-code@latest".to_string(),
+            pkg_spec.clone(),
             format!("--registry={}", registry),
             format!("--prefix={}", prefix_dir.display()),
             format!("--cache={}", cache_dir.display()),
@@ -1455,25 +1784,38 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
             cmd.env("PATH", &enriched_path)
                 .stdin(Stdio::null())
                 .creation_flags(0x08000000);
-            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+            cmd.kill_on_drop(true);
+            await_command_with_cancel(&mut cmd, 300, &scope).await
         };
         #[cfg(not(target_os = "windows"))]
         let result = {
             let mut cmd = Command::new(&npm_path);
             cmd.args(&args_str);
             cmd.env("PATH", &enriched_path).stdin(Stdio::null());
-            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+            cmd.kill_on_drop(true);
+            await_command_with_cancel(&mut cmd, 300, &scope).await
         };
 
         match result {
-            Ok(Ok(output)) if output.status.success() => {
-                let check = check_claude_cli().await.unwrap_or(CliStatus {
-                    installed: false,
-                    version: None,
-                    path: None,
-                    git_bash_missing: false,
-                });
-                let version = check.version.unwrap_or_else(|| "unknown".to_string());
+            Ok(output) if output.status.success() => {
+                // Read the version straight from npm-global's package.json —
+                // spawning `claude --version` here is slow (2s timeout in
+                // check_claude_cli) and may resolve to a pinned/system CLI.
+                let mut installed = npm_global_installed_version();
+                if installed.is_none() {
+                    installed = check_claude_cli().await.ok().and_then(|c| c.version);
+                }
+                // The installed version must be readable — returning Ok with an
+                // "unknown" version would look like a successful update while the
+                // verification guard chain was silently skipped.
+                let Some(version) = installed.clone() else {
+                    let msg = format!(
+                        "npm install succeeded via {} but the installed version could not be read",
+                        registry
+                    );
+                    eprintln!("[update_claude_cli] {}", msg);
+                    return Err(msg);
+                };
                 eprintln!(
                     "[update_claude_cli] npm installed v{} from {}",
                     version, registry
@@ -1501,9 +1843,26 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
                     }
                 }
 
+                // No known target: never let a mirror downgrade the CLI.
+                if target_version.is_none() {
+                    if let (Some(ref before), Some(ref after)) = (before_version.as_ref(), installed.as_ref()) {
+                        if version_gt(before, after) {
+                            eprintln!(
+                                "[update_claude_cli] v{} < previous v{}, trying next registry",
+                                after, before
+                            );
+                            last_err = format!(
+                                "Mirror {} installed v{} which is older than the previous v{}",
+                                registry, after, before
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 return Ok(version);
             }
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 last_err = format!(
                     "npm install failed ({}): {}",
@@ -1512,13 +1871,18 @@ pub async fn update_claude_cli(app: AppHandle) -> Result<String, String> {
                 );
                 eprintln!("[update_claude_cli] {}", last_err);
             }
-            Ok(Err(e)) => {
-                last_err = format!("Failed to run npm: {e}");
-                eprintln!("[update_claude_cli] {}", last_err);
-            }
-            Err(_) => {
-                last_err = format!("npm install timed out ({})", registry);
-                eprintln!("[update_claude_cli] {}", last_err);
+            Err(e) => {
+                // 用户取消：不清理 npm-global（CLI 可能已装在里面），直接传播
+                if e == download_cancel::CANCELLED_ERROR {
+                    return Err(download_cancel::CANCELLED_ERROR.to_string());
+                }
+                if e.starts_with("Command timed out") {
+                    last_err = format!("npm install timed out ({})", registry);
+                    eprintln!("[update_claude_cli] {}", last_err);
+                } else {
+                    last_err = format!("Failed to run npm: {e}");
+                    eprintln!("[update_claude_cli] {}", last_err);
+                }
             }
         }
     }
@@ -1551,50 +1915,8 @@ pub async fn check_cli_update() -> Result<CliUpdateCheck, String> {
     eprintln!("[check_cli_update] after is_china_network, elapsed {:?}", t0.elapsed());
 
     // Version check sources: China users try herear.cn first (GCS may be slow/blocked)
-    let version_urls: Vec<String> = if china {
-        vec![
-            format!("{}/latest", CLI_MIRROR_BASE),
-            format!("{}/latest", CLI_GCS_BASE),
-        ]
-    } else {
-        vec![
-            format!("{}/latest", CLI_GCS_BASE),
-            format!("{}/latest", CLI_MIRROR_BASE),
-        ]
-    };
-
-    let mut latest: Option<String> = None;
-    for url in &version_urls {
-        if let Ok(resp) = client.get(url).send().await {
-            if resp.status().is_success() {
-                if let Ok(text) = resp.text().await {
-                    let v = text.trim().to_string();
-                    if !v.is_empty() {
-                        latest = Some(v);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    eprintln!("[check_cli_update] after version URLs, elapsed {:?}, latest={:?}", t0.elapsed(), latest);
-
-    // Final fallback: npm registry (skip in China  --?npm is typically blocked)
-    if latest.is_none() && !china {
-        if let Ok(resp) = client
-            .get("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
-            let json: serde_json::Value = resp.json().await.unwrap_or_default();
-            latest = json
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-    }
-    eprintln!("[check_cli_update] done, total elapsed {:?}, latest={:?}", t0.elapsed(), latest);
+    let latest = fetch_latest_cli_version(&client, china).await;
+    eprintln!("[check_cli_update] version fetch done, elapsed {:?}, latest={:?}", t0.elapsed(), latest);
 
     let update_available = match (&current, &latest) {
         (Some(cur), Some(lat)) => version_gt(lat.trim(), cur.trim()),
@@ -1614,7 +1936,9 @@ pub async fn check_cli_update() -> Result<CliUpdateCheck, String> {
 /// 2. Ensure npm is available  --?download Node.js locally if needed
 /// 3. Install CLI via npm with region-appropriate registry mirrors
 #[tauri::command]
-pub async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
+pub async fn install_claude_cli(app: AppHandle, scope_id: Option<String>) -> Result<(), String> {
+    let scope = CancelScope::new(scope_id.as_deref());
+
     // Skip installation if CLI already exists on system.
     // On Windows, still continue when git-bash is missing because reinstall is the repair path.
     let existing_cli = find_claude_binary();
@@ -1635,18 +1959,25 @@ pub async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
 
     // Phase 0: Detect network environment (used by all subsequent phases)
     let china = is_china_network().await;
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
 
     // Phase 1 (Windows only): Ensure git-bash is available
     #[cfg(target_os = "windows")]
     {
         if find_git_bash().is_none() {
             eprintln!("git-bash not found, auto-installing PortableGit...");
-            install_git_bash_inner(&app, china).await.map_err(|e| {
-                format!(
-                    "Failed to install Git for Windows: {}. \
-                     Please install Git for Windows manually: https://git-scm.com/downloads/win",
+            install_git_bash_inner(&app, china, &scope).await.map_err(|e| {
+                if download_cancel::is_cancelled_err(&e) {
                     e
-                )
+                } else {
+                    format!(
+                        "Failed to install Git for Windows: {}. \
+                         Please install Git for Windows manually: https://git-scm.com/downloads/win",
+                        e
+                    )
+                }
             })?;
         }
 
@@ -1658,23 +1989,41 @@ pub async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
         }
     }
 
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
+
     // Phase 2: Ensure npm is available
     let has_npm = is_system_npm_available().await || get_local_node_bin().is_some();
 
     if !has_npm {
         eprintln!("npm not available, deploying Node.js locally...");
-        install_node_env_inner(&app, china).await.map_err(|e| {
-            format!(
-                "Failed to install Node.js runtime: {}. Please install Node.js manually.",
+        install_node_env_inner(&app, china, &scope).await.map_err(|e| {
+            if download_cancel::is_cancelled_err(&e) {
                 e
-            )
+            } else {
+                format!(
+                    "Failed to install Node.js runtime: {}. Please install Node.js manually.",
+                    e
+                )
+            }
         })?;
     }
 
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
+
     // Phase 3: Install CLI via npm
-    install_cli_via_npm(&app, china)
+    install_cli_via_npm(&app, china, &scope)
         .await
-        .map_err(|npm_err| format!("CLI installation failed via npm: {}", npm_err))?;
+        .map_err(|npm_err| {
+            if download_cancel::is_cancelled_err(&npm_err) {
+                npm_err
+            } else {
+                format!("CLI installation failed via npm: {}", npm_err)
+            }
+        })?;
 
     eprintln!("CLI installed via npm");
     finalize_cli_install_paths(&app);
@@ -1914,6 +2263,7 @@ pub(crate) async fn is_system_npm_available() -> bool {
             .env("PATH", &enriched_path)
             .stdin(Stdio::null())
             .creation_flags(0x08000000);
+        cmd.kill_on_drop(true);
         tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
     };
     #[cfg(not(target_os = "windows"))]
@@ -1922,6 +2272,7 @@ pub(crate) async fn is_system_npm_available() -> bool {
         cmd.arg("--version")
             .env("PATH", &enriched_path)
             .stdin(Stdio::null());
+        cmd.kill_on_drop(true);
         tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
     };
 
@@ -1939,6 +2290,7 @@ pub(crate) async fn is_system_npm_available() -> bool {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
+            cmd.kill_on_drop(true);
             tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
         };
         if matches!(shell_result, Ok(Ok(output)) if output.status.success()) {
@@ -1974,6 +2326,7 @@ pub async fn check_node_env() -> Result<NodeEnvStatus, String> {
         });
         let mut node_cmd = Command::new(&node_path);
         node_cmd.arg("--version").stdin(Stdio::null());
+        node_cmd.kill_on_drop(true);
         #[cfg(target_os = "windows")]
         node_cmd.creation_flags(0x08000000);
         if let Ok(Ok(output)) =
@@ -1999,6 +2352,7 @@ pub async fn check_node_env() -> Result<NodeEnvStatus, String> {
             .env("PATH", &enriched_path)
             .stdin(Stdio::null())
             .creation_flags(0x08000000);
+        cmd.kill_on_drop(true);
         tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
     };
     #[cfg(not(target_os = "windows"))]
@@ -2007,6 +2361,7 @@ pub async fn check_node_env() -> Result<NodeEnvStatus, String> {
         cmd.arg("--version")
             .env("PATH", &enriched_path)
             .stdin(Stdio::null());
+        cmd.kill_on_drop(true);
         tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await
     };
 
@@ -2032,16 +2387,26 @@ pub async fn check_node_env() -> Result<NodeEnvStatus, String> {
 
 /// Download and extract Node.js LTS to the local app directory.
 #[tauri::command]
-pub async fn install_node_env(app: AppHandle) -> Result<(), String> {
+pub async fn install_node_env(app: AppHandle, scope_id: Option<String>) -> Result<(), String> {
+    let scope = CancelScope::new(scope_id.as_deref());
     let china = is_china_network().await;
-    install_node_env_inner(&app, china).await
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
+    install_node_env_inner(&app, china, &scope).await
 }
 
-async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), String> {
+async fn install_node_env_inner(
+    app: &AppHandle,
+    china: bool,
+    scope: &CancelScope,
+) -> Result<(), String> {
     let (archive_name, ext) = get_node_archive_info()?;
     let filename = format!("{}.{}", archive_name, ext);
 
     let install_dir = node_download_dir()?;
+    // 取消时只清理本次安装新建的目录（避免误删既有安装）
+    let node_dir_existed = install_dir.exists();
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| format!("Failed to create node dir: {}", e))?;
 
@@ -2069,6 +2434,11 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
     let mut archive_bytes: Option<Vec<u8>> = None;
 
     for (i, url) in sources.iter().enumerate() {
+        if scope.is_cancelled() {
+            cleanup_created_dir(node_dir_existed, &install_dir);
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
         eprintln!("Trying Node.js download: {}", url);
         let _ = app.emit(
             "setup:download:progress",
@@ -2088,7 +2458,7 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
             continue;
         };
 
-        match download_with_progress(app, &client, url, "node_downloading").await {
+        match download_with_progress(app, &client, url, "node_downloading", scope).await {
             Ok(bytes) => {
                 if sha256_hex(&bytes) != expected {
                     last_err = format!("Source {}: checksum mismatch", url);
@@ -2100,6 +2470,11 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
                 break;
             }
             Err(e) => {
+                // 用户取消：清理本次新建的目录后立即返回（不继续尝试下一源）
+                if download_cancel::is_cancelled_err(&e) {
+                    cleanup_created_dir(node_dir_existed, &install_dir);
+                    return Err(download_cancel::CANCELLED_ERROR.to_string());
+                }
                 last_err = format!("Source {}: {}", url, e);
                 eprintln!("{}", last_err);
             }
@@ -2108,6 +2483,12 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
 
     let bytes = archive_bytes
         .ok_or_else(|| format!("All Node.js download sources failed: {}", last_err))?;
+
+    // 下载完成后、解压前再查一次取消（下载与解压之间是长 await 边界）
+    if scope.is_cancelled() {
+        cleanup_created_dir(node_dir_existed, &install_dir);
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
 
     // Extract
     let _ = app.emit(
@@ -2134,6 +2515,11 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
                 }
             }
         }
+    }
+
+    if scope.is_cancelled() {
+        cleanup_created_dir(node_dir_existed, &install_dir);
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
     }
 
     let _ = app.emit(
@@ -2175,7 +2561,11 @@ const GIT_DIST_HUAWEI: &str = "https://mirrors.huaweicloud.com/git-for-windows";
 /// Download and install PortableGit to provide bash.exe on Windows.
 /// The .7z.exe self-extracting archive is downloaded and executed silently.
 #[cfg(target_os = "windows")]
-pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), String> {
+pub(crate) async fn install_git_bash_inner(
+    app: &AppHandle,
+    china: bool,
+    scope: &CancelScope,
+) -> Result<(), String> {
     let install_dir = git_download_dir()?;
 
     // If an incomplete installation exists (no bash.exe), clean it up
@@ -2193,6 +2583,8 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
         return Ok(());
     }
 
+    // 取消时只清理本次安装新建的目录
+    let git_dir_existed = install_dir.exists();
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| format!("Failed to create git dir: {}", e))?;
 
@@ -2231,6 +2623,11 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
     let mut archive_bytes: Option<Vec<u8>> = None;
 
     for url in &sources {
+        if scope.is_cancelled() {
+            cleanup_created_dir(git_dir_existed, &install_dir);
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
         eprintln!("Trying PortableGit download: {}", url);
         let _ = app.emit(
             "setup:download:progress",
@@ -2248,7 +2645,7 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
             continue;
         };
 
-        match download_with_progress(app, &client, url, "git_downloading").await {
+        match download_with_progress(app, &client, url, "git_downloading", scope).await {
             Ok(bytes) => {
                 if sha256_hex(&bytes) != expected {
                     last_err = format!("Source {}: checksum mismatch", url);
@@ -2260,6 +2657,11 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
                 break;
             }
             Err(e) => {
+                // 用户取消：清理本次新建的目录后立即返回
+                if download_cancel::is_cancelled_err(&e) {
+                    cleanup_created_dir(git_dir_existed, &install_dir);
+                    return Err(download_cancel::CANCELLED_ERROR.to_string());
+                }
                 last_err = format!("Source {}: {}", url, e);
                 eprintln!("{}", last_err);
             }
@@ -2268,6 +2670,11 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
 
     let bytes =
         archive_bytes.ok_or_else(|| format!("All Git download sources failed: {}", last_err))?;
+
+    if scope.is_cancelled() {
+        cleanup_created_dir(git_dir_existed, &install_dir);
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
 
     // Write the .7z.exe to a temp file
     let temp_path = install_dir.join(&filename);
@@ -2283,35 +2690,37 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
 
     // Run the self-extracting archive silently: -o<dir> -y
     eprintln!("Extracting PortableGit to {:?}...", install_dir);
-    let extract_result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        Command::new(&temp_path)
-            .args([&format!("-o{}", install_dir.display()), "-y"])
-            .stdin(Stdio::null())
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output(),
-    )
-    .await;
+    let mut extract_cmd = Command::new(&temp_path);
+    extract_cmd
+        .args([&format!("-o{}", install_dir.display()), "-y"])
+        .stdin(Stdio::null())
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .kill_on_drop(true);
+    let extract_result = await_command_with_cancel(&mut extract_cmd, 120, scope).await;
 
     // Clean up the downloaded archive regardless of result
     let _ = std::fs::remove_file(&temp_path);
 
     match extract_result {
-        Ok(Ok(output)) if output.status.success() => {
+        Ok(output) if output.status.success() => {
             eprintln!("PortableGit extraction succeeded");
         }
-        Ok(Ok(output)) => {
+        Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
                 "PortableGit extraction failed (exit {}): {}",
                 output.status, stderr
             ));
         }
-        Ok(Err(e)) => {
+        Err(e) => {
+            if e == download_cancel::CANCELLED_ERROR {
+                cleanup_created_dir(git_dir_existed, &install_dir);
+                return Err(download_cancel::CANCELLED_ERROR.to_string());
+            }
+            if e.starts_with("Command timed out") {
+                return Err("PortableGit extraction timed out after 120s".to_string());
+            }
             return Err(format!("Failed to run PortableGit extractor: {}", e));
-        }
-        Err(_) => {
-            return Err("PortableGit extraction timed out after 120s".to_string());
         }
     }
 
@@ -2319,6 +2728,11 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
     let bash = install_dir.join("bin").join("bash.exe");
     if !bash.exists() {
         return Err("bash.exe not found after PortableGit extraction".to_string());
+    }
+
+    if scope.is_cancelled() {
+        cleanup_created_dir(git_dir_existed, &install_dir);
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
     }
 
     let _ = app.emit(
@@ -2333,11 +2747,16 @@ pub(crate) async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Resu
 }
 
 /// Download a URL with streaming progress events.
+///
+/// 完整性：Node.js/PortableGit 下载已有官方 SHA-256 数据源（SHASUMS256.txt /
+/// `*.sha256`），由调用方比对；此处再以 Content-Length 大小校验兜底
+/// （截断/中途失败时 downloaded != total 直接报错）。
 async fn download_with_progress(
     app: &AppHandle,
     client: &reqwest::Client,
     url: &str,
     phase: &str,
+    scope: &CancelScope,
 ) -> Result<Vec<u8>, String> {
     let resp = client
         .get(url)
@@ -2355,6 +2774,9 @@ async fn download_with_progress(
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
+        if scope.is_cancelled() {
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         bytes.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
@@ -2370,6 +2792,14 @@ async fn download_with_progress(
                 "downloaded": downloaded, "total": total, "percent": percent, "phase": phase
             }),
         );
+    }
+
+    // 大小校验兜底：Content-Length 可得时实际字节数必须一致（防截断/镜像损坏）
+    if total > 0 && downloaded != total {
+        return Err(format!(
+            "Download incomplete: expected {} bytes, got {} bytes ({})",
+            total, downloaded, url
+        ));
     }
 
     Ok(bytes)

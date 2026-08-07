@@ -18,13 +18,13 @@ Little Claude is a native desktop GUI for Claude Code (Anthropic's CLI), built w
 # Install dependencies
 pnpm install
 
-# Development (Vite dev server + Tauri app)
-pnpm tauri dev
+# Development (Vite dev server + Tauri app) — isolated dev data directories
+pnpm tauri:dev
 
-# Build production app
-pnpm tauri build
+# Build production app (uses the release identifier/data dirs)
+pnpm tauri:build
 
-# Frontend only (Vite dev server on port 1420)
+# Frontend only (Vite dev server)
 pnpm dev
 
 # Type check + Vite build (frontend only)
@@ -35,6 +35,15 @@ cd src-tauri && cargo check && cargo clippy
 ```
 
 The Tauri dev command runs `npm run dev` as its `beforeDevCommand` (configured in `tauri.conf.json`).
+
+> **Dev/release isolation**: dev builds must NOT share data with the released app.
+> `pnpm tauri:dev` passes `--config src-tauri/tauri.dev.conf.json`, which switches
+> the identifier to `com.tinyzhuang.tokenicode.dev`; additionally, all Rust data-dir
+> helpers (`app_data_dir`, `safe_data_dir`, `~/.tokenicode*`) append a `.dev` suffix
+> when `cfg!(debug_assertions)`. This keeps the CLI install (npm-global), providers,
+> sessions, and WebView settings of the dev build fully separate from the released
+> app — a CLI update in dev can never touch the production CLI. Use `pnpm tauri:build`
+> (release profile, plain identifier) for anything that must behave like the release.
 
 ## Tech Stack
 

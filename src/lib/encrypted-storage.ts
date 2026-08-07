@@ -32,7 +32,6 @@ export async function decryptStoredApiKeys(
   // Check each plaintext API key field — if its companion _enc_ field exists
   // with an encrypted value, decrypt it.
   const pairs: [string, string][] = [
-    ['videoAnalysisApiKey', '_enc_videoAnalysisApiKey'],
     ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
   ];
 

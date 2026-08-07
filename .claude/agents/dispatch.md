@@ -3,7 +3,6 @@ name: dispatch
 description: |
   Multi-Agent Pipeline main dispatcher. Pure dispatcher. Only responsible for calling subagents and scripts in phase order.
 tools: Read, Bash, mcp__exa__web_search_exa, mcp__exa__get_code_context_exa
-model: opus
 ---
 # Dispatch Agent
 
@@ -71,7 +70,6 @@ Execute each step in `phase` order.
 Task(
   subagent_type: "implement",
   prompt: "Implement the feature described in prd.md in the task directory",
-  model: "opus",
   run_in_background: true
 )
 ```
@@ -90,7 +88,6 @@ Implement receives complete context and autonomously: read → understand → im
 Task(
   subagent_type: "check",
   prompt: "Check code changes, fix issues yourself",
-  model: "opus",
   run_in_background: true
 )
 ```
@@ -109,7 +106,6 @@ Hook will auto-inject:
 Task(
   subagent_type: "debug",
   prompt: "Fix the issues described in the task context",
-  model: "opus",
   run_in_background: true
 )
 ```
@@ -125,7 +121,6 @@ Hook will auto-inject:
 Task(
   subagent_type: "check",
   prompt: "[finish] Execute final completion check before PR",
-  model: "opus",
   run_in_background: true
 )
 ```
@@ -163,7 +158,6 @@ This will:
 task_id = Task(
   subagent_type: "implement",  // or "check", "debug"
   prompt: "Simple task description",
-  model: "opus",
   run_in_background: true
 )
 

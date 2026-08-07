@@ -55,6 +55,15 @@ interface TokenSpeedState {
 const WINDOW_MS = 3000; // sliding window
 const EMA_ALPHA = 0.35; // smoothing factor for the displayed speed
 const DECAY = 0.7;      // per-tick speed decay when no new tokens arrive
+/**
+ * Lazy GC bound for `tabs`. Tab records are never removed explicitly (session
+ * cleanup lives in chatStore/sessionStore), so a long-running app with many
+ * drafts and deleted sessions would otherwise grow `tabs` without bound. Every
+ * end() trims the map back to this many entries — non-draft records are dropped
+ * only when already ended (isStreaming=false), so live sessions and the just-
+ * finished one are never evicted.
+ */
+const MAX_TAB_RECORDS = 100;
 
 function emptyTab(): TabSpeedData {
   return {
@@ -164,9 +173,36 @@ export const useTokenSpeedStore = create<TokenSpeedState>((set, get) => ({
     if (api && api.outputTokens > 0 && api.durationMs > 0) {
       apiAvg = Math.round((api.outputTokens / (api.durationMs / 1000)) * 10) / 10;
     }
-    set((s) => ({
-      tabs: { ...s.tabs, [tabId]: { ...tab, isStreaming: false, endedAt: Date.now(), apiAvg } },
-    }));
+    set((s) => {
+      const next = {
+        ...s.tabs,
+        [tabId]: { ...tab, isStreaming: false, endedAt: Date.now(), apiAvg },
+      };
+      // Lazy GC: prune only when over the bound. Eviction pool = draft_ tabs
+      // (ephemeral tabs that are discarded wholesale) + already-ended records;
+      // oldest endedAt/turnStartAt first. The just-ended tab and any live
+      // (streaming) non-draft tabs are never evicted.
+      const keys = Object.keys(next);
+      if (keys.length > MAX_TAB_RECORDS) {
+        const evictable = keys.filter((k) => {
+          if (k === tabId) return false;
+          const d = next[k];
+          return k.startsWith('draft_') || (d && !d.isStreaming);
+        });
+        evictable.sort((a, b) => {
+          const at = next[a].endedAt ?? next[a].turnStartAt ?? 0;
+          const bt = next[b].endedAt ?? next[b].turnStartAt ?? 0;
+          return at - bt;
+        });
+        let excess = keys.length - MAX_TAB_RECORDS;
+        for (const k of evictable) {
+          if (excess <= 0) break;
+          delete next[k];
+          excess--;
+        }
+      }
+      return { tabs: next };
+    });
   },
 
   reset: (tabId) => {

@@ -1,9 +1,11 @@
+use notify::event::ModifyKind;
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -28,6 +30,77 @@ pub(crate) struct FileNode {
 
 // ── File tree ────────────────────────────────────────────────────────
 
+// ── R1: mtime-validated depth-1 tree cache ───────────────────────────
+
+/// Cache for depth-1 directory listings keyed by canonical path. An entry is
+/// reused only while the directory's mtime is unchanged — creating/removing/
+/// renaming a direct child updates the directory mtime, so the cache stays
+/// consistent without re-scanning. Watch events additionally invalidate
+/// entries explicitly (covers coarse mtime granularity).
+struct TreeDirCache {
+    inner: StdMutex<HashMap<PathBuf, TreeDirCacheEntry>>,
+}
+
+struct TreeDirCacheEntry {
+    mtime_ns: u128,
+    children: Arc<Vec<FileNode>>,
+}
+
+impl TreeDirCache {
+    const MAX_ENTRIES: usize = 512;
+
+    fn get(&self, dir: &Path, mtime_ns: u128) -> Option<Arc<Vec<FileNode>>> {
+        let map = self.inner.lock().unwrap();
+        map.get(dir)
+            .filter(|e| e.mtime_ns == mtime_ns)
+            .map(|e| e.children.clone())
+    }
+
+    fn insert(&self, dir: PathBuf, mtime_ns: u128, children: Vec<FileNode>) {
+        let mut map = self.inner.lock().unwrap();
+        if map.len() >= Self::MAX_ENTRIES {
+            map.clear();
+        }
+        map.insert(
+            dir,
+            TreeDirCacheEntry {
+                mtime_ns,
+                children: Arc::new(children),
+            },
+        );
+    }
+
+    /// Drop the cached listing of `path` and of its direct parent (the only
+    /// directories whose direct-child list can have changed).
+    fn invalidate(&self, path: &Path) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(parent) = path.parent() {
+            map.remove(parent);
+        }
+        map.remove(path);
+    }
+}
+
+static TREE_DIR_CACHE: OnceLock<TreeDirCache> = OnceLock::new();
+
+fn tree_dir_cache() -> &'static TreeDirCache {
+    TREE_DIR_CACHE.get_or_init(|| TreeDirCache {
+        inner: StdMutex::new(HashMap::new()),
+    })
+}
+
+/// Directory mtime in nanoseconds since the epoch (cache validity token).
+fn dir_mtime_ns(dir: &Path) -> Option<u128> {
+    let meta = fs::metadata(dir).ok()?;
+    Some(
+        meta.modified()
+            .ok()?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    )
+}
+
 #[tauri::command]
 pub async fn read_file_tree(path: String, depth: Option<u32>) -> Result<Vec<FileNode>, String> {
     let max_depth = depth.unwrap_or(3).min(8);
@@ -51,7 +124,32 @@ pub async fn read_file_tree(path: String, depth: Option<u32>) -> Result<Vec<File
         is_dir: true,
         children: None,
     };
-    root.children = Some(read_dir_recursive(dir, 1, max_depth));
+    // R1: depth=1 reads (the lazy-loading pattern used by the file tree) go
+    // through an mtime-validated cache, so repeated refreshes of unchanged
+    // directories cost one stat instead of a full rescan. Deeper scans
+    // (full-tree search) bypass the cache.
+    let children = if max_depth == 1 {
+        match fs::canonicalize(dir) {
+            Ok(canon) => match dir_mtime_ns(&canon) {
+                Some(mtime) => {
+                    let cache = tree_dir_cache();
+                    match cache.get(&canon, mtime) {
+                        Some(cached) => cached.as_ref().clone(),
+                        None => {
+                            let children = read_dir_recursive(dir, 1, 1);
+                            cache.insert(canon, mtime, children.clone());
+                            children
+                        }
+                    }
+                }
+                None => read_dir_recursive(dir, 1, 1),
+            },
+            Err(_) => read_dir_recursive(dir, 1, 1),
+        }
+    } else {
+        read_dir_recursive(dir, 1, max_depth)
+    };
+    root.children = Some(children);
     Ok(vec![root])
 }
 
@@ -61,27 +159,32 @@ fn read_dir_recursive(dir: &Path, current_depth: u32, max_depth: u32) -> Vec<Fil
         Ok(e) => e,
         Err(_) => return nodes,
     };
-    let mut entry_list: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    // Sort: directories first, then alphabetically
-    entry_list.sort_by(|a, b| {
-        let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        b_is_dir
-            .cmp(&a_is_dir)
-            .then(a.file_name().cmp(&b.file_name()))
-    });
-    for entry in entry_list {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+    // Collect (name, is_dir, path) in a single pass — file_type() (a syscall)
+    // is invoked exactly once per entry. The old code called it inside the
+    // sort comparator (twice per comparison, O(n log n) syscalls per dir).
+    let mut entry_list: Vec<(String, bool, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|entry| {
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            (
+                entry.file_name().to_string_lossy().to_string(),
+                is_dir,
+                entry.path(),
+            )
+        })
+        .collect();
+    // Sort: directories first, then alphabetically (same order as before)
+    entry_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (name, is_dir, path) in entry_list {
         // Skip hidden files and node_modules
         if name.starts_with('.') || name == "node_modules" || name == "target" {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        // R1: directories at the depth limit carry `children: null` so the
+        // frontend can distinguish "not yet loaded" from "loaded, empty"
+        // (files also carry null — `is_dir` disambiguates).
         let children = if is_dir && current_depth < max_depth {
             Some(read_dir_recursive(&path, current_depth + 1, max_depth))
-        } else if is_dir {
-            Some(vec![])
         } else {
             None
         };
@@ -292,6 +395,147 @@ pub async fn create_directory(path: String) -> Result<(), String> {
 
 // ── File watching ────────────────────────────────────────────────────
 
+/// Frontend-compatible change kinds. (The old code emitted the notify Debug
+/// string, e.g. "Create(CreateKind::File)", which never matched the frontend's
+/// 'created'/'modified'/'removed' — aggregating with real kinds fixes that.)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ChangeKind {
+    Created,
+    Modified,
+    Removed,
+}
+
+impl ChangeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChangeKind::Created => "created",
+            ChangeKind::Modified => "modified",
+            ChangeKind::Removed => "removed",
+        }
+    }
+}
+
+/// Aggregate buffer for one watched directory (R3). The notify callback runs
+/// on notify's thread, so buffering uses a plain std Mutex with short critical
+/// sections, and the debounce flush is spawned onto the tokio runtime.
+struct WatchBuffer {
+    debounce: Duration,
+    inner: StdMutex<WatchBufferInner>,
+}
+
+#[derive(Default)]
+struct WatchBufferInner {
+    /// Deduplicated path -> latest change kind (last write wins).
+    paths: HashMap<PathBuf, ChangeKind>,
+    /// Whether a debounce flush task is already pending.
+    flushing: bool,
+}
+
+impl WatchBuffer {
+    fn new(debounce: Duration) -> Self {
+        Self {
+            debounce,
+            inner: StdMutex::new(WatchBufferInner::default()),
+        }
+    }
+
+    fn push(&self, path: PathBuf, kind: ChangeKind) {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.paths.get(&path) {
+            // 创建后立即写入（git checkout、编辑器保存新文件）不应把 created
+            // 降级为 modified——树结构信号丢失会导致前端不刷新文件树。
+            Some(_) if kind == ChangeKind::Modified => {}
+            _ => {
+                inner.paths.insert(path, kind);
+            }
+        }
+    }
+
+    /// Arm the debounce flush if none is pending. Returns true when the caller
+    /// must spawn the flush task.
+    fn arm(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.flushing {
+            return false;
+        }
+        inner.flushing = true;
+        true
+    }
+
+    /// Take all buffered changes and disarm the flush flag.
+    fn drain(&self) -> Vec<(PathBuf, ChangeKind)> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.flushing = false;
+        inner.paths.drain().collect()
+    }
+}
+
+/// Map a notify event to (path, kind) pairs. Renames arrive as a
+/// Modify(Name) event carrying the old and new paths — split them into a
+/// removed + created pair so the frontend refreshes the tree.
+fn classify_event(event: &notify::Event) -> Vec<(PathBuf, ChangeKind)> {
+    use notify::EventKind;
+    let mut out = Vec::new();
+    match &event.kind {
+        EventKind::Create(_) => {
+            for p in &event.paths {
+                out.push((p.clone(), ChangeKind::Created));
+            }
+        }
+        EventKind::Remove(_) => {
+            for p in &event.paths {
+                out.push((p.clone(), ChangeKind::Removed));
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            if event.paths.len() >= 2 {
+                out.push((event.paths[0].clone(), ChangeKind::Removed));
+                out.push((event.paths[1].clone(), ChangeKind::Created));
+            } else {
+                for p in &event.paths {
+                    out.push((p.clone(), ChangeKind::Modified));
+                }
+            }
+        }
+        EventKind::Modify(_) => {
+            for p in &event.paths {
+                out.push((p.clone(), ChangeKind::Modified));
+            }
+        }
+        EventKind::Access(_) => {}
+        _ => {
+            for p in &event.paths {
+                out.push((p.clone(), ChangeKind::Modified));
+            }
+        }
+    }
+    out
+}
+
+/// 规整事件路径：去掉 Windows `\\?\` verbatim 前缀（fs::canonicalize 产生），
+/// 使事件路径与前端树节点路径（原始入参的 DOS 路径）格式一致——否则前端
+/// 的 markStale / 改动徽标 / 预览自动重载在 Windows 上全部匹配不上。
+fn normalize_event_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// Paths under these directory names are excluded from fs:change events —
+/// mirrors the frontend's own filter (App.tsx) plus the file tree's
+/// exclusions (node_modules, target). Keeps npm install / build / git
+/// operation storms out of the IPC pipeline entirely.
+fn is_noisy_path(root: &str, path: &Path) -> bool {
+    const NOISY: &[&str] = &[".claude", ".git", "node_modules", "__pycache__", "target"];
+    let rel = path.strip_prefix(Path::new(root)).unwrap_or(path);
+    rel.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        NOISY.iter().any(|n| name == *n)
+    })
+}
+
 #[tauri::command]
 pub async fn watch_directory(
     app: AppHandle,
@@ -312,17 +556,60 @@ pub async fn watch_directory(
         watchers.remove(&watch_key);
     }
 
+    // R3: aggregate notify events into a deduplicated buffer and flush at most
+    // once per debounce window (300ms), so event storms (npm install, git
+    // operations) converge to one fs:change batch instead of one event per
+    // notify callback. The flush emits one event per change kind present in
+    // the batch, which keeps the existing single-`kind` frontend contract.
+    let buffer = Arc::new(WatchBuffer::new(Duration::from_millis(300)));
+    let runtime = tokio::runtime::Handle::current();
+
     let app_clone = app.clone();
     let watch_key_clone = watch_key.clone();
+    let buffer_clone = buffer.clone();
     let mut watcher = notify::recommended_watcher(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
-                let payload = serde_json::json!({
-                    "path": watch_key_clone,
-                    "kind": format!("{:?}", event.kind),
-                    "paths": event.paths.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
-                });
-                let _ = app_clone.emit("fs:change", payload);
+                let mut pushed = false;
+                for (path, kind) in classify_event(&event) {
+                    if is_noisy_path(&watch_key_clone, &path) {
+                        continue;
+                    }
+                    buffer_clone.push(path, kind);
+                    pushed = true;
+                }
+                if pushed && buffer_clone.arm() {
+                    let buffer = buffer_clone.clone();
+                    let app = app_clone.clone();
+                    let root = watch_key_clone.clone();
+                    runtime.spawn(async move {
+                        tokio::time::sleep(buffer.debounce).await;
+                        let drained = buffer.drain();
+                        if drained.is_empty() {
+                            return;
+                        }
+                        // Invalidate the R1 tree cache for every changed path
+                        // (its direct parent's listing may have changed).
+                        for (p, _) in &drained {
+                            tree_dir_cache().invalidate(p);
+                        }
+                        let mut by_kind: HashMap<ChangeKind, Vec<String>> = HashMap::new();
+                        for (p, k) in drained {
+                            by_kind
+                                .entry(k)
+                                .or_default()
+                                .push(normalize_event_path(&p));
+                        }
+                        for (k, paths) in by_kind {
+                            let payload = serde_json::json!({
+                                "path": root,
+                                "kind": k.as_str(),
+                                "paths": paths,
+                            });
+                            let _ = app.emit("fs:change", payload);
+                        }
+                    });
+                }
             }
         },
     )

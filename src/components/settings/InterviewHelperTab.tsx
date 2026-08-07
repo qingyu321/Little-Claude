@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
 import { INTERVIEW_PRESETS, applyPreset } from '../../lib/interview-presets';
-import { bridge, onLocalAsrDownloadProgress } from '../../lib/tauri-bridge';
+import { bridge, cancelDownload, invokeWithCancellation, onLocalAsrDownloadProgress } from '../../lib/tauri-bridge';
 
 type TestResult = {
   ok: boolean;
@@ -46,6 +46,8 @@ export default function InterviewHelperTab() {
   const [localAsrDownloadProgress, setLocalAsrDownloadProgress] = useState('');
   const [localAsrDownloadError, setLocalAsrDownloadError] = useState('');
   const [localAsrChecking, setLocalAsrChecking] = useState(false);
+  // 当前 ASR 下载任务的取消 scope（下载中显示取消按钮，点击后删除 .part 停止下载）
+  const [asrDownloadScopeId, setAsrDownloadScopeId] = useState<string | null>(null);
 
   const checkAsrEnv = useCallback(async () => {
     setLocalAsrChecking(true);
@@ -83,12 +85,17 @@ export default function InterviewHelperTab() {
     setLocalAsrDownloading(true);
     setLocalAsrDownloadProgress('');
     setLocalAsrDownloadError('');
+    // 取消 scope：下载中展示取消按钮，点击后后端停止下载并删除 .part 临时文件
+    const scopeId = `asr-download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setAsrDownloadScopeId(scopeId);
     try {
-      // mirrorIndex=undefined → 自动尝试所有镜像源
-      await bridge.downloadLocalAsrModel(undefined);
+      // mirrorIndex=null → 自动尝试所有镜像源
+      await invokeWithCancellation('download_local_asr_model', { mirrorIndex: null }, scopeId);
     } catch (e: any) {
       setLocalAsrDownloadError(typeof e === 'string' ? e : e?.message || String(e));
       setLocalAsrDownloading(false);
+    } finally {
+      setAsrDownloadScopeId(null);
     }
   }, []);
 
@@ -390,6 +397,17 @@ export default function InterviewHelperTab() {
           >
             {localAsrDownloading ? '下载中（自动尝试所有镜像）…' : '下载模型'}
           </button>
+          {/* 取消下载：停止流式下载并删除 .part 临时文件（已下完的部分文件保留在 .part，下次可断点续传） */}
+          {asrDownloadScopeId && (
+            <button
+              onClick={() => cancelDownload(asrDownloadScopeId)}
+              className="px-3 py-2 rounded-lg text-[11px] font-medium transition-smooth
+                border border-border-subtle text-text-secondary
+                hover:bg-bg-tertiary hover:border-border-focus"
+            >
+              {t('common.cancel')}
+            </button>
+          )}
           <button
             onClick={checkAsrEnv}
             disabled={localAsrChecking || localAsrDownloading}

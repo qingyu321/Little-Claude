@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useSettingsStore, SecondaryPanelTab } from '../../stores/settingsStore';
 import { FileExplorer } from '../files/FileExplorer';
 import { SkillsPanel } from '../skills/SkillsPanel';
@@ -23,14 +24,22 @@ export function SecondaryPanel() {
   const interviewActive = useInterviewStore((s) => s.active);
   const previewVisible = useSettingsStore((s) => s.previewSidebarVisible);
   const skillsVisible = useSettingsStore((s) => s.skillsSidebarVisible);
+  const interviewVisible = useSettingsStore((s) => s.interviewSidebarVisible);
 
   // Filter tabs based on module visibility settings
   const visibleTabs = tabs.filter((tab) => {
-    if (tab.id === 'interview') return true; // always visible
     if (tab.id === 'preview') return previewVisible;
     if (tab.id === 'skills') return skillsVisible;
+    if (tab.id === 'interview') return interviewVisible;
     return true; // files, plugins always visible
   });
+
+  // 模块在设置中被禁用时，若停留在该 tab → 自动切回文件
+  useEffect(() => {
+    if (!previewVisible && activeTab === 'preview') setTab('files');
+    if (!skillsVisible && activeTab === 'skills') setTab('files');
+    if (!interviewVisible && activeTab === 'interview') setTab('files');
+  }, [previewVisible, skillsVisible, interviewVisible, activeTab, setTab]);
 
   // Window dragging handled via CSS -webkit-app-region: drag on the top strip
 

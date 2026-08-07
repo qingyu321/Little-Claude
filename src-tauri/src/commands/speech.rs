@@ -2,7 +2,7 @@ use tauri::{AppHandle};
 
 use crate::build_smart_http_client;
 use crate::commands::external::reveal_in_finder;
-use crate::commands::video_analysis::{
+use crate::commands::speech_runtime::{
     detect_device_backend, download_first_ok_to_file, emit_skill_runtime_progress,
     RuntimeDepCheck, SpeechRuntimeStatus,
 };

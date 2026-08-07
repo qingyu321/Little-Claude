@@ -29,7 +29,7 @@ export function SpeechTab() {
   const handleToggleOffline = useCallback((useOffline: boolean) => {
     setSaving(true);
     setSpeechUseOfflineModel(useOffline);
-    setSavedMsg(t('settings.videoAnalysisSaved'));
+    setSavedMsg(t('settings.speech.saved'));
     window.setTimeout(() => { setSavedMsg(null); setSaving(false); }, 2000);
   }, [setSpeechUseOfflineModel, t]);
 

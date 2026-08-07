@@ -31,10 +31,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
-# 1. Full build: obfuscated frontend (beforeBuildCommand) + Rust release
+# 1. Full build: obfuscated frontend (beforeBuildCommand) + Rust release.
+#    --no-bundle: no NSIS/MSI installer — the raw exe IS the portable app.
 if (-not $SkipFrontend) {
-    Write-Host "==> pnpm tauri build (frontend obfuscation + Rust release)..." -ForegroundColor Cyan
-    pnpm tauri build
+    Write-Host "==> pnpm tauri build --no-bundle (frontend obfuscation + Rust release)..." -ForegroundColor Cyan
+    pnpm tauri build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
 } else {
     Write-Host "==> Skipping build (-SkipFrontend), packaging existing exe..." -ForegroundColor Cyan
@@ -45,7 +46,7 @@ $conf = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
 $version = $conf.version
 
 # 3. Collect + rename the portable exe
-$exe = "src-tauri\target\release\tokenicode.exe"
+$exe = "src-tauri\target\release\little-claude.exe"
 if (-not (Test-Path $exe)) { throw "missing $exe — run without -SkipFrontend first" }
 
 $outDir = "dist-portable"

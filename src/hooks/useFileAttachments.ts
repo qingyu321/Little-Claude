@@ -26,11 +26,32 @@ export interface FileAttachment {
 
 // A8: Module-level thumbnail cache — avoids storing base64 data URLs in Zustand
 // state (reduces GC heap pressure, state snapshot size, and DevTools overhead).
+// LRU-bounded (THUMBNAIL_CACHE_MAX entries): Map iteration order = insertion
+// order, so a read re-inserts the entry (delete + set) to move it to the tail,
+// and an insert past the bound evicts the head (least recently used). Without
+// a bound the map would grow without limit across drag-drops and sessions.
+const THUMBNAIL_CACHE_MAX = 50;
 const _thumbnailCache = new Map<string, string>();
+
+function cacheThumbnail(path: string, thumb: string) {
+  _thumbnailCache.delete(path); // re-insert → moves to tail (most recently used)
+  _thumbnailCache.set(path, thumb);
+  if (_thumbnailCache.size > THUMBNAIL_CACHE_MAX) {
+    // Map preserves insertion order: the first key is the least recently used.
+    const oldest = _thumbnailCache.keys().next().value;
+    if (oldest !== undefined) _thumbnailCache.delete(oldest);
+  }
+}
 
 /** Retrieve a cached thumbnail by file path. Returns undefined if not cached. */
 export function getCachedThumbnail(path: string): string | undefined {
-  return _thumbnailCache.get(path);
+  const thumb = _thumbnailCache.get(path);
+  if (thumb !== undefined) {
+    // LRU touch: re-insert so frequently used entries survive eviction.
+    _thumbnailCache.delete(path);
+    _thumbnailCache.set(path, thumb);
+  }
+  return thumb;
 }
 
 // --- Helper ---
@@ -209,7 +230,7 @@ export function useFileAttachments() {
                 img.onerror = () => resolve(undefined);
                 img.src = dataUrl;
               });
-              if (thumb) _thumbnailCache.set(filePath, thumb);
+              if (thumb) cacheThumbnail(filePath, thumb);
             } catch {
               // Ignore — no thumbnail, still functional
             }

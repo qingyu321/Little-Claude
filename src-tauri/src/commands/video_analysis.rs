@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
-use futures_util::StreamExt;
 use tokio::process::Command;
 
 use crate::build_smart_http_client;
@@ -11,13 +10,18 @@ use crate::commands::reveal_in_finder;
 use crate::embedded_resources;
 use crate::safe_data_dir;
 
+// Runtime download / status helpers live in speech_runtime.rs (unconditionally
+// compiled) so that `speech` / `wallpaper` do not depend on this optional module.
+use super::speech_runtime::{
+    detect_device_backend, download_first_ok_to_file, emit_skill_runtime_progress,
+    video_analysis_skill_dir, RuntimeDepCheck, VIDEO_ANALYSIS_SKILL_NAME,
+};
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 // Bundled skills + optional runtime environment download
 // ================================================================
-
-const VIDEO_ANALYSIS_SKILL_NAME: &str = "video-analysis";
 
 /// China-first PyPI mirrors for manual / automatic pip installs.
 const VIDEO_ANALYSIS_PIP_MIRROR_PRIMARY: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
@@ -27,44 +31,6 @@ const VIDEO_ANALYSIS_PIP_TRUSTED_HOST_FALLBACK: &str = "mirrors.aliyun.com";
 
 /// HuggingFace China mirror (faster-whisper model weights).
 const VIDEO_ANALYSIS_HF_MIRROR: &str = "https://hf-mirror.com";
-
-/// Detect the best available compute backend for faster-whisper.
-/// Returns (backend_id, human_label).
-pub(crate) fn detect_device_backend() -> (&'static str, &'static str) {
-    #[cfg(target_os = "windows")]
-    {
-        // Check for NVIDIA CUDA driver DLL.
-        let cuda_dll = std::path::Path::new("C:\\Windows\\System32\\nvcuda.dll");
-        if cuda_dll.exists() {
-            return ("cuda", "NVIDIA GPU (CUDA)");
-        }
-        // Check for AMD ROCm / DirectML  --?not yet supported by faster-whisper,
-        // but detect the hardware so the user knows they have a GPU.
-        let amd_dll = std::path::Path::new("C:\\Windows\\System32\\amdhdl64.dll");
-        if amd_dll.exists() {
-            return ("amd-gpu", "AMD GPU (CPU 回退  --?faster-whisper 暂不支持 ROCm)");
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Apple Silicon has an integrated GPU + MPS backend. faster-whisper
-        // doesn't use MPS natively but CTranslate2 can leverage it.
-        // Report "apple-silicon" so the user knows they have a capable GPU.
-        return ("apple-silicon", "Apple Silicon (MPS  --?部分加 --?");
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let cuda_so = std::path::Path::new("/usr/lib/x86_64-linux-gnu/libcuda.so");
-        if cuda_so.exists() {
-            return ("cuda", "NVIDIA GPU (CUDA)");
-        }
-        let cuda_so2 = std::path::Path::new("/usr/local/cuda/lib64/libcuda.so");
-        if cuda_so2.exists() {
-            return ("cuda", "NVIDIA GPU (CUDA)");
-        }
-    }
-    ("cpu", "CPU (Intel / AMD 核显)")
-}
 
 /// Build the HuggingFace repo name for a given model size.
 fn whisper_repo_name(model_size: &str) -> String {
@@ -101,16 +67,6 @@ const VIDEO_ANALYSIS_WHISPER_FILES: &[&str] = &[
     "tokenizer.json",
     "vocabulary.txt",
 ];
-
-pub(crate) fn video_analysis_skill_dir() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|h| {
-            h.join(".claude")
-                .join("skills")
-                .join(VIDEO_ANALYSIS_SKILL_NAME)
-        })
-        .ok_or_else(|| "Cannot determine home directory".to_string())
-}
 
 fn video_analysis_runtime_marker(skill_dir: &Path) -> PathBuf {
     skill_dir.join(".tokenicode-runtime-installed")
@@ -422,164 +378,6 @@ fn video_analysis_manual_guide(skill_dir: &Path) -> String {
     )
 }
 
-pub(crate) fn emit_skill_runtime_progress(
-    app: &AppHandle,
-    skill_name: &str,
-    phase: &str,
-    url: &str,
-    percent: u8,
-    message: &str,
-    downloaded: u64,
-    total: u64,
-) {
-    let _ = app.emit(
-        "skill-runtime:download:progress",
-        serde_json::json!({
-            "skill": skill_name,
-            "phase": phase,
-            "url": url,
-            "percent": percent,
-            "message": message,
-            "downloaded": downloaded,
-            "total": total,
-        }),
-    );
-}
-
-/// Stream a URL to a local file with skill-runtime progress events.
-/// `progress_start`/`progress_end` map the file's own 0-100% into a global range.
-pub(crate) async fn download_file_with_skill_progress(
-    app: &AppHandle,
-    skill_name: &str,
-    client: &reqwest::Client,
-    url: &str,
-    dest: &Path,
-    phase: &str,
-    progress_start: u8,
-    progress_end: u8,
-    label: &str,
-) -> Result<u64, String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-    }
-
-    emit_skill_runtime_progress(
-        app,
-        skill_name,
-        phase,
-        url,
-        progress_start,
-        &format!("连接 {} ...", label),
-        0,
-        0,
-    );
-
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed ({}): {}", url, e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from {}", resp.status(), url));
-    }
-
-    let total = resp.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-    let mut stream = resp.bytes_stream();
-    let mut file = std::fs::File::create(dest)
-        .map_err(|e| format!("Failed to create {}: {}", dest.display(), e))?;
-
-    use std::io::Write;
-    let span = progress_end.saturating_sub(progress_start) as u64;
-    let mut last_emit = 0u64;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
-        file.write_all(&chunk)
-            .map_err(|e| format!("Write error {}: {}", dest.display(), e))?;
-        downloaded += chunk.len() as u64;
-
-        // Throttle UI updates (~every 256 KiB or on completion).
-        if downloaded - last_emit >= 256 * 1024 || (total > 0 && downloaded >= total) {
-            last_emit = downloaded;
-            let local_pct = if total > 0 {
-                (downloaded * 100 / total).min(100)
-            } else {
-                0
-            };
-            let global = progress_start as u64 + (local_pct * span / 100);
-            let msg = if total > 0 {
-                format!(
-                    "{} {:.1}/{:.1} MB ({}%)",
-                    label,
-                    downloaded as f64 / 1_048_576.0,
-                    total as f64 / 1_048_576.0,
-                    local_pct
-                )
-            } else {
-                format!("{} {:.1} MB", label, downloaded as f64 / 1_048_576.0)
-            };
-            emit_skill_runtime_progress(app, skill_name, phase, url, global as u8, &msg, downloaded, total);
-        }
-    }
-
-    file.flush()
-        .map_err(|e| format!("Flush error {}: {}", dest.display(), e))?;
-
-    emit_skill_runtime_progress(
-        app,
-        skill_name,
-        phase,
-        url,
-        progress_end,
-        &format!("{} 完成 ({:.1} MB)", label, downloaded as f64 / 1_048_576.0),
-        downloaded,
-        total,
-    );
-    Ok(downloaded)
-}
-
-pub(crate) async fn download_first_ok_to_file(
-    app: &AppHandle,
-    skill_name: &str,
-    client: &reqwest::Client,
-    urls: &[&str],
-    dest: &Path,
-    phase: &str,
-    progress_start: u8,
-    progress_end: u8,
-    label: &str,
-) -> Result<String, String> {
-    let mut last_err = String::new();
-    for (i, url) in urls.iter().enumerate() {
-        eprintln!("[{}] trying {} source {}: {}", skill_name, label, i, url);
-        // Clean partial file before each attempt.
-        let _ = std::fs::remove_file(dest);
-        match download_file_with_skill_progress(
-            app,
-            skill_name,
-            client,
-            url,
-            dest,
-            phase,
-            progress_start,
-            progress_end,
-            label,
-        )
-        .await
-        {
-            Ok(_) => return Ok(url.to_string()),
-            Err(e) => {
-                last_err = e;
-                eprintln!("[{}] {} failed: {}", skill_name, url, last_err);
-            }
-        }
-    }
-    Err(format!("{} 全部镜像失败: {}", label, last_err))
-}
-
 fn extract_ffmpeg_zip(zip_path: &Path, bin_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(bin_dir)
         .map_err(|e| format!("Failed to create {}: {}", bin_dir.display(), e))?;
@@ -687,22 +485,34 @@ async fn try_create_venv(venv_dir: &Path) -> Result<bool, String> {
         let mut full_args: Vec<&str> = args.to_vec();
         full_args.push(&dir_str);
 
-        let output = Command::new(*cmd)
-            .args(&full_args)
-            .env("PYTHONUTF8", "1")
-            .output()
-            .await;
+        // Bound every strategy with a timeout: a wedged python (hung venv
+        // creation) must not stall the whole install forever. kill_on_drop is
+        // required — timeout() only drops the future, the child would survive.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Command::new(*cmd)
+                .args(&full_args)
+                .env("PYTHONUTF8", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
 
         match output {
-            Ok(o) if o.status.success() => {
+            Ok(Ok(o)) if o.status.success() => {
                 return Ok(*without_pip);
             }
-            Ok(o) => {
+            Ok(Ok(o)) => {
                 last_stderr = String::from_utf8_lossy(&o.stderr).to_string();
                 // continue to next strategy
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 // binary not found — continue
+            }
+            Err(_) => {
+                eprintln!("[video-analysis] {} {:?} timed out after 60s", cmd, full_args);
+                last_stderr = format!("{} 超时(60s)", cmd);
+                // continue to next strategy
             }
         }
     }
@@ -727,16 +537,24 @@ async fn try_create_venv(venv_dir: &Path) -> Result<bool, String> {
 /// Tries `ensurepip --upgrade` first, then falls back to downloading get-pip.py.
 async fn bootstrap_pip_in_venv(app: &AppHandle, venv_python: &Path) -> Result<(), String> {
     // Strategy 1: ensurepip (usually works even when base Python's ensurepip didn't)
-    let output = Command::new(venv_python)
-        .args(["-m", "ensurepip", "--upgrade"])
-        .env("PYTHONUTF8", "1")
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        Command::new(venv_python)
+            .args(["-m", "ensurepip", "--upgrade"])
+            .env("PYTHONUTF8", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
 
-    if let Ok(o) = &output {
-        if o.status.success() {
-            return Ok(());
-        }
+    match &output {
+        Ok(Ok(o)) if o.status.success() => return Ok(()),
+        _ => {}
+    }
+    if matches!(&output, Err(_)) {
+        eprintln!(
+            "[video-analysis] ensurepip timed out after 60s, falling back to get-pip.py"
+        );
     }
 
     emit_skill_runtime_progress(
@@ -768,21 +586,29 @@ async fn bootstrap_pip_in_venv(app: &AppHandle, venv_python: &Path) -> Result<()
     let tmp = std::env::temp_dir().join(format!("tokenicode_getpip_{}.py", std::process::id()));
     std::fs::write(&tmp, script).map_err(|e| format!("写入 get-pip.py 失败: {e}"))?;
 
-    let output = Command::new(venv_python)
-        .arg(&tmp)
-        .env("PYTHONUTF8", "1")
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        Command::new(venv_python)
+            .arg(&tmp)
+            .env("PYTHONUTF8", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
 
     let _ = std::fs::remove_file(&tmp);
 
     match output {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(format!(
+        Ok(Ok(o)) if o.status.success() => Ok(()),
+        Ok(Ok(o)) => Err(format!(
             "get-pip.py 失败: {}",
             String::from_utf8_lossy(&o.stderr).trim()
         )),
-        Err(e) => Err(format!("无法启动 get-pip.py: {e}")),
+        Ok(Err(e)) => Err(format!("无法启动 get-pip.py: {e}")),
+        Err(_) => {
+            eprintln!("[video-analysis] get-pip.py timed out after 120s");
+            Err("get-pip.py 超时(120s)，请检查网络后重试".to_string())
+        }
     }
 }
 
@@ -850,34 +676,44 @@ async fn install_video_analysis_python_deps(
 
         // Download wheels into wheelhouse first (so offline re-setup works later).
         // Failures here are non-fatal  --?we still try online install from the mirror.
-        match Command::new(&venv_python)
-            .args([
-                "-m",
-                "pip",
-                "download",
-                "-i",
-                mirror,
-                "--trusted-host",
-                trusted,
-                "-d",
-            ])
-            .arg(&wheelhouse)
-            .arg("-r")
-            .arg(&requirements)
-            .env("PYTHONUTF8", "1")
-            .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-            .output()
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            Command::new(&venv_python)
+                .args([
+                    "-m",
+                    "pip",
+                    "download",
+                    "-i",
+                    mirror,
+                    "--trusted-host",
+                    trusted,
+                    "-d",
+                ])
+                .arg(&wheelhouse)
+                .arg("-r")
+                .arg(&requirements)
+                .env("PYTHONUTF8", "1")
+                .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
         {
-            Ok(out) if !out.status.success() => {
+            Ok(Ok(out)) if !out.status.success() => {
                 eprintln!(
                     "[video-analysis] pip download failed ({}): {}",
                     mirror,
                     String::from_utf8_lossy(&out.stderr)
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("[video-analysis] pip download spawn failed: {}", e);
+            }
+            Err(_) => {
+                eprintln!(
+                    "[video-analysis] pip download timed out after 600s ({})",
+                    mirror
+                );
             }
             _ => {}
         }
@@ -894,48 +730,76 @@ async fn install_video_analysis_python_deps(
         );
 
         // Prefer offline wheelhouse if download succeeded; fall back to online mirror.
-        if let Ok(out) = Command::new(&venv_python)
-            .args([
-                "-m",
-                "pip",
-                "install",
-                "--no-index",
-                "--find-links",
-            ])
-            .arg(&wheelhouse)
-            .arg("-r")
-            .arg(&requirements)
-            .env("PYTHONUTF8", "1")
-            .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-            .output()
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            Command::new(&venv_python)
+                .args([
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-index",
+                    "--find-links",
+                ])
+                .arg(&wheelhouse)
+                .arg("-r")
+                .arg(&requirements)
+                .env("PYTHONUTF8", "1")
+                .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
         {
-            if out.status.success() {
+            Ok(Ok(out)) if out.status.success() => {
                 return Ok(());
             }
-            last_err = format!(
-                "offline pip install failed: {}; ",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            Ok(Ok(out)) => {
+                last_err = format!(
+                    "offline pip install failed: {}; ",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Ok(Err(_)) => {
+                // spawn failed — silently fall through to the online mirror
+            }
+            Err(_) => {
+                eprintln!("[video-analysis] offline pip install timed out after 600s");
+                last_err = format!("offline pip install 超时(600s); ");
+            }
         }
 
-        let online = Command::new(&venv_python)
-            .args([
-                "-m",
-                "pip",
-                "install",
-                "-i",
-                mirror,
-                "--trusted-host",
-                trusted,
-                "-r",
-            ])
-            .arg(&requirements)
-            .env("PYTHONUTF8", "1")
-            .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-            .output()
-            .await
-            .map_err(|e| format!("pip install spawn failed: {}", e))?;
+        let online = match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            Command::new(&venv_python)
+                .args([
+                    "-m",
+                    "pip",
+                    "install",
+                    "-i",
+                    mirror,
+                    "--trusted-host",
+                    trusted,
+                    "-r",
+                ])
+                .arg(&requirements)
+                .env("PYTHONUTF8", "1")
+                .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => return Err(format!("pip install spawn failed: {}", e)),
+            Err(_) => {
+                eprintln!(
+                    "[video-analysis] pip install timed out after 600s ({})",
+                    mirror
+                );
+                last_err = format!("{}pip install 超时(600s, {}); ", last_err, mirror);
+                continue; // try the fallback mirror
+            }
+        };
 
         if online.status.success() {
             return Ok(());
@@ -1151,28 +1015,6 @@ pub(crate) struct SkillRuntimeStatus {
     /// Human-readable device label for UI display.
     #[serde(default)]
     device_backend_label: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RuntimeDepCheck {
-    pub(crate) name: String,
-    pub(crate) label: String,
-    pub(crate) ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SpeechRuntimeStatus {
-    pub(crate) status: String,
-    pub(crate) checks: Vec<RuntimeDepCheck>,
-    pub(crate) auto_install_supported: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) device_backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) device_backend_label: Option<String>,
 }
 
 fn inspect_video_analysis_runtime(skill_dir: &Path) -> (bool, Vec<String>) {

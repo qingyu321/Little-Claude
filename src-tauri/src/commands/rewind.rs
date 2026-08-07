@@ -20,6 +20,13 @@ pub async fn rewind_files(
         ));
     }
 
+    // M10 (security): the CLI is spawned with cwd as its working directory —
+    // refuse anything that is not an existing directory (spawn would otherwise
+    // fail silently or operate in an unintended location).
+    if cwd.is_empty() || !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("无效的 cwd: {} — 不是存在的目录", cwd));
+    }
+
     let claude_bin = find_claude_binary().unwrap_or_else(|| {
         #[cfg(target_os = "windows")]
         {
@@ -51,6 +58,10 @@ pub async fn rewind_files(
         rewind_cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // kill_on_drop: timeout() 只放弃等待，不终止已 spawn 的
+            // claude --rewind-files 进程；超时后残留进程会继续占用
+            // 会话文件锁。
+            .kill_on_drop(true)
             .output(),
     )
     .await

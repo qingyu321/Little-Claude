@@ -192,6 +192,9 @@ interface SettingsState {
   previewSidebarVisible: boolean;
   /** 模块管理 — 侧边栏技能按钮显隐 */
   skillsSidebarVisible: boolean;
+  /** 模块管理 — 侧边栏面试按钮显隐（旧版模块管理的第三张卡片，曾被移除，
+   *  2026-08-03 恢复；面试进行中关闭需二次确认） */
+  interviewSidebarVisible: boolean;
   /** 面试助手 — mimo 多模态模型名称 */
   interviewMimoModel: string;
   /** 面试助手 — mimo API Base URL */
@@ -251,6 +254,7 @@ interface SettingsState {
   setAutoCompactThresholdTokens: (tokens: number) => void;
   setPreviewSidebarVisible: (v: boolean) => void;
   setSkillsSidebarVisible: (v: boolean) => void;
+  setInterviewSidebarVisible: (v: boolean) => void;
   setInterviewMimoModel: (model: string) => void;
   setInterviewMimoBaseUrl: (url: string) => void;
   setInterviewMimoApiKey: (key: string) => void;
@@ -354,6 +358,7 @@ export const useSettingsStore = create<SettingsState>()(
       cliBackend: 'claude' as 'claude' | 'codex',
       previewSidebarVisible: true,
       skillsSidebarVisible: true,
+      interviewSidebarVisible: true,
       interviewMimoModel: 'mimo-v2.5-pro',
       interviewMimoBaseUrl: '',
       interviewMimoApiKey: '',
@@ -462,25 +467,28 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ previewSidebarVisible })),
       setSkillsSidebarVisible: (skillsSidebarVisible) =>
         set(() => ({ skillsSidebarVisible })),
+      setInterviewSidebarVisible: (interviewSidebarVisible) =>
+        set(() => ({ interviewSidebarVisible })),
       setInterviewMimoModel: (interviewMimoModel) =>
         set(() => ({ interviewMimoModel })),
       setInterviewMimoBaseUrl: (interviewMimoBaseUrl) =>
         set(() => ({ interviewMimoBaseUrl })),
       setInterviewMimoApiKey: (interviewMimoApiKey) => {
-        const seq = ++_apiKeyEncryptSeq;
+        const seq = ++_apiKeyEncryptSeq.interviewMimoApiKey;
         set({ interviewMimoApiKey, _enc_interviewMimoApiKey: interviewMimoApiKey ? undefined as any : '' });
         if (!interviewMimoApiKey) return;
         // S3: Encrypt for localStorage persistence (async side-effect).
-        // Sequence-guarded: a slow resolve for an older key must not overwrite
-        // a newer key's ciphertext. Retry once on transient failure; a
-        // persistent failure is logged loudly (the key won't survive restart).
+        // Sequence-guarded (per-field seq): a slow resolve for an older value
+        // of THIS key must not overwrite a newer value's ciphertext. Retry once
+        // on transient failure; a persistent failure is logged loudly (the key
+        // won't survive restart).
         const attempt = (retry: boolean): void => {
           encryptApiKey(interviewMimoApiKey)
             .then((enc) => {
-              if (enc && seq === _apiKeyEncryptSeq) set({ _enc_interviewMimoApiKey: enc });
+              if (enc && seq === _apiKeyEncryptSeq.interviewMimoApiKey) set({ _enc_interviewMimoApiKey: enc });
             })
             .catch((e) => {
-              if (seq !== _apiKeyEncryptSeq) return;
+              if (seq !== _apiKeyEncryptSeq.interviewMimoApiKey) return;
               console.error(
                 '[settingsStore] Failed to encrypt interviewMimoApiKey — key will NOT survive restart. Re-enter the key to retry:',
                 e,
@@ -539,7 +547,7 @@ export const useSettingsStore = create<SettingsState>()(
       setVideoAnalysisBaseUrl: (url) =>
         set(() => ({ videoAnalysisBaseUrl: url.trim() })),
       setVideoAnalysisApiKey: (key) => {
-        const seq = ++_apiKeyEncryptSeq;
+        const seq = ++_apiKeyEncryptSeq.videoAnalysisApiKey;
         set({ videoAnalysisApiKey: key, _enc_videoAnalysisApiKey: key ? undefined as any : '' });
         if (!key) return;
         // S3: Encrypt for localStorage persistence (async side-effect).
@@ -549,10 +557,10 @@ export const useSettingsStore = create<SettingsState>()(
         const attempt = (retry: boolean): void => {
           encryptApiKey(key)
             .then((enc) => {
-              if (enc && seq === _apiKeyEncryptSeq) set({ _enc_videoAnalysisApiKey: enc });
+              if (enc && seq === _apiKeyEncryptSeq.videoAnalysisApiKey) set({ _enc_videoAnalysisApiKey: enc });
             })
             .catch((e) => {
-              if (seq !== _apiKeyEncryptSeq) return;
+              if (seq !== _apiKeyEncryptSeq.videoAnalysisApiKey) return;
               console.error(
                 '[settingsStore] Failed to encrypt videoAnalysisApiKey — key will NOT survive restart. Re-enter the key to retry:',
                 e,
@@ -568,6 +576,17 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ videoAnalysisModel: model.trim() })),
       setVideoAnalysisAsrModel: (model) =>
         set(() => ({ videoAnalysisAsrModel: model })),
+      setVideoAnalysisMultimodal: (cfg) =>
+        set((state) => ({
+          videoAnalysisBaseUrl:
+            cfg.baseUrl !== undefined ? cfg.baseUrl.trim() : state.videoAnalysisBaseUrl,
+          videoAnalysisApiKey:
+            cfg.apiKey !== undefined ? cfg.apiKey : state.videoAnalysisApiKey,
+          videoAnalysisApiKeyEnv:
+            cfg.apiKeyEnv !== undefined ? cfg.apiKeyEnv.trim() : state.videoAnalysisApiKeyEnv,
+          videoAnalysisModel:
+            cfg.model !== undefined ? cfg.model.trim() : state.videoAnalysisModel,
+        })),
       setSpeechEnabled: (enabled) =>
         set(() => ({ speechEnabled: enabled })),
       setSpeechLanguage: (lang) =>
@@ -582,21 +601,10 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ wallpaperQuality: quality })),
       setWallpaperOpacity: (opacity: number) =>
         set(() => ({ wallpaperOpacity: opacity })),
-      setVideoAnalysisMultimodal: (cfg) =>
-        set((state) => ({
-          videoAnalysisBaseUrl:
-            cfg.baseUrl !== undefined ? cfg.baseUrl.trim() : state.videoAnalysisBaseUrl,
-          videoAnalysisApiKey:
-            cfg.apiKey !== undefined ? cfg.apiKey : state.videoAnalysisApiKey,
-          videoAnalysisApiKeyEnv:
-            cfg.apiKeyEnv !== undefined ? cfg.apiKeyEnv.trim() : state.videoAnalysisApiKeyEnv,
-          videoAnalysisModel:
-            cfg.model !== undefined ? cfg.model.trim() : state.videoAnalysisModel,
-        })),
     }),
     {
       name: 'tokenicode-settings',
-      version: 21,
+      version: 22,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -627,7 +635,6 @@ export const useSettingsStore = create<SettingsState>()(
               const after = useSettingsStore.getState() as unknown as Record<string, unknown>;
               const safe: Record<string, string> = {};
               for (const [plain, enc] of [
-                ['videoAnalysisApiKey', '_enc_videoAnalysisApiKey'],
                 ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
               ] as const) {
                 if (updates[plain] && after[enc] === before[enc]) safe[plain] = updates[plain];
@@ -700,18 +707,6 @@ export const useSettingsStore = create<SettingsState>()(
           const mode = persisted.contextWindowMode === 'large1m' ? 'large1m' : 'default';
           persisted.autoCompactThresholdTokens = defaultAutoCompactThreshold(mode);
         }
-        if (version < 12) {
-          persisted.videoAnalysisBaseUrl = '';
-          persisted.videoAnalysisApiKey = '';
-          persisted.videoAnalysisModel = '';
-        }
-        if (version < 13) {
-          persisted.videoAnalysisApiKeyEnv = '';
-        }
-        if (version < 14) {
-          persisted.videoAnalysisAccelEnabled = false;
-          persisted.videoAnalysisAsrModel = 'small';
-        }
         if (version < 15) {
           persisted.speechEnabled = false;
           persisted.speechLanguage = 'zh';
@@ -741,6 +736,9 @@ export const useSettingsStore = create<SettingsState>()(
           persisted.interviewMimoApiKey = '';
           persisted.interviewMimoApiKeyEnv = '';
         }
+        if (version < 22) {
+          persisted.interviewSidebarVisible = true;
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -767,13 +765,6 @@ export const useSettingsStore = create<SettingsState>()(
         // 报告B10: avatar data URLs excluded — persisted under AVATARS_STORAGE_KEY.
         userDisplayName: state.userDisplayName,
         showHiddenFiles: state.showHiddenFiles,
-        videoAnalysisBaseUrl: state.videoAnalysisBaseUrl,
-        // S3: Persist encrypted api key, not plaintext
-        _enc_videoAnalysisApiKey: state._enc_videoAnalysisApiKey,
-        videoAnalysisApiKeyEnv: state.videoAnalysisApiKeyEnv,
-        videoAnalysisModel: state.videoAnalysisModel,
-        videoAnalysisAccelEnabled: state.videoAnalysisAccelEnabled,
-        videoAnalysisAsrModel: state.videoAnalysisAsrModel,
         speechEnabled: state.speechEnabled,
         speechLanguage: state.speechLanguage,
         speechUseOfflineModel: state.speechUseOfflineModel,
@@ -788,6 +779,7 @@ export const useSettingsStore = create<SettingsState>()(
         codexLatestVersion: state.codexLatestVersion,
         previewSidebarVisible: state.previewSidebarVisible,
         skillsSidebarVisible: state.skillsSidebarVisible,
+        interviewSidebarVisible: state.interviewSidebarVisible,
         interviewMimoModel: state.interviewMimoModel,
         interviewMimoBaseUrl: state.interviewMimoBaseUrl,
         // S3: Persist encrypted api key, not plaintext
@@ -805,22 +797,6 @@ export const useSettingsStore = create<SettingsState>()(
     },
   ),
 );
-
-/** True when baseUrl + model + (apiKey OR apiKeyEnv) are non-empty. */
-export function hasVideoAnalysisMultimodalDefaults(state?: {
-  videoAnalysisBaseUrl?: string;
-  videoAnalysisApiKey?: string;
-  videoAnalysisApiKeyEnv?: string;
-  videoAnalysisModel?: string;
-}): boolean {
-  const s = state ?? useSettingsStore.getState();
-  const hasSecret = Boolean(
-    s.videoAnalysisApiKey?.trim() || s.videoAnalysisApiKeyEnv?.trim(),
-  );
-  return Boolean(
-    s.videoAnalysisBaseUrl?.trim() && hasSecret && s.videoAnalysisModel?.trim(),
-  );
-}
 
 // --- Per-session effective value helpers (Phase 4) ---
 // These read the snapshotted value from SessionMeta, falling back to the global store.
@@ -863,9 +839,28 @@ export function getAutoCompactThreshold(model?: string, mode?: ContextWindowMode
 
 let _skipNextModeSync = false;
 
-/** Monotonic sequence for the async `_enc_*` encrypt side-effects — lets a
- *  setter for a newer key invalidate an older key's in-flight encryption. */
-let _apiKeyEncryptSeq = 0;
+/** Monotonic sequence for the async `_enc_*` encrypt side-effect — lets a
+ *  setter for a NEWER value of the SAME key invalidate an older key's in-flight
+ *  encryption. */
+const _apiKeyEncryptSeq: Record<string, number> = {
+  interviewMimoApiKey: 0,
+  videoAnalysisApiKey: 0,
+};
+
+export function hasVideoAnalysisMultimodalDefaults(state?: {
+  videoAnalysisBaseUrl?: string;
+  videoAnalysisApiKey?: string;
+  videoAnalysisApiKeyEnv?: string;
+  videoAnalysisModel?: string;
+}): boolean {
+  const s = state ?? useSettingsStore.getState();
+  const hasSecret = Boolean(
+    s.videoAnalysisApiKey?.trim() || s.videoAnalysisApiKeyEnv?.trim(),
+  );
+  return Boolean(
+    s.videoAnalysisBaseUrl?.trim() && hasSecret && s.videoAnalysisModel?.trim(),
+  );
+}
 
 /** Update frontend sessionMode WITHOUT sending set_permission_mode to CLI.
  *  Use when CLI already switched modes internally (e.g. after ExitPlanMode allow). */

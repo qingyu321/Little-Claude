@@ -127,14 +127,18 @@ function ConfirmPopup({
 /**
  * 模块管理 — 设置标签页
  *
- * 提供预览和技能模块的显隐开关。面试助手始终可见。
+ * 提供预览、技能、面试三个模块的显隐开关（2026-08-03 恢复面试卡片——
+ * 曾被移除导致只剩两个；i18n 文案与面试进行中二次确认逻辑保留）。
  */
 export function ModuleManagementTab() {
   const t = useT();
   const previewVisible = useSettingsStore((s) => s.previewSidebarVisible);
   const skillsVisible = useSettingsStore((s) => s.skillsSidebarVisible);
+  const interviewVisible = useSettingsStore((s) => s.interviewSidebarVisible);
   const setPreviewVisible = useSettingsStore((s) => s.setPreviewSidebarVisible);
   const setSkillsVisible = useSettingsStore((s) => s.setSkillsSidebarVisible);
+  const setInterviewVisible = useSettingsStore((s) => s.setInterviewSidebarVisible);
+  const interviewActive = useInterviewStore((s) => s.active);
 
   return (
     <div className="space-y-5">
@@ -174,6 +178,21 @@ export function ModuleManagementTab() {
         descKey="settings.module.skillsDesc"
         enabled={skillsVisible}
         onToggle={setSkillsVisible}
+      />
+
+      {/* 面试（恢复：旧版模块管理的第三张卡片；面试进行中关闭需二次确认） */}
+      <ModuleCard
+        icon={
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"
+            stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+            <path d="M8 1a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3zM4 7v1a4 4 0 0 0 8 0V7M8 12v3M5 15h6" />
+          </svg>
+        }
+        titleKey="settings.module.interview"
+        descKey="settings.module.interviewDesc"
+        enabled={interviewVisible}
+        onToggle={setInterviewVisible}
+        disableConfirm={interviewActive}
       />
     </div>
   );

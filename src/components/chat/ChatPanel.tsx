@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback, memo } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { create } from 'zustand';
 import { useChatStore, useActiveTab, generateMessageId, type ChatMessage, type SessionMeta } from '../../stores/chatStore';
@@ -1002,14 +1002,30 @@ export function ChatPanel() {
   // checks when a deferred detach expires.
   const chatAreaRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-  // setAtBottom drives showScrollBtn via handleAtBottomStateChange; the value
-  // itself is not read (follow gating uses userScrolledAwayRef instead).
-  const [, setAtBottom] = useState(true);
+  // Current "at bottom" state as reported by Virtuoso. Starts null (unknown):
+  // a session restore mounts Virtuoso with the view at the TOP, but the mount
+  // report (atBottom=false) only arrives in a passive effect AFTER this
+  // component's layout effects — an eager `true` here would yank a restored
+  // session to the bottom on the first data insert.
+  const [atBottom, setAtBottom] = useState<boolean | null>(null);
 
   // Whether the user has actively scrolled away from the bottom. A ref (not
   // state): written synchronously by wheel/touch events so the follow effect
   // below stops pinning within one frame, without waiting for a re-render.
   const userScrolledAwayRef = useRef(false);
+
+  // The single "pin to bottom" primitive. Operates on the scroller's real DOM
+  // (scrollHeight always includes the streaming Footer, even while Virtuoso
+  // is still measuring it), so there is no measurement lag to drift against.
+  // Short-circuits when already at the bottom (≤2px) to avoid churning scroll
+  // events on every token.
+  const pinToBottom = useCallback(() => {
+    const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+    if (!scroller) return;
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 2) {
+      scroller.scrollTop = scroller.scrollHeight;
+    }
+  }, []);
 
   // Deferred "user left the bottom". Virtuoso reports atBottom asynchronously
   // and transiently flips it to false when items are appended mid-stream
@@ -1044,6 +1060,10 @@ export function ChatPanel() {
       // state as this tab's stream ending, and don't yank the new view.
       lastStreamTabRef.current = selectedSessionId;
       prevStreamingRef.current = isStreaming;
+      // Drop the previous tab's stream-end timestamp: its 1.5s detach
+      // protection must not leak into the new tab (it would suppress a
+      // legitimate detach and yank the new view back to the bottom).
+      streamEndedAtRef.current = 0;
       return;
     }
     lastStreamTabRef.current = selectedSessionId;
@@ -1055,7 +1075,7 @@ export function ChatPanel() {
       // answers). Skipped if the user scrolled away meanwhile.
       const id = window.setTimeout(() => {
         if (!userScrolledAwayRef.current) {
-          virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+          pinToBottom();
         }
       }, 200);
       return () => clearTimeout(id);
@@ -1093,7 +1113,7 @@ export function ChatPanel() {
     if (!prev || prev.tabId !== cur.tabId || prev.ts === cur.ts) return;
     if (!cur.ts) return; // Turn ended (turnStartTime cleared) — don't yank the view
     userScrolledAwayRef.current = false;
-    virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+    pinToBottom();
     // Second pin once Virtuoso has measured the new Footer: the
     // ActivityIndicator appears in the same commit as the turn start, but its
     // height lands asynchronously (ResizeObserver), so the one-shot scroll
@@ -1102,7 +1122,7 @@ export function ChatPanel() {
     // — unless the user has deliberately scrolled away in the meantime.
     const id = window.setTimeout(() => {
       if (!userScrolledAwayRef.current) {
-        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+        pinToBottom();
       }
     }, 120);
     return () => clearTimeout(id);
@@ -1116,33 +1136,67 @@ export function ChatPanel() {
   // userScrolledAwayRef is updated synchronously on wheel instead, so leaving
   // the bottom stops the pinning immediately.
   //
-  // Data-array changes (new messages) are handled by Virtuoso's own
-  // followOutput, so this effect stays scoped to the streaming Footer only.
-  // Widening the deps to messages/sessionStatus/activityStatus made both this
-  // rAF scroll and followOutput fire on every insertion — a smooth animation
-  // racing a per-frame auto scroll that showed up as high-frequency
-  // up/down jitter while streaming.
+  // Data-array insertions are handled by the displayItems layout effect below
+  // (followOutput is disabled), so this effect stays scoped to the streaming
+  // Footer only. Widening the deps to messages/sessionStatus/activityStatus
+  // made both this rAF scroll and followOutput fire on every insertion — a
+  // smooth animation racing a per-frame auto scroll that showed up as
+  // high-frequency up/down jitter while streaming.
   useEffect(() => {
     if (!isStreaming || userScrolledAwayRef.current) return;
-    const id = requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
-    });
+    const id = requestAnimationFrame(pinToBottom);
     return () => cancelAnimationFrame(id);
-  }, [isStreaming, partialText, partialThinking]);
+  }, [isStreaming, partialText, partialThinking, pinToBottom]);
+
+  // Data-array insertions (message landing, tool results, question cards)
+  // used to be followed by Virtuoso's built-in followOutput — now disabled
+  // because it scrolls to the LAST item's bottom (excluding the streaming
+  // Footer) and raced the rAF true-bottom pin above into up/down jitter
+  // while streaming (SIZE_INCREASED triggers a delayed follow 100ms after
+  // every Footer height change). Take over that duty here, pinned to the
+  // same true bottom. Only pin while the user is still at the bottom:
+  // atBottom is Virtuoso's async report (null until first mount report),
+  // userScrolledAwayRef covers the synchronous wheel window.
+  const lastTabForFollowRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (lastTabForFollowRef.current !== selectedSessionId) {
+      // Tab switch — never yank the new view (same principle as the
+      // turnStart effect). Reset to "unknown" and let Virtuoso's real
+      // reports (scroll events from the pin below, user wheel) restore it.
+      lastTabForFollowRef.current = selectedSessionId;
+      setAtBottom(null);
+      // Reset per-tab scroll state synchronously (before any passive effect
+      // re-runs): userScrolledAwayRef from the previous tab would silence
+      // the rAF follow effect for a streaming tab switched back to; a
+      // pendingDetach timer armed in the previous tab would fire against
+      // the new tab's scroller and misjudge it as "user scrolled up".
+      userScrolledAwayRef.current = false;
+      if (pendingDetachRef.current !== null) {
+        clearTimeout(pendingDetachRef.current);
+        pendingDetachRef.current = null;
+      }
+      return;
+    }
+    if (atBottom !== true || userScrolledAwayRef.current) return;
+    pinToBottom();
+  }, [displayItems, atBottom, pinToBottom, selectedSessionId]);
   const [activeTurnId, setActiveTurnId] = useState<string | undefined>();
   const turns = useMemo(() => parseTurns(messages), [messages]);
 
-  // Map each turn's user message ID → index in displayItems (for turn navigation)
+  // Map each turn's user message ID → index in displayItems (for turn navigation).
+  // Single pass over displayItems: build id → index once, then turn lookups
+  // are O(1). The previous version ran findIndex per turn —
+  // O(turns × displayItems), quadratic in message count. Each displayItem
+  // message appears exactly once, so keying by msg.id keeps the old
+  // findIndex semantics (kind === 'message' match) identical.
   const turnIndexMap = useMemo(() => {
     const map = new Map<string, number>();
-    turns.forEach((turn) => {
-      const idx = displayItems.findIndex(
-        (item) => item.kind === 'message' && item.msg.id === turn.userMessageId,
-      );
-      if (idx >= 0) map.set(turn.userMessageId, idx);
-    });
+    for (let i = 0; i < displayItems.length; i++) {
+      const item = displayItems[i];
+      if (item.kind === 'message') map.set(item.msg.id, i);
+    }
     return map;
-  }, [turns, displayItems]);
+  }, [displayItems]);
 
   // Search result jump highlight
   const highlightMessageIndex = useChatStore((s) => s.highlightMessageIndex);
@@ -1253,11 +1307,9 @@ export function ChatPanel() {
     userScrolledAwayRef.current = false;
     // Scroll the container to its true bottom — scrollToIndex(last item)
     // stops at the last item's start, leaving the streaming Footer below the
-    // viewport (looks like jumping to the middle). Use 'auto', not 'smooth':
-    // Virtuoso locks the smooth animation's target to the list height at
-    // call time, and the Footer height measures asynchronously, so a smooth
-    // jump lands short of the real bottom while streaming.
-    virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+    // viewport (looks like jumping to the middle). pinToBottom targets the
+    // real DOM bottom (streaming Footer included) with no measurement lag.
+    pinToBottom();
     setShowScrollBtn(false);
     setActiveTurnId(turns[turns.length - 1]?.userMessageId);
     if (jumpTimerRef.current !== null) clearTimeout(jumpTimerRef.current);
@@ -1266,7 +1318,7 @@ export function ChatPanel() {
     jumpTimerRef.current = window.setTimeout(() => {
       jumpTimerRef.current = null;
       if (!userScrolledAwayRef.current) {
-        virtuosoRef.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: 'auto' });
+        pinToBottom();
       }
     }, 200);
   }, [turns]);
@@ -1409,7 +1461,10 @@ export function ChatPanel() {
           ref={virtuosoRef}
           className="flex-1 chat-scroll-container"
           data={displayItems}
-          followOutput={(atBottom) => (atBottom ? 'auto' : false)}
+          // Disabled on purpose — see the displayItems layout effect above.
+          // Built-in follow scrolls to the LAST item's bottom (no streaming
+          // Footer) and races the rAF true-bottom pin into up/down jitter.
+          followOutput={() => false}
           atBottomStateChange={handleAtBottomStateChange}
           rangeChanged={handleRangeChanged}
           onWheel={(e) => {

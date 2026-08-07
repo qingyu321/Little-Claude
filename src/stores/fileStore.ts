@@ -36,6 +36,55 @@ function computeChangedPrefixes(changed: Map<string, FileChangeKind>): Set<strin
   return set;
 }
 
+// ── R1: lazy tree loading helpers ────────────────────────────────────
+// The tree is loaded one level at a time (depth=1); expanding a directory
+// fetches its direct children on demand. Loaded children live inside the tree
+// nodes, so collapse/expand never rescans. Watcher events mark affected dirs
+// stale (`staleDirs`) and expanded nodes refetch themselves in place.
+
+function findDirNode(nodes: FileNode[], path: string): FileNode | null {
+  for (const n of nodes) {
+    if (n.path === path) return n;
+    if (n.is_dir && n.children) {
+      const found = findDirNode(n.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function setDirChildren(nodes: FileNode[], path: string, children: FileNode[]): FileNode[] {
+  return nodes.map((n) => {
+    if (n.path === path) return { ...n, children };
+    if (n.is_dir && n.children) return { ...n, children: setDirChildren(n.children, path, children) };
+    return n;
+  });
+}
+
+/** Collect every loaded directory path (dirs with children !== null). */
+function collectDirPaths(nodes: FileNode[], out: Set<string>): void {
+  for (const n of nodes) {
+    if (!n.is_dir) continue;
+    out.add(n.path);
+    if (n.children) collectDirPaths(n.children, out);
+  }
+}
+
+/**
+ * Merge a freshly fetched depth-1 tree over the old one: keep the previously
+ * loaded children of every existing directory so expanded subtrees stay
+ * mounted (their TreeNode local state survives), and let the caller mark them
+ * stale so they refetch in place instead of collapsing.
+ */
+function mergeTrees(oldNodes: FileNode[], newNodes: FileNode[]): FileNode[] {
+  return newNodes.map((n) => {
+    if (!n.is_dir) return n;
+    const old = oldNodes.find((o) => o.path === n.path);
+    if (old?.is_dir && old.children) return { ...n, children: old.children };
+    return n;
+  });
+}
+
 interface FileState {
   tree: FileNode[];
   isLoading: boolean;
@@ -62,6 +111,15 @@ interface FileState {
   /** Derived index (报告B3): directory prefixes containing ≥1 changed file */
   changedPrefixes: Set<string>;
 
+  // R1: lazy-loading state
+  /** Loaded directories whose children may be out of date (expanded ones refetch) */
+  staleDirs: Set<string>;
+  /** Bumped on every invalidation so in-flight child fetches discard their result */
+  childrenVersion: number;
+  /** Full-depth tree loaded on demand for search results (depth=1 lazy tree can't be searched) */
+  searchTree: FileNode[];
+  isSearchLoading: boolean;
+
   // Directory missing detection
   directoryMissing: boolean;
 
@@ -71,6 +129,12 @@ interface FileState {
   loadTree: (path: string) => Promise<void>;
   /** Refresh the tree without clearing change markers. Optional path overrides rootPath. */
   refreshTree: (overridePath?: string) => Promise<void>;
+  /** Load (or force-reload) the direct children of a directory node. */
+  loadDirChildren: (dirPath: string, force?: boolean) => Promise<void>;
+  /** Mark loaded directories containing any of the given paths as stale (expanded ones refetch). */
+  markStale: (paths: Iterable<string>) => void;
+  /** Load the full-depth tree used for search results. */
+  loadSearchTree: () => Promise<void>;
   selectFile: (path: string) => Promise<void>;
   clearSelection: () => void;
   closePreview: () => void;
@@ -111,6 +175,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
   isLoadingProjects: false,
   changedFiles: new Map(),
   changedPrefixes: new Set(),
+  staleDirs: new Set(),
+  childrenVersion: 0,
+  searchTree: [],
+  isSearchLoading: false,
   directoryMissing: false,
   isDragOverTree: false,
 
@@ -126,10 +194,16 @@ export const useFileStore = create<FileState>()((set, get) => ({
       ...(isNewDir ? { tree: [] } : {}),
     });
     try {
-      const tree = await bridge.readFileTree(path, 8);
+      // R1: only the top level is fetched; subdirectories load lazily on expand
+      const tree = await bridge.readFileTree(path, 1);
       // Guard: only apply if rootPath hasn't changed during async load
       if (get().rootPath === path) {
-        set({ tree, isLoading: false, changedFiles: new Map(), changedPrefixes: new Set(), directoryMissing: false });
+        set({
+          tree, isLoading: false, changedFiles: new Map(), changedPrefixes: new Set(),
+          directoryMissing: false,
+          staleDirs: new Set(), childrenVersion: get().childrenVersion + 1,
+          searchTree: [], isSearchLoading: false,
+        });
       }
     } catch (err) {
       if (get().rootPath === path) {
@@ -143,21 +217,89 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const dir = overridePath || get().rootPath;
     if (!dir) return;
     try {
-      const tree = await bridge.readFileTree(dir, 8);
+      const fresh = await bridge.readFileTree(dir, 1);
       // B1: async race guard — a stale refresh issued for a previous
       // directory must not clobber the tree of the currently selected one
       // (e.g. project switch while a watcher-triggered refresh is in flight).
       if (get().rootPath !== dir) return;
       // Sync rootPath if override was used and differs
       if (overridePath && overridePath !== get().rootPath) {
-        set({ tree, rootPath: overridePath });
-      } else {
-        set({ tree });
+        set({
+          tree: fresh, rootPath: overridePath,
+          staleDirs: new Set(), childrenVersion: get().childrenVersion + 1,
+          searchTree: [], isSearchLoading: false,
+        });
+        return;
       }
+      // R1: merge the fresh top level over the old tree — loaded children are
+      // preserved so expanded subtrees stay mounted, and every loaded dir is
+      // marked stale so its TreeNode refetches in place (no collapse).
+      const merged = mergeTrees(get().tree, fresh);
+      const staleDirs = new Set<string>();
+      collectDirPaths(merged, staleDirs);
+      staleDirs.delete(dir); // root's children were just refreshed
+      set({ tree: merged, staleDirs, childrenVersion: get().childrenVersion + 1 });
+      // Keep search results current if a search tree is loaded
+      if (get().searchTree.length > 0) get().loadSearchTree();
     } catch (err) {
       if (get().rootPath === dir && String(err).includes('does not exist')) {
         set({ directoryMissing: true, tree: [] });
       }
+    }
+  },
+
+  loadDirChildren: async (dirPath: string, force = false) => {
+    const { tree } = get();
+    if (tree.length === 0) return;
+    const node = findDirNode(tree, dirPath);
+    if (!node?.is_dir) return;
+    if (!force && node.children) return; // already loaded
+    const version = get().childrenVersion;
+    try {
+      const res = await bridge.readFileTree(dirPath, 1);
+      const children = res[0]?.children ?? [];
+      // Drop the result if the tree was invalidated mid-flight — the refetch
+      // triggered by that invalidation will produce fresher data.
+      if (get().childrenVersion !== version) return;
+      set((st) => {
+        const staleDirs = new Set(st.staleDirs);
+        staleDirs.delete(dirPath);
+        return { tree: setDirChildren(st.tree, dirPath, children), staleDirs };
+      });
+    } catch {
+      // Directory removed mid-flight — keep whatever children were loaded
+    }
+  },
+
+  markStale: (paths: Iterable<string>) => {
+    const root = get().rootPath;
+    if (!root) return;
+    const normRoot = root.replace(/\\/g, '/');
+    const staleDirs = new Set(get().staleDirs);
+    for (const p of paths) {
+      let prefix = dirPrefixOf(p);
+      while (prefix) {
+        const norm = prefix.replace(/\\/g, '/');
+        // Only directories inside the current root can be stale
+        if (norm === normRoot || norm.startsWith(normRoot + '/')) staleDirs.add(prefix);
+        prefix = dirPrefixOf(prefix);
+      }
+    }
+    // 无条件 bump：即使 staleDirs 集合无新增（目录已在失效中、refetch in-flight），
+    // 新事件也说明数据可能已变化——必须作废 in-flight 结果让它重取，否则
+    // "事件后数据"会被 "事件前快照" 覆盖，新文件不显示。
+    set({ staleDirs, childrenVersion: get().childrenVersion + 1 });
+  },
+
+  loadSearchTree: async () => {
+    const root = get().rootPath;
+    if (!root) return;
+    set({ isSearchLoading: true });
+    try {
+      const tree = await bridge.readFileTree(root, 8);
+      if (get().rootPath === root) set({ searchTree: tree, isSearchLoading: false });
+    } catch {
+      if (get().rootPath === root) set({ isSearchLoading: false });
     }
   },
 
@@ -299,11 +441,18 @@ export const useFileStore = create<FileState>()((set, get) => ({
         _changeFlushRaf = 0;
         if (_pendingChanges.size === 0) return;
         const next = new Map(get().changedFiles);
+        const stalePaths: string[] = [];
         for (const [p, k] of _pendingChanges) {
           next.set(p, k);
+          // R1: structure changes invalidate the loaded subtree — expanded
+          // dirs refetch in place so new/removed files appear without waiting
+          // for the debounced full refresh. Pure modifies never change the
+          // tree shape, so they skip invalidation.
+          if (k !== 'modified') stalePaths.push(p);
         }
         _pendingChanges.clear();
         set({ changedFiles: next, changedPrefixes: computeChangedPrefixes(next) });
+        if (stalePaths.length > 0) get().markStale(stalePaths);
       });
     }
   },

@@ -120,9 +120,11 @@ pub async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, S
     cmd.args(&args).current_dir(&cwd);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
-    // timeout() drops the output future on expiry — tokio's output() then kills
-    // the child (kill_on_drop), so a hung git (network, credential prompt, ...)
-    // cannot block the UI forever.
+    // timeout() 只放弃等待 future，不会终止已 spawn 的子进程——output()
+    // 默认 kill_on_drop=false，超时后 git 会继续在后台运行（网络、凭证
+    // 提示等场景会残留进程并锁住工作目录）。kill_on_drop(true) 确保超时
+    // 后子进程被终止，UI 不会被 hung git 阻塞。
+    cmd.kill_on_drop(true);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         cmd.output(),

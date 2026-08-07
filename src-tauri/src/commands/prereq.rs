@@ -368,13 +368,15 @@ pub async fn install_prerequisite(
 
     let result: Result<(), String> = match key.as_str() {
         "claude-cli" => {
-            crate::commands::cli_manage::install_claude_cli(app.clone()).await
+            // 无 scope：设置页前置检查安装不带取消令牌（保持原行为）
+            crate::commands::cli_manage::install_claude_cli(app.clone(), None).await
         }
         "git" => {
             #[cfg(target_os = "windows")]
             {
                 let china = crate::commands::cli_manage::is_china_network().await;
-                crate::commands::cli_manage::install_git_bash_inner(&app, china).await
+                let no_scope = crate::commands::download_cancel::CancelScope::new(None);
+                crate::commands::cli_manage::install_git_bash_inner(&app, china, &no_scope).await
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -382,7 +384,7 @@ pub async fn install_prerequisite(
             }
         }
         "node" => {
-            crate::commands::cli_manage::install_node_env(app.clone()).await
+            crate::commands::cli_manage::install_node_env(app.clone(), None).await
         }
         "auth" => {
             crate::commands::auth::start_claude_login(app.clone()).await

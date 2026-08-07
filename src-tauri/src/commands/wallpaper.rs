@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::safe_data_dir;
-use crate::commands::video_analysis::video_analysis_skill_dir;
+use crate::commands::speech_runtime::video_analysis_skill_dir;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -310,7 +310,15 @@ pub async fn list_wallpapers() -> Result<Vec<WallpaperInfo>, String> {
             .to_string_lossy()
             .to_string();
         let size = path.metadata().map(|m| m.len()).unwrap_or(0);
-        let duration = probe_video_duration(&path).unwrap_or(0.0);
+        // probe_video_duration runs a synchronous ffmpeg subprocess; run it on
+        // the blocking pool so large videos cannot stall the async runtime.
+        let duration = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || probe_video_duration(&path)
+        })
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0.0);
         result.push(WallpaperInfo {
             name,
             path: path.to_string_lossy().to_string(),
@@ -363,8 +371,25 @@ fn probe_video_duration(video_path: &Path) -> Option<f64> {
     None
 }
 
+/// 壁纸名称校验：拒绝空名称、路径分隔符（`/` `\`）与 `..`，防止
+/// `dir.join(format!("{}.mp4", name))` 逃逸出 wallpaper 目录
+/// （`../x`、`..\x`、`/abs`、`C:\abs` 等均被拦截）。
+/// 注意：不能收紧为 ASCII 白名单——list_wallpapers 返回的是磁盘文件原名
+/// （中文/空格名壁纸合法，HTTP 服务器也按百分比编码处理中文文件名），
+/// 白名单会让这些壁纸无法删除/加载。
+fn validate_wallpaper_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("壁纸名称不能为空".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name == ".." {
+        return Err(format!("非法壁纸名称: {}", name));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn delete_wallpaper(name: String) -> Result<(), String> {
+    validate_wallpaper_name(&name)?;
     let dir = wallpaper_dir()?;
     let path = dir.join(format!("{}.mp4", name));
     if path.is_file() {
@@ -376,6 +401,7 @@ pub async fn delete_wallpaper(name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_wallpaper_path(name: String) -> Result<String, String> {
+    validate_wallpaper_name(&name)?;
     let dir = wallpaper_dir()?;
     let path = dir.join(format!("{}.mp4", name));
     if path.is_file() {
@@ -501,10 +527,22 @@ pub async fn compress_wallpaper(
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
+            // timeout() 只放弃等待，不会终止已 spawn 的子进程（output() 默认
+            // kill_on_drop=false）——超时后残留的 ffmpeg 会继续占 CPU、写
+            // 输出文件。kill_on_drop(true) 确保超时后 ffmpeg 被终止（参照
+            // local_model.rs 同款处理）。
+            .kill_on_drop(true);
+        let child = cmd
             .spawn()
-            .map_err(|e| format!("启动 FFmpeg 失败: {}", e))?
-            .wait_with_output().await
-            .map_err(|e| format!("FFmpeg 进程错误: {}", e))
+            .map_err(|e| format!("启动 FFmpeg 失败: {}", e))?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(300), // 大视频压缩耗时，300s 兜底
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| "FFmpeg 压缩超时（300 秒），已终止进程".to_string())?
+        .map_err(|e| format!("FFmpeg 进程错误: {}", e))?;
+        Ok(output)
     }
 
     // Try each encoder in cascade order
@@ -561,7 +599,15 @@ pub async fn compress_wallpaper(
     }
 
     let output_size = output_path.metadata().map(|m| m.len()).unwrap_or(0);
-    let duration = probe_video_duration(&output_path).unwrap_or(0.0);
+    // Same as list_wallpapers: probe on the blocking pool, never on the
+    // async runtime thread.
+    let duration = tokio::task::spawn_blocking({
+        let output_path = output_path.clone();
+        move || probe_video_duration(&output_path)
+    })
+    .await
+    .unwrap_or(None)
+    .unwrap_or(0.0);
     let savings = if input_size > 0 {
         ((input_size - output_size) as f64 / input_size as f64 * 100.0).round() as u32
     } else {

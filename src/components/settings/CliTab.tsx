@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { bridge, type CliCandidate, type CliStatus } from '../../lib/tauri-bridge';
+import { bridge, cancelDownload, invokeWithCancellation, type CliCandidate, type CliStatus } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { APP_NAME } from '../../lib/edition';
 import { stripAnsi } from '../../lib/strip-ansi';
@@ -32,8 +32,9 @@ interface CliSectionProps {
   cliType: 'claude' | 'codex';
   title: string;
   bridgeCheck: () => Promise<CliStatus>;
-  bridgeInstall: () => Promise<void>;
-  bridgeUpdate: () => Promise<string>;
+  /** 传入 scopeId 时走可取消路径（后端轮询 CancellationToken）；不传则保持原行为 */
+  bridgeInstall: (scopeId?: string) => Promise<void>;
+  bridgeUpdate: (scopeId?: string) => Promise<string>;
   showGitBashWarning?: boolean;
   hasNativePhases?: boolean;
 }
@@ -47,6 +48,8 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
   const [gitBashMissing, setGitBashMissing] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [phase, setPhase] = useState<InstallPhase>('idle');
+  // 当前安装/更新任务的取消 scope（非空且 claude 时显示取消按钮）
+  const [actionScopeId, setActionScopeId] = useState<string | null>(null);
 
   // Update-available state: claude → cliUpdateAvailable, codex → codexUpdateAvailable
   const updateKey = cliType === 'codex' ? 'codexUpdateAvailable' as const : 'cliUpdateAvailable' as const;
@@ -93,6 +96,10 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
     setDownloadPercent(0);
     setPhase('downloading');
 
+    // 取消 scope：安装期间展示取消按钮，点击后后端轮询令牌提前退出并清理临时文件
+    const scopeId = `cli-${cliType}-install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setActionScopeId(scopeId);
+
     const { onDownloadProgress } = await import('../../lib/tauri-bridge');
     const unlisten = await onDownloadProgress((event) => {
       setDownloadPercent(event.percent);
@@ -116,8 +123,7 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
     });
 
     try {
-      await bridgeInstall();
-      unlisten();
+      await bridgeInstall(scopeId);
       const result = await bridgeCheck();
       if (result.installed) {
         setCliVersion(result.version ?? null);
@@ -128,17 +134,22 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
         setStatus('install_failed');
       }
     } catch (e) {
-      unlisten();
       setErrorMsg(stripAnsi(String(e)));
       setStatus('install_failed');
+    } finally {
+      unlisten();
+      setActionScopeId(null);
     }
-  }, [bridgeCheck, bridgeInstall, hasNativePhases]);
+  }, [bridgeCheck, bridgeInstall, cliType, hasNativePhases]);
 
   const handleUpdate = useCallback(async () => {
     setStatus('updating');
     setErrorMsg('');
     setDownloadPercent(0);
     setPhase('idle');
+
+    const scopeId = `cli-${cliType}-update-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setActionScopeId(scopeId);
 
     const { onDownloadProgress } = await import('../../lib/tauri-bridge');
     const unlisten = await onDownloadProgress((event) => {
@@ -154,17 +165,18 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
     });
 
     try {
-      const newVersion = await bridgeUpdate();
-      unlisten();
+      const newVersion = await bridgeUpdate(scopeId);
       setCliVersion(newVersion);
       setStatus('updated');
       useSettingsStore.setState({ [updateKey]: false, [versionKey]: '' } as any);
     } catch (e) {
-      unlisten();
       setErrorMsg(stripAnsi(String(e)));
       setStatus('update_failed');
+    } finally {
+      unlisten();
+      setActionScopeId(null);
     }
-  }, [bridgeUpdate, updateKey, versionKey, hasNativePhases]);
+  }, [bridgeUpdate, cliType, updateKey, versionKey, hasNativePhases]);
 
   const handleRestart = useCallback(async () => {
     const { relaunch } = await import('@tauri-apps/plugin-process');
@@ -302,6 +314,17 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
               <div className="h-full bg-accent/60 rounded-full animate-pulse w-full" />
             )}
           </div>
+          {/* 取消更新（仅 claude 支持 CancellationToken） */}
+          {actionScopeId && cliType === 'claude' && (
+            <button
+              onClick={() => cancelDownload(actionScopeId)}
+              className="w-full py-1.5 text-[13px] font-medium rounded-lg
+                border border-border-subtle text-text-muted
+                hover:bg-bg-secondary hover:text-text-primary transition-smooth"
+            >
+              {t('common.cancel')}
+            </button>
+          )}
         </div>
       )}
 
@@ -352,6 +375,17 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
               <div className="h-full bg-text-secondary/60 rounded-full animate-pulse w-full" />
             )}
           </div>
+          {/* 取消安装（仅 claude 支持 CancellationToken） */}
+          {actionScopeId && cliType === 'claude' && (
+            <button
+              onClick={() => cancelDownload(actionScopeId)}
+              className="w-full py-1.5 text-[13px] font-medium rounded-lg
+                border border-border-subtle text-text-muted
+                hover:bg-bg-secondary hover:text-text-primary transition-smooth"
+            >
+              {t('common.cancel')}
+            </button>
+          )}
         </div>
       )}
 
@@ -417,8 +451,12 @@ export function CliTab() {
         cliType="claude"
         title="Claude Code CLI"
         bridgeCheck={() => bridge.checkClaudeCli()}
-        bridgeInstall={() => bridge.installClaudeCli()}
-        bridgeUpdate={() => bridge.updateClaudeCli()}
+        bridgeInstall={(scopeId) => scopeId
+          ? invokeWithCancellation('install_claude_cli', {}, scopeId)
+          : bridge.installClaudeCli()}
+        bridgeUpdate={(scopeId) => scopeId
+          ? invokeWithCancellation('update_claude_cli', {}, scopeId)
+          : bridge.updateClaudeCli()}
         showGitBashWarning
         hasNativePhases
       />

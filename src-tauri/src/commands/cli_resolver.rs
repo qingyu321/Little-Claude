@@ -2,8 +2,8 @@
 //!
 //! Priority order (highest → lowest):
 //!   Tier 0 · Official     — Claude Desktop bundled, official installer (~/.claude/local)
-//!   Tier 1 · System       — npm global, Homebrew, system PATH installs
-//!   Tier 2 · AppLocal     — Her self-deployed (native binary or npm --prefix)
+//!   Tier 1 · AppLocal     — app self-deployed (native binary or npm --prefix)
+//!   Tier 2 · System       — npm global, Homebrew, system PATH installs
 //!   Tier 3 · VersionMgr   — nvm, volta, fnm, bun
 //!   Tier 4 · Dynamic      — Process PATH, login shell PATH, which/where fallback
 //!
@@ -385,7 +385,19 @@ fn collect_tiered_dirs() -> Vec<TieredDir> {
             CliSource::Official,
         );
 
-        // ── Tier 1: System ─────────────────────────────────
+        // ── Tier 1: AppLocal (self-managed) ────────────────
+        // The app's own installs take precedence over system globals — otherwise
+        // an in-app CLI update would always be shadowed by an older system copy
+        // (e.g. stale npm-global in AppData/Roaming/npm).
+
+        if let Some(cli_dir) = crate::cli_download_dir() {
+            push(cli_dir.to_string_lossy().to_string(), CliSource::AppLocal);
+        }
+        if let Some(npm_bin) = crate::commands::cli_manage::get_npm_global_bin() {
+            push(npm_bin.to_string_lossy().to_string(), CliSource::AppLocal);
+        }
+
+        // ── Tier 2: System ─────────────────────────────────
 
         #[cfg(target_os = "windows")]
         {
@@ -455,15 +467,6 @@ fn collect_tiered_dirs() -> Vec<TieredDir> {
                     push(lib_dir.to_string_lossy().to_string(), CliSource::System);
                 }
             }
-        }
-
-        // ── Tier 2: AppLocal ───────────────────────────────
-
-        if let Some(cli_dir) = crate::cli_download_dir() {
-            push(cli_dir.to_string_lossy().to_string(), CliSource::AppLocal);
-        }
-        if let Some(npm_bin) = crate::commands::cli_manage::get_npm_global_bin() {
-            push(npm_bin.to_string_lossy().to_string(), CliSource::AppLocal);
         }
 
         // ── Tier 3: Version Managers ───────────────────────

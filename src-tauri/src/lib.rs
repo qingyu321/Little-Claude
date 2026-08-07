@@ -6,8 +6,17 @@ mod protocol;
 
 use commands::{ApiProvider, ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager, WatcherManager};
 use commands::session::cleanup_tracked_sessions;
+#[cfg(feature = "video-analysis")]
 use commands::video_analysis::install_bundled_video_analysis_skill;
-use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, dismiss_video_analysis_runtime_prompt, download_speech_runtime, download_video_analysis_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_video_analysis_multimodal_config, get_video_analysis_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_video_analysis_skill_dir, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_temp_file, save_video_analysis_multimodal_config, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, set_video_analysis_acceleration, set_video_analysis_asr_model, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
+// video-analysis tauri commands (feature-gated; module not compiled by default)
+#[cfg(feature = "video-analysis")]
+use commands::{
+    dismiss_video_analysis_runtime_prompt, download_video_analysis_runtime,
+    get_video_analysis_multimodal_config, get_video_analysis_runtime_status,
+    open_video_analysis_skill_dir, save_video_analysis_multimodal_config,
+    set_video_analysis_acceleration, set_video_analysis_asr_model,
+};
+use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
 use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
@@ -84,6 +93,34 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 /// directory so they share a single CLI installation and settings.
 pub(crate) const APP_DATA_DIR_NAME: &str = "com.tinyzhuang.tokenicode";
 
+/// Suffix appended to app data directories in dev builds (cfg!(debug_assertions)).
+/// Dev builds (`cargo tauri dev`) must never touch the released app's CLI install,
+/// providers, settings, or session data — previously both shared
+/// `com.tinyzhuang.tokenicode`, so a CLI update in dev silently replaced the
+/// production CLI (and vice versa). Release builds keep the plain name.
+pub(crate) fn dev_data_dir_suffix() -> &'static str {
+    if cfg!(debug_assertions) {
+        ".dev"
+    } else {
+        ""
+    }
+}
+
+/// App-local data directory name for the current build type
+/// (e.g. "com.tinyzhuang.tokenicode" in release, "com.tinyzhuang.tokenicode.dev" in dev).
+pub(crate) fn app_data_dir_name() -> String {
+    format!("{}{}", APP_DATA_DIR_NAME, dev_data_dir_suffix())
+}
+
+/// Safe data directory name ("~/.tokenicode" or "~/.tokenicode.dev" in dev builds).
+pub(crate) fn safe_data_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        ".tokenicode.dev"
+    } else {
+        ".tokenicode"
+    }
+}
+
 /// GCS bucket for Claude Code releases.
 pub(crate) const CLI_GCS_BASE: &str = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
 
@@ -92,14 +129,14 @@ pub(crate) const CLI_MIRROR_BASE: &str = "https://herear.cn:8443/releases/claude
 
 /// Path to the CLI download directory under the app's local data dir.
 pub(crate) fn cli_download_dir() -> Option<std::path::PathBuf> {
-    dirs::data_local_dir().map(|d| d.join(APP_DATA_DIR_NAME).join("cli"))
+    dirs::data_local_dir().map(|d| d.join(app_data_dir_name()).join("cli"))
 }
 
 /// Path to the local Git installation directory (Windows only).
 #[cfg(target_os = "windows")]
 pub(crate) fn git_download_dir() -> Result<std::path::PathBuf, String> {
     dirs::data_local_dir()
-        .map(|d| d.join(APP_DATA_DIR_NAME).join("git"))
+        .map(|d| d.join(app_data_dir_name()).join("git"))
         .ok_or_else(|| "Cannot determine app data directory".to_string())
 }
 
@@ -273,9 +310,27 @@ pub(crate) fn login_shell_extra_path() -> &'static str {
 /// GUI apps launched from Finder/Dock don't inherit shell env vars (including
 /// proxy settings), which causes API requests to fail in regions that require
 /// a proxy to reach Anthropic's API.
+///
+/// Blocking analysis (audit item "sync shell spawn on async path"):
+/// - The shell probe runs at most ONCE per process lifetime, guarded by
+///   `OnceLock`. Proxy env vars do not change while the app is running, so
+///   caching is safe and makes every later call a lock-free HashMap lookup.
+/// - The one-time initialization is guaranteed to happen in Tauri's `.setup()`
+///   callback (see `run()` below), which runs on the main thread BEFORE the
+///   event loop starts and before any IPC command can be dispatched. All async
+///   call sites (`build_smart_http_client`, `start_claude_session`, ...) only
+///   ever see the warm cache — they never execute the blocking shell probe on
+///   a tokio worker thread.
+/// - CONTRACT: do not remove the warm-up call in `.setup()`. If it ever goes
+///   away, the first probe would land inside an async command and block a
+///   tokio worker (potentially for seconds if `.zshrc` is heavy); the fix
+///   then is to make this `async` and wrap the probe in `spawn_blocking`.
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn login_shell_proxy_env() -> &'static HashMap<String, String> {
     static CACHE: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+    // Runs exactly once (see blocking analysis above); synchronous shell
+    // execution is fine here because the only caller that can trigger this
+    // first run is the main-thread `.setup()` warm-up.
     CACHE.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         // Print proxy-related vars in key=value format, one per line.
@@ -406,6 +461,10 @@ fn resolve_proxy_url() -> Option<String> {
         }
     }
     // 3. macOS/Linux GUI apps don't inherit shell env; check login shell
+    // Note: this may run on a tokio worker thread (build_smart_http_client /
+    // start_claude_session are async), but the cache is always warm here — the
+    // blocking probe ran exactly once in `.setup()` on the main thread before
+    // the event loop started. This call is a lock-free HashMap lookup.
     #[cfg(not(target_os = "windows"))]
     {
         let proxy_env = login_shell_proxy_env();
@@ -793,18 +852,21 @@ pub(crate) fn build_enriched_path() -> String {
 
 // --- Credential storage (TK-303) ---
 
-/// Directory for Little Claude app data (may be wiped by NSIS installer on Windows)
+/// Directory for Little Claude app data (may be wiped by NSIS installer on Windows).
+/// Dev builds use a ".dev"-suffixed directory so they never share the CLI install,
+/// npm cache, or WebView data with the released app.
 pub(crate) fn app_data_dir() -> Result<std::path::PathBuf, String> {
     dirs::data_local_dir()
-        .map(|d| d.join(APP_DATA_DIR_NAME))
+        .map(|d| d.join(app_data_dir_name()))
         .ok_or_else(|| "Cannot determine app data directory".to_string())
 }
 
 /// Safe directory in user's home  --?survives Windows NSIS updates.
 /// Uses ~/.tokenicode/ which already stores tracked_sessions.txt.
+/// Dev builds use ~/.tokenicode.dev/ so providers/sessions stay isolated.
 pub(crate) fn safe_data_dir() -> Result<std::path::PathBuf, String> {
     dirs::home_dir()
-        .map(|d| d.join(".tokenicode"))
+        .map(|d| d.join(safe_data_dir_name()))
         .ok_or_else(|| "Cannot determine home directory".to_string())
 }
 
@@ -1742,6 +1804,9 @@ pub fn run() {
         .setup({
             let t_run = t_run;
             move |app| {
+            // `app` is only used by the feature-gated skill installer (video-analysis).
+            #[cfg(not(feature = "video-analysis"))]
+            let _ = &app;
             eprintln!("[little-claude] setup start, {:?} since run()", t_run.elapsed());
             // titleBarStyle: "Overlay" in tauri.conf.json handles macOS traffic lights
             // and native titlebar drag/double-click-to-maximize automatically.
@@ -1755,6 +1820,7 @@ pub fn run() {
             // embedded frontend automatically via its internal protocol.
 
             // Install bundled skill bodies (no heavy runtime deps).
+            #[cfg(feature = "video-analysis")]
             if let Err(e) = install_bundled_video_analysis_skill(app.handle()) {
                 eprintln!(
                     "[little-claude] Failed to install bundled video-analysis skill: {}",
@@ -1764,6 +1830,13 @@ pub fn run() {
 
             // Propagate proxy env vars from login shell to the process environment
             // so that ALL HTTP clients can reach external services through the proxy.
+            // WARM-UP (keep this call): this is the one and only place where the
+            // blocking shell probe in login_shell_proxy_env() may execute — main
+            // thread, before the event loop starts, so it cannot stall any async
+            // worker. It fills the OnceLock cache, guaranteeing that every later
+            // call from async contexts (build_smart_http_client,
+            // start_claude_session) is a cache hit. See the blocking analysis in
+            // login_shell_proxy_env() docs.
             #[cfg(not(target_os = "windows"))]
             {
                 let proxy_env = login_shell_proxy_env();
@@ -1830,16 +1903,24 @@ pub fn run() {
             write_skill,
             delete_skill,
             toggle_skill_enabled,
+            #[cfg(feature = "video-analysis")]
             get_video_analysis_runtime_status,
+            #[cfg(feature = "video-analysis")]
             dismiss_video_analysis_runtime_prompt,
+            #[cfg(feature = "video-analysis")]
             download_video_analysis_runtime,
+            #[cfg(feature = "video-analysis")]
             open_video_analysis_skill_dir,
             get_speech_runtime_status,
             download_speech_runtime,
             open_speech_skill_dir,
+            #[cfg(feature = "video-analysis")]
             get_video_analysis_multimodal_config,
+            #[cfg(feature = "video-analysis")]
             save_video_analysis_multimodal_config,
+            #[cfg(feature = "video-analysis")]
             set_video_analysis_acceleration,
+            #[cfg(feature = "video-analysis")]
             set_video_analysis_asr_model,
             list_all_commands,
             translate_skill_metadata,
@@ -1908,6 +1989,8 @@ pub fn run() {
             push_local_asr_audio,
             stop_local_asr_session,
             transcribe_and_reset_local_asr,
+            // 通用下载取消（CancellationToken）
+            commands::download_cancel::cancel_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

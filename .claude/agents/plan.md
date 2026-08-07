@@ -3,7 +3,6 @@ name: plan
 description: |
   Multi-Agent Pipeline planner. Analyzes requirements and produces a fully configured task directory ready for dispatch.
 tools: Read, Bash, Glob, Grep, Task
-model: opus
 ---
 # Plan Agent
 
@@ -191,7 +190,6 @@ Output format (use exactly this format):
 
 ## Technical Notes
 <any important technical considerations for prd.md>",
-  model: "opus"
 )
 ```
 

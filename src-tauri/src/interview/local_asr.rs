@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use crate::commands::download_cancel::{self, CancelScope};
+
 // ============================================================
 // 条件编译：仅在 local-asr feature 启用时编译实际逻辑
 // ============================================================
@@ -176,7 +178,7 @@ pub const MODEL_FILES: &[&str] = &[
 pub fn default_model_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tokenicode")
+        .join(crate::safe_data_dir_name())
         .join("models")
         .join("sensevoice")
 }
@@ -236,14 +238,27 @@ fn build_download_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
-/// 下载本地 ASR 模型（异步，通过事件报告进度）。
+/// 下载本地 ASR 模型（异步，通过事件报告进度，进度数值基于字节数）。
+///
+/// 流式写盘 + 断点续传：
+/// - 先写 `<文件>.part` 临时文件，下载完成并校验通过后再 rename 为最终文件；
+/// - `.part` 已存在且大小 > 0 时发送 `Range: bytes={len}-` 续传（配合 If-Range
+///   与上次记录的 ETag；服务器返回 206 则追加写，200 则截断重写，不支持
+///   Range 时从零重下）；
+/// - 完整性校验：比对响应 Content-Length 与实际字节数，不一致删除 .part 并报错；
+///   全量下载时响应带 Content-MD5 则顺带校验（HuggingFace 无公开 SHA 数据源，
+///   以大小校验 + 可选 MD5/ETag 兜底）。
+///
 /// mirror_index: None=自动尝试所有镜像, Some(0)=HF-Mirror, Some(1)=HuggingFace
 #[tauri::command]
 pub async fn download_local_asr_model(
     app: tauri::AppHandle,
     mirror_index: Option<usize>,
+    scope_id: Option<String>,
 ) -> Result<String, String> {
     use tauri::Emitter;
+
+    let scope = CancelScope::new(scope_id.as_deref());
 
     let model_dir = default_model_dir();
     std::fs::create_dir_all(&model_dir)
@@ -267,8 +282,13 @@ pub async fn download_local_asr_model(
     };
 
     let mut last_err = String::new();
+    let mut total_bytes: u64 = 0;
 
     for (mirror_idx, base_url, name) in &mirrors {
+        if scope.is_cancelled() {
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
         eprintln!(
             "[local-asr] Trying mirror {}: {} ({})",
             mirror_idx, name, base_url
@@ -308,70 +328,58 @@ pub async fn download_local_asr_model(
             let url = format!("{}/{}", base_url, file_name);
             let dest = model_dir.join(file_name);
 
+            // 已存在且非空的最终文件跳过：镜像切换重试时 240MB 大文件不白下，
+            // 也不覆盖磁盘上已安装的完好模型。
+            if dest.exists() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                eprintln!("[local-asr] {} already present, skipping", file_name);
+                continue;
+            }
+
             let _ = app.emit(
                 "local-asr:download-progress",
                 serde_json::json!({
                     "file": file_name,
-                    "current": i + 1,
-                    "total": total,
+                    "current": 0,
+                    "total": 0,
                     "status": "downloading",
                     "mirror": name,
                 }),
             );
 
-            let resp = match client.get(&url).send().await {
-                Ok(r) => r,
+            match download_model_file(&app, &client, &url, &dest, name, &scope).await {
+                Ok(bytes) => {
+                    total_bytes += bytes;
+                    eprintln!(
+                        "[local-asr] Downloaded {}/{}: {} ({} bytes) from {}",
+                        i + 1,
+                        total,
+                        file_name,
+                        bytes,
+                        name
+                    );
+                }
                 Err(e) => {
+                    if download_cancel::is_cancelled_err(&e) {
+                        // 用户取消：.part 已在内部清理，直接向上传播（不尝试下一镜像）
+                        return Err(e);
+                    }
                     last_err = format!("下载 {} 失败: {}", file_name, e);
                     eprintln!("[local-asr] {}", last_err);
                     success = false;
                     break;
                 }
-            };
-
-            if !resp.status().is_success() {
-                last_err = format!(
-                    "HTTP {} downloading {} from {}",
-                    resp.status(),
-                    file_name,
-                    name
-                );
-                eprintln!("[local-asr] {}", last_err);
-                success = false;
-                break;
             }
-
-            let bytes = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    last_err = format!("读取 {} 数据失败: {}", file_name, e);
-                    eprintln!("[local-asr] {}", last_err);
-                    success = false;
-                    break;
-                }
-            };
-
-            if let Err(e) = std::fs::write(&dest, &bytes) {
-                last_err = format!("写入 {} 失败: {}", file_name, e);
-                eprintln!("[local-asr] {}", last_err);
-                success = false;
-                break;
-            }
-
-            eprintln!(
-                "[local-asr] Downloaded {}/{}: {} ({} bytes) from {}",
-                i + 1,
-                total,
-                file_name,
-                bytes.len(),
-                name
-            );
         }
 
-        // 如果中间有失败，清理已下载的部分并尝试下一个镜像
+        // 如果中间有失败：绝不删除已安装/已下好的最终文件（240MB 模型删了
+        // 要全量重下，且可能误删用户磁盘上完好的旧模型）。只清掉当前镜像留下
+        // 的 .part/.etag —— 跨镜像续传会把两个镜像的部分内容混成一个文件
+        // （If-Range 的 ETag 来自上一镜像，两镜像内容不一致时无法检出），
+        // 因此换镜像必须强制全量重下。
         if !success {
             for file_name in MODEL_FILES {
-                let _ = std::fs::remove_file(model_dir.join(file_name));
+                let _ = std::fs::remove_file(model_dir.join(format!("{}.part", file_name)));
+                let _ = std::fs::remove_file(model_dir.join(format!("{}.etag", file_name)));
             }
             continue;
         }
@@ -380,8 +388,8 @@ pub async fn download_local_asr_model(
             "local-asr:download-progress",
             serde_json::json!({
                 "file": "",
-                "current": total,
-                "total": total,
+                "current": total_bytes,
+                "total": total_bytes,
                 "status": "done",
                 "mirror": name,
             }),
@@ -395,10 +403,227 @@ pub async fn download_local_asr_model(
         return Ok(model_dir.to_string_lossy().to_string());
     }
 
+    if scope.is_cancelled() {
+        return Err(download_cancel::CANCELLED_ERROR.to_string());
+    }
+
     Err(format!(
         "所有镜像下载失败。最后的错误：{}\n\n请检查网络连接，或在系统环境变量中设置 https_proxy 后重启应用。",
         last_err
     ))
+}
+
+/// 下载单个模型文件：流式写 `.part` → 校验 → rename 为最终文件。
+///
+/// 断点续传：
+/// - `.part` 已存在且大小 > 0 → 发送 `Range: bytes={len}-`；
+/// - 响应 206（配合 If-Range 的 ETag 确认资源未变）→ 追加写；
+/// - 响应 200（服务器不支持 Range / 资源已变化）→ 截断重写；
+/// - 校验失败时删除 `.part`（`.etag` 一并清理）；用户取消时保留
+///   `.part`/`.etag` 供下次断点续传。
+async fn download_model_file(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    url: &str,
+    dest: &std::path::Path,
+    mirror_name: &str,
+    scope: &CancelScope,
+) -> Result<u64, String> {
+    use tauri::Emitter;
+
+    let part_path = std::path::PathBuf::from(format!("{}.part", dest.display()));
+    let etag_path = std::path::PathBuf::from(format!("{}.etag", dest.display()));
+
+    // 已有部分文件 → 尝试断点续传
+    let existing = part_path
+        .metadata()
+        .ok()
+        .map(|m| m.len())
+        .filter(|&l| l > 0);
+
+    let mut req = client.get(url);
+    if let Some(len) = existing {
+        req = req.header(reqwest::header::RANGE, format!("bytes={}-", len));
+        // If-Range：服务器确认资源未变才返回 206 续传；变了返回 200 全量 → 截断重下
+        if let Ok(etag) = std::fs::read_to_string(&etag_path) {
+            let etag = etag.trim().to_string();
+            if !etag.is_empty() {
+                req = req.header(reqwest::header::IF_RANGE, etag);
+            }
+        }
+    }
+
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| format!("下载 {} 失败: {}", url, e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} downloading {}", resp.status(), url));
+    }
+
+    // 206 = 续传（追加写）；其他成功状态码 = 全量（截断重写）
+    let resume = existing.is_some() && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+
+    // Content-Length：206 时是剩余字节数，加上已有部分即为文件总大小
+    let expected_total: Option<u64> = match (existing, resp.content_length()) {
+        (Some(len), Some(rem)) if resume => Some(len + rem),
+        (_, Some(total)) => Some(total),
+        _ => None,
+    };
+
+    // Content-MD5（base64 编码的 16 字节摘要）仅在非续传时可信（206 只回传部分实体）。
+    // reqwest::header 无 CONTENT_MD5 常量（http crate 未收录该头），用 HeaderName 构造。
+    let content_md5 = if resume {
+        None
+    } else {
+        // from_static 是 infallible 的（编译期校验头名合法性）
+        let hdr = reqwest::header::HeaderName::from_static("content-md5");
+        resp.headers()
+            .get(hdr)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+
+    // 记录 ETag 到 sidecar，供下次续传的 If-Range 使用
+    // （资源变化时服务器返回 200 全量，自动截断重下）
+    if let Some(etag) = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !etag.is_empty() {
+            let _ = std::fs::write(&etag_path, etag);
+        }
+    }
+
+    // 打开 .part：续传追加，全量截断（含 200 重下场景）
+    let mut file = if resume {
+        std::fs::OpenOptions::new().append(true).open(&part_path)
+    } else {
+        std::fs::File::create(&part_path)
+    }
+    .map_err(|e| format!("打开临时文件失败 {}: {}", part_path.display(), e))?;
+
+    use std::io::Write;
+    let file_label = dest
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut downloaded: u64 = if resume { existing.unwrap_or(0) } else { 0 };
+    let mut last_emit = 0u64;
+
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("读取 {} 数据失败: {}", file_label, e))?
+    {
+        if scope.is_cancelled() {
+            // 取消：保留 .part/.etag 供下次断点续传（240MB 文件下了一半不该作废）
+            return Err(download_cancel::CANCELLED_ERROR.to_string());
+        }
+
+        file.write_all(&chunk)
+            .map_err(|e| format!("写入 {} 失败: {}", part_path.display(), e))?;
+        downloaded += chunk.len() as u64;
+
+        // 节流进度事件（~256 KiB 一次，或下载完成时），数值基于字节数
+        if downloaded - last_emit >= 256 * 1024
+            || expected_total.map_or(false, |t| downloaded >= t)
+        {
+            last_emit = downloaded;
+            let _ = app.emit(
+                "local-asr:download-progress",
+                serde_json::json!({
+                    "file": file_label,
+                    "current": downloaded,
+                    "total": expected_total.unwrap_or(0),
+                    "status": "downloading",
+                    "mirror": mirror_name,
+                }),
+            );
+        }
+    }
+
+    file.flush()
+        .map_err(|e| format!("写入 {} 失败: {}", part_path.display(), e))?;
+    file.sync_all()
+        .map_err(|e| format!("写入 {} 失败: {}", part_path.display(), e))?;
+    drop(file);
+
+    // 1) 大小校验（Content-Length 可得时实际字节数必须一致，防止截断/镜像损坏）
+    if let Some(expected) = expected_total {
+        if downloaded != expected {
+            let _ = std::fs::remove_file(&part_path);
+            let _ = std::fs::remove_file(&etag_path);
+            return Err(format!(
+                "{} 下载不完整：预期 {} 字节，实际 {} 字节",
+                file_label, expected, downloaded
+            ));
+        }
+    }
+
+    // 2) Content-MD5 顺带校验（仅全量下载；HuggingFace 通常不发送该头，缺失即跳过）
+    if let Some(md5_b64) = content_md5 {
+        match verify_content_md5(&part_path, &md5_b64) {
+            Ok(true) => {
+                eprintln!("[local-asr] {} Content-MD5 verified", file_label);
+            }
+            Ok(false) => {
+                let _ = std::fs::remove_file(&part_path);
+                let _ = std::fs::remove_file(&etag_path);
+                return Err(format!("{} 校验和 (Content-MD5) 不匹配", file_label));
+            }
+            Err(e) => {
+                // 校验器自身失败（如 base64 解析错误）不算下载失败，仅记录日志
+                eprintln!(
+                    "[local-asr] {} Content-MD5 check skipped: {}",
+                    file_label, e
+                );
+            }
+        }
+    }
+
+    // 3) 校验通过：rename 为最终文件
+    if let Err(e) = std::fs::rename(&part_path, dest) {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(format!(
+            "移动 {} 到最终位置失败: {}",
+            part_path.display(),
+            e
+        ));
+    }
+    let _ = std::fs::remove_file(&etag_path);
+
+    Ok(downloaded)
+}
+
+/// 校验文件的 Content-MD5（base64 编码的 16 字节 MD5 摘要），流式读取避免
+/// 把整个模型读进内存。
+fn verify_content_md5(path: &std::path::Path, md5_b64: &str) -> Result<bool, String> {
+    use std::io::Read;
+
+    use base64::Engine as _;
+    use md5::Digest;
+
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(md5_b64.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    if expected.len() != 16 {
+        return Ok(false);
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let mut hasher = md5::Md5::new();
+    let mut buf = [0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("读取文件失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().as_slice() == expected.as_slice())
 }
 
 /// 删除已下载的模型

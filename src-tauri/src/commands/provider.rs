@@ -88,7 +88,136 @@ fn provider_key_path() -> Result<std::path::PathBuf, String> {
     Ok(crate::safe_data_dir()?.join(PROVIDER_KEY_FILE))
 }
 
+// ── Master key persistence (Windows: DPAPI-protected) ────────────────
+// Windows layout of providers.key:
+//   [legacy]          raw 32-byte plaintext key (pre-DPAPI versions)
+//   [0x01][DPAPI]     version byte + DPAPI blob (CryptProtectData, current
+//                     user scope, no entropy, CRYPTPROTECT_UI_FORBIDDEN)
+// The version byte prevents a DPAPI ciphertext from ever being misread as a
+// plaintext key (a random 32-byte key whose first byte happens to be 0x01
+// could otherwise be misdetected -- the length+unprotect checks disambiguate).
+// Legacy plaintext files are read as-is and immediately re-written in the
+// DPAPI format (best-effort; a failed re-write only logs and retries on the
+// next load, the in-memory key stays valid).
+const KEY_FORMAT_DPAPI: u8 = 0x01;
+
+#[cfg(windows)]
+/// Protect `data` with DPAPI bound to the current user account.
+fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::Security::Cryptography::{
+        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+    use windows::core::PCWSTR;
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        // No entropy → protection is tied to the current Windows user.
+        // CRYPTPROTECT_UI_FORBIDDEN → never show a password prompt.
+        CryptProtectData(
+            &in_blob,
+            PCWSTR::null(),
+            None,
+            None,
+            None,
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut out_blob,
+        )
+        .map_err(|e| format!("DPAPI 加密失败: {}", e))?;
+    }
+    let out = unsafe {
+        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
+    };
+    // CryptProtectData allocates the output via LocalAlloc.
+    unsafe {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        let _ = LocalFree(HLOCAL(out_blob.pbData as *mut std::ffi::c_void));
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+/// Reverse of `dpapi_protect`: decrypt a DPAPI blob for the current user.
+fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: blob.len() as u32,
+        pbData: blob.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
+            .map_err(|e| format!("DPAPI 解密失败（密钥可能来自其他用户账户或已损坏）: {}", e))?;
+    }
+    let out = unsafe {
+        std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec()
+    };
+    unsafe {
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        let _ = LocalFree(HLOCAL(out_blob.pbData as *mut std::ffi::c_void));
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+fn write_master_key(path: &std::path::Path, key: &[u8; MASTER_KEY_LEN]) -> Result<(), String> {
+    let blob = dpapi_protect(key)?;
+    let mut data = Vec::with_capacity(1 + blob.len());
+    data.push(KEY_FORMAT_DPAPI);
+    data.extend_from_slice(&blob);
+    std::fs::write(path, &data).map_err(|e| format!("写入密钥失败: {}", e))?;
+    harden_path_permissions(path);
+    Ok(())
+}
+
 /// Load the persistent master key, generating and persisting it on first use.
+/// Windows: stored DPAPI-encrypted; legacy plaintext files are migrated in
+/// place. Other platforms: plaintext file (unchanged behavior).
+#[cfg(windows)]
+pub(crate) fn load_or_create_master_key() -> Result<[u8; MASTER_KEY_LEN], String> {
+    let path = provider_key_path()?;
+    if path.exists() {
+        let raw = std::fs::read(&path).map_err(|e| format!("读取密钥失败: {}", e))?;
+        if raw.len() == MASTER_KEY_LEN {
+            // Legacy plaintext key file (pre-DPAPI). Read it directly, then
+            // re-write it in DPAPI-encrypted format. A failed re-write is
+            // non-fatal: the key is already usable, and the migration retries
+            // on the next load.
+            let mut key = [0u8; MASTER_KEY_LEN];
+            key.copy_from_slice(&raw);
+            if let Err(e) = write_master_key(&path, &key) {
+                eprintln!(
+                    "[LITTLECLAUDE] providers.key migration to DPAPI failed (will retry): {}",
+                    e
+                );
+            }
+            return Ok(key);
+        }
+        if raw.len() > 1 && raw[0] == KEY_FORMAT_DPAPI {
+            let key = dpapi_unprotect(&raw[1..])?;
+            if key.len() != MASTER_KEY_LEN {
+                return Err("主密钥文件损坏".to_string());
+            }
+            let mut out = [0u8; MASTER_KEY_LEN];
+            out.copy_from_slice(&key);
+            return Ok(out);
+        }
+        return Err("主密钥文件损坏".to_string());
+    }
+    let mut key = [0u8; MASTER_KEY_LEN];
+    rand::thread_rng().fill_bytes(&mut key);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("无法创建目录: {}", e))?;
+    }
+    write_master_key(&path, &key)?;
+    Ok(key)
+}
+
+/// Load the persistent master key, generating and persisting it on first use.
+/// (Non-Windows: plaintext file, unchanged.)
+#[cfg(not(windows))]
 pub(crate) fn load_or_create_master_key() -> Result<[u8; MASTER_KEY_LEN], String> {
     let path = provider_key_path()?;
     if path.exists() {

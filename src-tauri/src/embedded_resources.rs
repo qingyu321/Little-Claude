@@ -1,4 +1,5 @@
 use rust_embed::RustEmbed;
+#[cfg(feature = "video-analysis")]
 use std::path::Path;
 
 /// Embedded bundled skills — extracted directly to their final destination
@@ -6,6 +7,7 @@ use std::path::Path;
 ///
 /// `rust-embed` bakes all files under `resources/bundled-skills/` into the
 /// binary at compile time, making the .exe fully self-contained.
+#[cfg(feature = "video-analysis")]
 #[derive(RustEmbed)]
 #[folder = "resources/bundled-skills/"]
 pub(crate) struct BundledSkills;
@@ -61,6 +63,7 @@ fn mime_for_path(path: &str) -> &'static str {
 /// `dest_dir`. Creates the destination directory if it doesn't exist.
 /// Only files belonging to `skill_name` (the top-level subdirectory inside
 /// `bundled-skills/`) are extracted.
+#[cfg(feature = "video-analysis")]
 pub(crate) fn extract_skill_to(skill_name: &str, dest_dir: &Path) -> Result<(), String> {
     let prefix = format!("{}/", skill_name);
 

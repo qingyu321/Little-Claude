@@ -56,6 +56,9 @@ pub async fn run_claude_command(subcommand: String, cwd: Option<String>) -> Resu
     if let Some(ref dir) = cwd {
         cmd.current_dir(dir);
     }
+    // timeout() 只放弃等待，不会终止已 spawn 的子进程；kill_on_drop(true)
+    // 确保 30s 超时后 claude 子进程被终止（残留进程会一直占着锁/输出）。
+    cmd.kill_on_drop(true);
     let future = cmd.output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(30), future)
         .await
@@ -260,6 +263,9 @@ pub async fn check_claude_auth() -> Result<AuthStatus, String> {
     cmd.env("PATH", &enriched_path).env_remove("CLAUDECODE");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
+    // kill_on_drop: 8s 超时只放弃等待，须终止 claude doctor 子进程（同
+    // run_claude_command 的 30s 处理，防止超时后残留进程继续运行）。
+    cmd.kill_on_drop(true);
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await;
 
     match result {

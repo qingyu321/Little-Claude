@@ -5,6 +5,127 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
+/// Windows Job Object wrapper (cfg(windows) only): puts a spawned CLI process
+/// tree into a Job so killing a session kills the whole tree (node, shell
+/// wrappers, etc.), not just the direct child. `Child::kill()` only kills the
+/// direct process, which historically left orphaned grandchildren behind.
+///
+/// Lifecycle: created in `ProcessManager::insert` right after spawn, assigned
+/// the child process, and terminated in `ProcessManager::remove`. The handle
+/// closes on drop; with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE set, closing the
+/// last handle kills anything still in the job — a safety net for app exit,
+/// session cleanup, or a TerminateJobObject failure.
+#[cfg(windows)]
+mod windows_job {
+    use std::ffi::c_void;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    #[derive(Debug, Default)]
+    pub(crate) struct WinJob {
+        handle: HANDLE,
+    }
+
+    // HANDLE is a raw-pointer wrapper; ownership of the handle lives in this
+    // struct, and it is only ever touched under the ProcessManager jobs lock.
+    unsafe impl Send for WinJob {}
+    unsafe impl Sync for WinJob {}
+
+    impl WinJob {
+        /// Create a named job (name embeds the child pid for debugging in
+        /// Process Explorer / Sysinternals). Returns None on any failure —
+        /// callers degrade to plain `Child::kill()`.
+        pub(crate) fn create(pid: u32) -> Option<WinJob> {
+            let name = format!("little-claude-{pid}");
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                let handle = match CreateJobObjectW(None, PCWSTR::from_raw(wide.as_ptr())) {
+                    Ok(h) if !h.is_invalid() => h,
+                    Ok(_) => {
+                        eprintln!("[LITTLECLAUDE] CreateJobObjectW returned an invalid handle");
+                        return None;
+                    }
+                    Err(e) => {
+                        eprintln!("[LITTLECLAUDE] CreateJobObjectW failed: {}", e);
+                        return None;
+                    }
+                };
+
+                // ZERO-init is required: SetInformationJobObject reads the whole
+                // struct, so any garbage in the unused fields makes it fail with
+                // ERROR_INVALID_PARAMETER. `::default()` is `mem::zeroed()` here.
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if let Err(e) = SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) {
+                    eprintln!("[LITTLECLAUDE] SetInformationJobObject failed: {}", e);
+                    let _ = CloseHandle(handle);
+                    return None;
+                }
+                Some(WinJob { handle })
+            }
+        }
+
+        /// Assign the child process to this job. Returns false on failure —
+        /// the most common cause is the parent app already running inside
+        /// another job that does not allow breakaway (e.g. launched from an
+        /// IDE/terminal that manages jobs); in that case the caller falls back
+        /// to `Child::kill()` for this session.
+        pub(crate) fn assign(&self, child: &tokio::process::Child) -> bool {
+            let Some(raw) = child.raw_handle() else {
+                eprintln!("[LITTLECLAUDE] AssignProcessToJobObject skipped: child already exited");
+                return false;
+            };
+            unsafe {
+                match AssignProcessToJobObject(self.handle, HANDLE(raw)) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!(
+                            "[LITTLECLAUDE] AssignProcessToJobObject failed (job disabled for this session, falling back to Child::kill): {}",
+                            e
+                        );
+                        false
+                    }
+                }
+            }
+        }
+
+        /// Kill every process in the job tree. Returns true on success; on
+        /// failure KILL_ON_JOB_CLOSE still cleans up when the handle closes.
+        pub(crate) fn terminate(&self) -> bool {
+            unsafe {
+                match TerminateJobObject(self.handle, 0) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!(
+                            "[LITTLECLAUDE] TerminateJobObject failed (KILL_ON_JOB_CLOSE will clean up on handle close): {}",
+                            e
+                        );
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for WinJob {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionInfo {
     pub session_id: String,
@@ -24,6 +145,10 @@ pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
     /// Codex thread IDs keyed by session_id, populated after thread/start response.
     pub(crate) codex_thread_ids: Arc<Mutex<HashMap<String, String>>>,
+    /// Windows Job Objects keyed by session_id for whole-tree kill.
+    /// Empty on non-Windows (field only exists under cfg(windows)).
+    #[cfg(windows)]
+    jobs: Arc<Mutex<HashMap<String, windows_job::WinJob>>>,
 }
 
 impl ProcessManager {
@@ -123,10 +248,29 @@ impl ProcessManager {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             codex_thread_ids: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(windows)]
+            jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub async fn insert(&self, id: String, process: ManagedProcess) {
+        #[cfg(windows)]
+        {
+            // Put the child into a Job Object so the whole process tree (node,
+            // cmd wrappers, etc.) dies with the session. Failure is non-fatal:
+            // the job simply isn't tracked and removal falls back to
+            // Child::kill(). The jobs lock is taken alone (never nested with
+            // the processes lock in the same order as remove, so no deadlock).
+            if let Some(pid) = process.child.id() {
+                if let Some(job) = windows_job::WinJob::create(pid) {
+                    if job.assign(&process.child) {
+                        self.jobs.lock().await.insert(id.clone(), job);
+                    }
+                    // assign failed: job drops here, handle closes; the job is
+                    // empty, so KILL_ON_JOB_CLOSE is a no-op.
+                }
+            }
+        }
         let mut map = self.processes.lock().await;
         map.insert(id, Arc::new(Mutex::new(process)));
     }
@@ -136,11 +280,35 @@ impl ProcessManager {
         if let Some(proc) = map.remove(id) {
             // Actually kill the child process to prevent zombie leaks (P0-2 fix)
             let mut managed = proc.lock().await;
-            if let Err(e) = managed.child.kill().await {
-                eprintln!(
-                    "[LITTLECLAUDE] Failed to kill process for session {}: {}",
-                    id, e
-                );
+            #[cfg(windows)]
+            {
+                // Kill the whole job tree first. The WinJob handle is closed
+                // when `job` drops — KILL_ON_JOB_CLOSE then catches any
+                // straggler that raced in after TerminateJobObject.
+                let killed_by_job = if let Some(job) = self.jobs.lock().await.remove(id) {
+                    job.terminate()
+                } else {
+                    false
+                };
+                // TerminateJobObject already killed the direct child, so only
+                // fall through to Child::kill() when the job path failed.
+                if !killed_by_job {
+                    if let Err(e) = managed.child.kill().await {
+                        eprintln!(
+                            "[LITTLECLAUDE] Failed to kill process for session {}: {}",
+                            id, e
+                        );
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if let Err(e) = managed.child.kill().await {
+                    eprintln!(
+                        "[LITTLECLAUDE] Failed to kill process for session {}: {}",
+                        id, e
+                    );
+                }
             }
         }
     }

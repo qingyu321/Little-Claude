@@ -485,13 +485,8 @@ pub async fn list_skills(cwd: Option<String>) -> Result<Vec<SkillInfo>, String> 
 /// Read a skill file and return its content
 #[tauri::command]
 pub async fn read_skill(path: String, cwd: Option<String>) -> Result<String, String> {
-    if !is_path_in_skill_roots(&path, cwd.as_deref()) {
-        return Err(format!(
-            "Refusing to read file outside allowed skill directories: {}",
-            path
-        ));
-    }
-    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill file: {}", e))
+    let resolved = resolve_skill_path(&path, cwd.as_deref())?;
+    std::fs::read_to_string(&resolved).map_err(|e| format!("Cannot read skill file: {}", e))
 }
 
 /// Write content to a skill file, creating parent directories if needed
@@ -501,37 +496,25 @@ pub async fn write_skill(
     content: String,
     cwd: Option<String>,
 ) -> Result<(), String> {
-    if !is_path_in_skill_roots(&path, cwd.as_deref()) {
-        return Err(format!(
-            "Refusing to write file outside allowed skill directories: {}",
-            path
-        ));
-    }
+    let resolved = resolve_skill_path(&path, cwd.as_deref())?;
     if content.len() > 1024 * 1024 {
         return Err("Skill content too large (max 1 MiB)".to_string());
     }
-    let p = std::path::Path::new(&path);
-    if let Some(parent) = p.parent() {
+    if let Some(parent) = resolved.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directories: {}", e))?;
     }
-    std::fs::write(&path, &content).map_err(|e| format!("Cannot write skill file: {}", e))
+    std::fs::write(&resolved, &content).map_err(|e| format!("Cannot write skill file: {}", e))
 }
 
 /// Delete a skill file; remove the parent directory if it becomes empty
 #[tauri::command]
 pub async fn delete_skill(path: String, cwd: Option<String>) -> Result<(), String> {
-    if !is_path_in_skill_roots(&path, cwd.as_deref()) {
-        return Err(format!(
-            "Refusing to delete file outside allowed skill directories: {}",
-            path
-        ));
-    }
-    let p = std::path::Path::new(&path);
-    std::fs::remove_file(p).map_err(|e| format!("Failed to delete skill file: {}", e))?;
+    let resolved = resolve_skill_path(&path, cwd.as_deref())?;
+    std::fs::remove_file(&resolved).map_err(|e| format!("Failed to delete skill file: {}", e))?;
 
     // If the parent directory is now empty, remove it too
-    if let Some(parent) = p.parent() {
+    if let Some(parent) = resolved.parent() {
         if parent.is_dir() {
             let is_empty = std::fs::read_dir(parent)
                 .map(|mut entries| entries.next().is_none())
@@ -743,14 +726,9 @@ pub async fn toggle_skill_enabled(
     enabled: bool,
     cwd: Option<String>,
 ) -> Result<(), String> {
-    if !is_path_in_skill_roots(&path, cwd.as_deref()) {
-        return Err(format!(
-            "Refusing to modify skill outside allowed skill directories: {}",
-            path
-        ));
-    }
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill file: {}", e))?;
+    let resolved = resolve_skill_path(&path, cwd.as_deref())?;
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("Cannot read skill file: {}", e))?;
     let new_content = if enabled {
         // Remove disable-model-invocation (or set to false)
         update_frontmatter_field(&content, "disable-model-invocation", None)
@@ -758,7 +736,7 @@ pub async fn toggle_skill_enabled(
         // Set disable-model-invocation: true
         update_frontmatter_field(&content, "disable-model-invocation", Some("true"))
     };
-    std::fs::write(&path, &new_content).map_err(|e| format!("Cannot write skill file: {}", e))
+    std::fs::write(&resolved, &new_content).map_err(|e| format!("Cannot write skill file: {}", e))
 }
 
 /// Lexically normalize a path (resolve `.`/`..` without touching the disk),
@@ -805,11 +783,9 @@ fn expand_tilde(path: &str) -> String {
 }
 
 /// Allowed skill roots. Global dirs are always allowed; project dirs only when
-/// `cwd` is provided (mirrors the scan in list_skills). Guards read/write/
-/// delete/toggle against arbitrary-path file access.
-fn is_path_in_skill_roots(path: &str, cwd: Option<&str>) -> bool {
-    let norm = normalize_lexical(std::path::Path::new(&expand_tilde(path)));
-    let mut roots: Vec<String> = Vec::new();
+/// `cwd` is provided (mirrors the scan in list_skills).
+fn skill_roots(cwd: Option<&str>) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Some(home) = dirs::home_dir() {
         for rel in [
             ".codex/skills",
@@ -817,13 +793,84 @@ fn is_path_in_skill_roots(path: &str, cwd: Option<&str>) -> bool {
             ".claude/skills",
             ".codex/plugins/cache",
         ] {
-            roots.push(normalize_lexical(&home.join(rel)));
+            roots.push(home.join(rel));
         }
     }
     if let Some(cwd) = cwd {
         for rel in [".codex/skills", ".agents/skills", ".claude/skills"] {
-            roots.push(normalize_lexical(&std::path::Path::new(cwd).join(rel)));
+            roots.push(std::path::Path::new(cwd).join(rel));
         }
     }
-    roots.iter().any(|root| norm == *root || norm.starts_with(&format!("{}/", root)))
+    roots
+}
+
+/// Canonicalize `p` if it exists; otherwise canonicalize the nearest existing
+/// ancestor and append the remaining (non-existent) components. The result is
+/// symlink-free along its existing prefix — a symlink anywhere in the path can
+/// no longer redirect the final location. Mirrors files.rs::safe_resolve.
+fn resolve_existing_or_ancestor(p: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if p.exists() {
+        return std::fs::canonicalize(p)
+            .map_err(|e| format!("Cannot resolve path '{}': {}", p.display(), e));
+    }
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p;
+    loop {
+        let Some(parent) = cur.parent() else {
+            return Err(format!("路径不存在: {}", p.display()));
+        };
+        if parent == cur {
+            return Err(format!("路径不存在: {}", p.display()));
+        }
+        if let Some(name) = cur.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        cur = parent;
+        if cur.exists() {
+            break;
+        }
+    }
+    let canon_root = std::fs::canonicalize(cur)
+        .map_err(|e| format!("Cannot resolve path '{}': {}", p.display(), e))?;
+    let mut result = canon_root;
+    for name in suffix.iter().rev() {
+        result.push(name);
+    }
+    Ok(result)
+}
+
+/// Resolve a skill file path (canonicalized, symlink-free) and verify it stays
+/// inside the allowed skill roots — the unified entry point for
+/// read/write/delete/toggle. A symlinked skill directory (or symlinked file)
+/// that points outside the roots is rejected. Non-existent write targets are
+/// resolved through their nearest existing ancestor, so the final path is
+/// already checked before any parent directories are created.
+fn resolve_skill_path(path: &str, cwd: Option<&str>) -> Result<std::path::PathBuf, String> {
+    // Relative paths would resolve against the app's working directory, not
+    // the session cwd — reject them outright.
+    let expanded = expand_tilde(path);
+    let p = std::path::Path::new(&expanded);
+    if !p.is_absolute() {
+        return Err(format!("Skill path must be absolute: {}", path));
+    }
+
+    let target = resolve_existing_or_ancestor(p)?;
+    let target_norm = normalize_lexical(&target);
+
+    for root in skill_roots(cwd) {
+        // Resolve the root the same way so a symlinked parent directory
+        // (e.g. ~/.claude -> elsewhere) is consistent on both sides.
+        let canon_root = match resolve_existing_or_ancestor(&root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let root_norm = normalize_lexical(&canon_root);
+        if target_norm == root_norm || target_norm.starts_with(&format!("{}/", root_norm)) {
+            return Ok(target);
+        }
+    }
+    Err(format!(
+        "Refusing to access file outside allowed skill directories: {}",
+        path
+    ))
 }

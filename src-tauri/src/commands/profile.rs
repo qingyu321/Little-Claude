@@ -40,7 +40,7 @@ fn cache_creation_tokens(usage: &Value) -> u64 {
 /// writes zero/missing usage values to its own JSONL files.
 fn tokenicode_usage_log_path() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".tokenicode").join("usage_log.jsonl")
+    home.join(crate::safe_data_dir_name()).join("usage_log.jsonl")
 }
 
 /// Append a single usage record to Little Claude's usage log.
