@@ -77,6 +77,44 @@ function loadAvatars(): { aiAvatarUrl: string; userAvatarUrl: string } | null {
   }
 }
 
+// --- Imported pet skins ---
+// The list of imported pet ids lives under its own key (not the settings blob)
+// so adding a skin never re-serializes the whole settings object. The pet.json
+// contents themselves are on disk under ~/.tokenicode/pets/<id>/.
+const PET_SKINS_STORAGE_KEY = 'tokenicode_pet_skins_v1';
+
+function savePetSkins(skins: string[]) {
+  try {
+    localStorage.setItem(PET_SKINS_STORAGE_KEY, JSON.stringify(skins));
+  } catch (e) {
+    console.error('[settingsStore] pet skins save failed:', e);
+  }
+}
+
+export function loadPetSkins(): string[] {
+  try {
+    const raw = localStorage.getItem(PET_SKINS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((s) => typeof s === 'string');
+    }
+  } catch {
+    // fall through to empty
+  }
+  return [];
+}
+
+export function addPetSkin(id: string): void {
+  const cur = loadPetSkins();
+  if (!cur.includes(id)) {
+    savePetSkins([...cur, id]);
+  }
+}
+
+export function removePetSkin(id: string): void {
+  savePetSkins(loadPetSkins().filter((s) => s !== id));
+}
+
 // --- Model options (display mapping) ---
 
 export const MODEL_OPTIONS: { id: ModelId; label: string; short: string }[] = [
@@ -222,6 +260,12 @@ interface SettingsState {
   /** A2: Include --include-partial-messages flag (default true).
    *  Disabling reduces stream event volume 10-50× for low-CPU/iGPU machines. */
   includePartialMessages: boolean;
+  /** 桌面宠物 — 是否启用 */
+  petEnabled: boolean;
+  /** 桌面宠物 — 显示缩放 (0.5–1.5) */
+  petScale: number;
+  /** 桌面宠物 — 当前皮肤 id（"default" 或已导入宠物 id） */
+  petSkin: string;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -290,6 +334,9 @@ interface SettingsState {
   setSpeechUseOfflineModel: (use: boolean) => void;
   setWallpaperEnabled: (enabled: boolean) => void;
   setWallpaperName: (name: string) => void;
+  setPetEnabled: (enabled: boolean) => void;
+  setPetScale: (scale: number) => void;
+  setPetSkin: (skin: string) => void;
   setWallpaperQuality: (quality: WallpaperQuality) => void;
   setWallpaperOpacity: (opacity: number) => void;
 }
@@ -352,6 +399,9 @@ export const useSettingsStore = create<SettingsState>()(
       speechLanguage: 'zh',
       speechUseOfflineModel: false,
       wallpaperEnabled: false,
+      petEnabled: false,
+      petScale: 1,
+      petSkin: 'default',
       wallpaperName: '',
       wallpaperQuality: 'balanced' as WallpaperQuality,
       wallpaperOpacity: 0.18,
@@ -601,10 +651,16 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ wallpaperQuality: quality })),
       setWallpaperOpacity: (opacity: number) =>
         set(() => ({ wallpaperOpacity: opacity })),
+      setPetEnabled: (enabled) =>
+        set(() => ({ petEnabled: enabled })),
+      setPetScale: (scale) =>
+        set(() => ({ petScale: scale })),
+      setPetSkin: (skin) =>
+        set(() => ({ petSkin: skin })),
     }),
     {
       name: 'tokenicode-settings',
-      version: 22,
+      version: 24,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -739,6 +795,13 @@ export const useSettingsStore = create<SettingsState>()(
         if (version < 22) {
           persisted.interviewSidebarVisible = true;
         }
+        if (version < 23) {
+          persisted.petEnabled = false;
+          persisted.petScale = 1;
+        }
+        if (version < 24) {
+          persisted.petSkin = 'default';
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -769,6 +832,9 @@ export const useSettingsStore = create<SettingsState>()(
         speechLanguage: state.speechLanguage,
         speechUseOfflineModel: state.speechUseOfflineModel,
         wallpaperEnabled: state.wallpaperEnabled,
+        petEnabled: state.petEnabled,
+        petScale: state.petScale,
+        petSkin: state.petSkin,
         wallpaperName: state.wallpaperName,
         wallpaperQuality: state.wallpaperQuality,
         wallpaperOpacity: state.wallpaperOpacity,

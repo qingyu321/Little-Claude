@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "ls-migrate",
+  "description": "Capability for the one-time localStorage origin-migration window",
+  "windows": ["__lc_migrate__"],
+  "permissions": [
+    "core:default"
+  ]
+}

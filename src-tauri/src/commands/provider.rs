@@ -12,6 +12,28 @@ pub(crate) struct ModelMapping {
     pub(crate) provider_model: String,
 }
 
+/// 联网搜索兜底端点配置：请求携带 web_search 服务端工具时，由本地代理
+/// 将请求转发到该端点执行搜索（工具名会自动改写为 web_search_20250305）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WebSearchFallback {
+    #[serde(default)]
+    pub(crate) base_url: String,
+    #[serde(default)]
+    pub(crate) api_key: Option<String>,
+    #[serde(default)]
+    pub(crate) env_var: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// false = 用户关闭开关（内容保留，不路由搜索）；缺省 true 兼容旧数据。
+    #[serde(default = "default_fallback_enabled")]
+    pub(crate) enabled: bool,
+}
+
+fn default_fallback_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiProvider {
@@ -29,6 +51,9 @@ pub(crate) struct ApiProvider {
     /// Which CLI backend this provider uses: "claude" (default) or "codex".
     #[serde(default)]
     pub(crate) cli_backend: Option<String>,
+    /// 联网搜索兜底配置（可空 = 未启用）。
+    #[serde(default)]
+    pub(crate) web_search_fallback: Option<WebSearchFallback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,14 +402,38 @@ pub struct ConnectionTestResult {
     pub model: StepResult,
 }
 
+/// Normalize a base URL for injection as `ANTHROPIC_BASE_URL`.
+///
+/// The Claude CLI's Anthropic SDK appends `/v1/messages` to whatever base URL
+/// it receives — it does NOT detect an existing `/v1` suffix. If the user
+/// enters a base URL that already ends in `/v1` (e.g. `https://opencode.ai/zen/go/v1`),
+/// the SDK would call `.../v1/v1/messages` → 404 → "model not found".
+///
+/// Strip a trailing `/v1/messages` or `/v1` so the SDK reconstructs the
+/// canonical single-`/v1` endpoint. Only applies to anthropic-format providers
+/// (the messages endpoint shape); openai-format base URLs are used as-is by
+/// the conversion proxy.
+pub(crate) fn normalize_anthropic_base_url(base_url: &str, api_format: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if !api_format.eq_ignore_ascii_case("anthropic") {
+        return trimmed.to_string();
+    }
+    let lower = trimmed.to_lowercase();
+    if let Some(stem) = strip_suffix_ci(trimmed, "/v1/messages") {
+        return stem.to_string();
+    }
+    if lower.ends_with("/v1") {
+        return trimmed[..trimmed.len() - 3].to_string();
+    }
+    trimmed.to_string()
+}
+
 pub(crate) fn provider_messages_endpoint(base_url: &str, api_format: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     let lower = base.to_lowercase();
     if api_format.eq_ignore_ascii_case("openai") {
         if lower.ends_with("/chat/completions") {
             base.to_string()
-        } else if lower.ends_with("/v1") {
-            format!("{}/chat/completions", base)
         } else {
             format!("{}/chat/completions", base)
         }
@@ -816,5 +865,38 @@ mod tests {
         assert_eq!(strip_suffix_ci("https://x/接口/messages", "/messages"), Some("https://x/接口"));
         // Shorter-than-suffix input never panics.
         assert_eq!(strip_suffix_ci("接口", "/messages"), None);
+    }
+
+    #[test]
+    fn normalize_anthropic_base_url_strips_v1_suffix() {
+        // The CLI SDK appends /v1/messages itself; a trailing /v1 would produce
+        // .../v1/v1/messages → 404 → "model not found".
+        assert_eq!(
+            normalize_anthropic_base_url("https://opencode.ai/zen/go/v1", "anthropic"),
+            "https://opencode.ai/zen/go"
+        );
+        assert_eq!(
+            normalize_anthropic_base_url("https://opencode.ai/zen/go/v1/messages", "anthropic"),
+            "https://opencode.ai/zen/go"
+        );
+        assert_eq!(
+            normalize_anthropic_base_url("https://opencode.ai/zen/go", "anthropic"),
+            "https://opencode.ai/zen/go"
+        );
+        // DeepSeek-style gate (no /v1) is untouched.
+        assert_eq!(
+            normalize_anthropic_base_url("https://api.deepseek.com/anthropic", "anthropic"),
+            "https://api.deepseek.com/anthropic"
+        );
+        // OpenAI-format base URLs are passed through untouched (proxy handles them).
+        assert_eq!(
+            normalize_anthropic_base_url("https://opencode.ai/zen/go/v1", "openai"),
+            "https://opencode.ai/zen/go/v1"
+        );
+        // Trailing slash is trimmed before the check.
+        assert_eq!(
+            normalize_anthropic_base_url("https://opencode.ai/zen/go/v1/", "anthropic"),
+            "https://opencode.ai/zen/go"
+        );
     }
 }

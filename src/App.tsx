@@ -17,6 +17,7 @@ import { bridge, onFileChange } from './lib/tauri-bridge';
 import { useT } from './lib/i18n';
 import { debugLog } from './lib/debug-log';
 import { useAutoUpdateCheck } from './hooks/useAutoUpdateCheck';
+import { usePetBridge } from './hooks/usePetBridge';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import './App.css';
 
@@ -102,6 +103,9 @@ function App() {
 
   // Auto-check for app updates on startup
   useAutoUpdateCheck();
+
+  // Desktop pet: aggregate session state → pet:status, handle pet:command
+  usePetBridge();
 
   // CLI update detection: check on startup + poll every 30 minutes
   useEffect(() => {

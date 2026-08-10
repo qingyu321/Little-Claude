@@ -11,6 +11,21 @@ export interface ModelMapping {
   providerModel: string;
 }
 
+/** 联网搜索兜底端点配置：请求携带 web_search 服务端工具时，由本地代理
+ *  转发到该端点执行搜索（工具名自动改写为 web_search_20250305）。 */
+export interface WebSearchFallbackConfig {
+  baseUrl: string;
+  /** 直接密钥；与 envVar 二选一（apiKey 优先）。存储时 TENC1: 加密。 */
+  apiKey?: string;
+  /** 环境变量名：apiKey 为空时从 Little Claude 进程环境读取。 */
+  envVar?: string;
+  /** 兜底模型；留空则沿用主提供商模型。 */
+  model?: string;
+  /** false = 已配置但停用（关闭开关，内容保留、不路由搜索）。
+   *  缺省/undefined = 启用（兼容旧数据）。 */
+  enabled?: boolean;
+}
+
 export interface ApiProvider {
   id: string;
   name: string;
@@ -25,6 +40,8 @@ export interface ApiProvider {
   updatedAt: number;
   /** Which CLI backend this provider uses: "claude" (default) or "codex". */
   cliBackend?: 'claude' | 'codex';
+  /** 联网搜索兜底配置（null/缺省 = 未启用）。 */
+  webSearchFallback?: WebSearchFallbackConfig | null;
   /** Model IDs returned by the last successful "fetch models" call (UI cache). */
   availableModels?: string[];
   /** When availableModels was last fetched (shown as a tooltip in the model selector). */
@@ -104,6 +121,19 @@ async function decryptProviderKeys(state: ProviderState): Promise<ProviderState>
         state.decryptFailures[p.id] = p.apiKey;
       }
     }
+    // 兜底密钥同主 key 处理
+    const fb = p.webSearchFallback;
+    if (fb?.apiKey && fb.apiKey.startsWith('TENC1:')) {
+      try {
+        fb.apiKey = await bridge.decryptValue(fb.apiKey);
+      } catch (e) {
+        console.error(
+          `[providerStore] Failed to decrypt webSearchFallback apiKey for ${p.id} — ciphertext preserved:`,
+          e,
+        );
+        state.decryptFailures[p.id] = fb.apiKey;
+      }
+    }
   }
   return state;
 }
@@ -129,6 +159,23 @@ async function saveToLocalStorage(state: ProviderState) {
             cloned.apiKey = '';
           }
         }
+        // 兜底密钥同主 key 策略。webSearchFallback 是嵌套对象，必须浅拷贝
+        // 一层，避免加密写入时污染内存态（内存态保持明文 key）。
+        const fb = cloned.webSearchFallback
+          ? { ...cloned.webSearchFallback }
+          : undefined;
+        if (fb?.apiKey && fb.apiKey.length > 0 && !fb.apiKey.startsWith('TENC1:')) {
+          try {
+            fb.apiKey = await bridge.encryptValue(fb.apiKey);
+          } catch (e) {
+            console.error(
+              `[providerStore] Failed to encrypt webSearchFallback apiKey for ${p.id} — key NOT persisted:`,
+              e,
+            );
+            fb.apiKey = '';
+          }
+        }
+        if (fb) cloned.webSearchFallback = fb;
         return cloned;
       }),
     );

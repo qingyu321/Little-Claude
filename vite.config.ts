@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import JavaScriptObfuscator from "javascript-obfuscator";
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -84,6 +85,10 @@ export default defineConfig(async () => ({
   // main thread isn't blocked parsing a single 2.6 MB bundle at startup.
   build: {
     rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        pet: fileURLToPath(new URL('./pet.html', import.meta.url)),
+      },
       output: {
         manualChunks: {
           'vendor-tiptap': ['@tiptap/react', '@tiptap/starter-kit', '@tiptap/extension-placeholder'],

@@ -1,0 +1,16 @@
+{
+  "name": "little-claude-cat",
+  "sprite": "",
+  "frame": { "w": 192, "h": 208, "cols": 8 },
+  "states": {
+    "idle":    { "row": 0, "frames": 8, "duration": 120, "loop": true },
+    "run":     { "row": 1, "frames": 8, "duration": 100, "loop": true },
+    "wave":    { "row": 2, "frames": 4, "duration": 150, "loop": false },
+    "jump":    { "row": 3, "frames": 6, "duration": 130, "loop": false },
+    "failed":  { "row": 4, "frames": 4, "duration": 200, "loop": false },
+    "waiting": { "row": 5, "frames": 8, "duration": 140, "loop": true },
+    "running": { "row": 6, "frames": 8, "duration": 100, "loop": true },
+    "review":  { "row": 7, "frames": 8, "duration": 120, "loop": true },
+    "sleep":   { "row": 8, "frames": 8, "duration": 600, "loop": true }
+  }
+}

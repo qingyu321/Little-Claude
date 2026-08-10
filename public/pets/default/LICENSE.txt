@@ -1,0 +1,13 @@
+Little Claude default desktop pet
+=================================
+
+This pet is a procedurally drawn character (an original pixel-style cat) rendered
+directly by the application's canvas engine (src/pet/procedural.ts). It does not
+contain or derive from any third-party sprite artwork.
+
+License: Original work of the Little Claude project. Free to use and redistribute
+within this application. No third-party asset attribution required.
+
+If a spritesheet (spritesheet.webp) is added to this folder later, it must carry
+its own LICENSE.txt recording the source and license (commercial-use compatible
+only — see project convention: no free-non-commercial assets).

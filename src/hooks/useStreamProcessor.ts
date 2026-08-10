@@ -310,7 +310,6 @@ export interface StreamProcessorConfig {
    *  the boolean created in InputBar. Union type keeps InputBar's
    *  `useRef(false)` / `current = false` reset compiling unchanged. */
   exitPlanModeSeenRef: MutableRefObject<Record<string, boolean> | boolean>;
-  autoCompactFiredRef: MutableRefObject<boolean>;
   silentRestartRef: MutableRefObject<boolean>;
   handleSubmitRef: MutableRefObject<() => void>;
   handleStderrLineRef: MutableRefObject<(line: string, sid: string) => void>;
@@ -354,10 +353,32 @@ function resolveApiSpeed(msg: any): { outputTokens: number; durationMs: number }
  * message_id uses msg.uuid, which is the same value the JSONL stores as
  * value.uuid (the dedup fallback key in get_profile_stats).
  */
+type StreamUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number };
+};
+
+/** B1/B2 fix: the FULL input context of a request. With prompt caching enabled
+ * (the default), 95%+ of the context sits in cache_read_input_tokens — comparing
+ * input_tokens alone against the compact threshold made auto-compact effectively
+ * never fire (real data: input_tokens=6, cache_read=85163). */
+function fullInputContextTokens(usage: StreamUsage | undefined): number {
+  const u = usage || {};
+  const cc = u.cache_creation || {};
+  return (u.input_tokens || 0)
+    + (u.cache_read_input_tokens || 0)
+    + (u.cache_creation_input_tokens || 0)
+    + (cc.ephemeral_1h_input_tokens || 0)
+    + (cc.ephemeral_5m_input_tokens || 0);
+}
+
 function persistTurnUsage(
   sessionId: string,
   messageId: string,
-  usage: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } } | undefined,
+  usage: StreamUsage | undefined,
   model: string,
 ): void {
   if (!sessionId || !messageId) return;
@@ -382,6 +403,94 @@ function persistTurnUsage(
   });
 }
 
+// --- Auto-compact timeout (B4 fix) ---
+// The old fixed 15s timeout was shorter than a real large-context compact
+// (summarizing 160K+ tokens routinely takes 30-90s), so every genuine compact
+// was falsely reported as "timed out". Now activity-aware: lastProgressAt is
+// updated by every stream event (throttled 1.5s), so as long as the CLI keeps
+// streaming we keep waiting; only declare timeout after >60s of silence or an
+// absolute 10-minute cap.
+const COMPACT_CHECK_MS = 30_000;
+const COMPACT_STALL_MS = 60_000;
+const COMPACT_MAX_MS = 600_000;
+
+function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string, startedAt: number): void {
+  setTimeout(() => {
+    const tab = useChatStore.getState().getTab(tabId);
+    const meta = tab?.sessionMeta ?? {};
+    // Card already completed normally (assistant/result arrival) — stop watching.
+    if (meta.pendingCommandMsgId !== compactMsgId) return;
+    const now = Date.now();
+    const lastAt = meta.lastProgressAt ?? startedAt;
+    if (now - lastAt <= COMPACT_STALL_MS && now - startedAt <= COMPACT_MAX_MS) {
+      scheduleCompactTimeoutCheck(tabId, compactMsgId, startedAt); // still active
+      return;
+    }
+    useChatStore.getState().updateMessage(tabId, compactMsgId, {
+      commandCompleted: true,
+      commandData: {
+        ...(tab?.messages ?? []).find((m) => m.id === compactMsgId)?.commandData,
+        output: 'Compact timed out',
+        completedAt: Date.now(),
+      },
+    });
+    useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+    if (useChatStore.getState().getTab(tabId)?.sessionStatus === 'running') {
+      useChatStore.getState().setSessionStatus(tabId, 'idle');
+    }
+  }, COMPACT_CHECK_MS);
+}
+
+/** B1/B3/B5 fix: shared auto-compact trigger for foreground AND background
+ * result handlers. Compares the FULL last-request context (input + cache)
+ * against the threshold, fires at most once per session (per-tab flag in
+ * sessionMeta, no longer a ref shared across all sessions). Returns true if
+ * compact was fired — caller must then skip the FIFO pending-message drain. */
+function tryFireAutoCompact(
+  tabId: string,
+  msg: { subtype?: string; usage?: StreamUsage },
+): boolean {
+  if (msg.subtype !== 'success') return false;
+  const meta = useChatStore.getState().getTab(tabId)?.sessionMeta;
+  const stdinId = meta?.stdinId;
+  if (!stdinId || meta?.autoCompactFired) return false;
+
+  const model = meta?.spawnedModel || meta?.snapshotModel || useSettingsStore.getState().selectedModel;
+  const mode = meta?.snapshotContextWindowMode ?? useSettingsStore.getState().contextWindowMode;
+  const threshold = getAutoCompactThreshold(
+    model,
+    mode,
+    useSettingsStore.getState().autoCompactThresholdTokens,
+  );
+  const contextTokens = fullInputContextTokens(msg.usage);
+  if (contextTokens <= threshold) return false;
+
+  const store = useChatStore.getState();
+  store.setSessionMeta(tabId, { autoCompactFired: true });
+  debugLog('auto-compact', 'triggered:', { contextTokens, threshold });
+  const compactMsgId = generateMessageId();
+  store.addMessage(tabId, {
+    id: compactMsgId,
+    role: 'system',
+    type: 'text',
+    content: t('chat.autoCompacting'),
+    commandType: 'processing',
+    commandData: { command: '/compact' },
+    commandStartTime: Date.now(),
+    commandCompleted: false,
+    timestamp: Date.now(),
+  });
+  // Register pendingCommandMsgId so the result/assistant handler marks it completed.
+  store.setSessionMeta(tabId, { pendingCommandMsgId: compactMsgId });
+  store.setSessionStatus(tabId, 'running');
+  store.setActivityStatus(tabId, { phase: 'thinking' });
+  bridge.sendStdin(stdinId, '/compact').catch((err) => {
+    console.error('[LITTLECLAUDE] Auto-compact failed:', err);
+  });
+  scheduleCompactTimeoutCheck(tabId, compactMsgId, Date.now());
+  return true;
+}
+
 /**
  * useStreamProcessor — extracts stream message handling from InputBar.
  *
@@ -391,7 +500,6 @@ function persistTurnUsage(
 export function useStreamProcessor(config: StreamProcessorConfig) {
   const {
     exitPlanModeSeenRef,
-    autoCompactFiredRef,
     silentRestartRef,
     handleSubmitRef,
     handleStderrLineRef,
@@ -657,11 +765,23 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         }
         if (evt.type === 'message_delta' && evt.usage?.output_tokens) {
           const bgTab = store.getTab(tabId);
-          const delta = evt.usage.output_tokens;
+          const u = evt.usage;
+          const deltaOut = u.output_tokens || 0;
+          const deltaIn = u.input_tokens || 0;
+          const deltaCacheRead = u.cache_read_input_tokens || 0;
+          const deltaCacheCreation = u.cache_creation_input_tokens || 0;
           store.setSessionMeta(tabId, {
-            outputTokens: (bgTab?.sessionMeta.outputTokens || 0) + delta,
-            totalOutputTokens: (bgTab?.sessionMeta.totalOutputTokens || 0) + delta,
+            outputTokens: (bgTab?.sessionMeta.outputTokens || 0) + deltaOut,
+            totalOutputTokens: (bgTab?.sessionMeta.totalOutputTokens || 0) + deltaOut,
+            inputTokens: (bgTab?.sessionMeta.inputTokens || 0) + deltaIn,
+            totalInputTokens: (bgTab?.sessionMeta.totalInputTokens || 0) + deltaIn,
+            cacheReadTokens: (bgTab?.sessionMeta.cacheReadTokens || 0) + deltaCacheRead,
+            totalCacheReadTokens: (bgTab?.sessionMeta.totalCacheReadTokens || 0) + deltaCacheRead,
+            cacheCreationTokens: (bgTab?.sessionMeta.cacheCreationTokens || 0) + deltaCacheCreation,
+            totalCacheCreationTokens: (bgTab?.sessionMeta.totalCacheCreationTokens || 0) + deltaCacheCreation,
           });
+          // NOTE: Usage persistence for the proxy path happens in Rust
+          // (anthropic_proxy → usage_log). Accumulation above is runtime display.
         }
         break;
       }
@@ -905,6 +1025,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             outputTokens: resultOutput,
             totalInputTokens: (prevMeta?.totalInputTokens || 0) + (resultInput - streamedInput),
             totalOutputTokens: (prevMeta?.totalOutputTokens || 0) + (resultOutput - streamedOutput),
+            // B2: full last-request context (incl. cached), same as foreground.
+            contextTokens: fullInputContextTokens(msg.usage),
             turnStartTime: undefined,
             lastProgressAt: undefined,
           });
@@ -937,8 +1059,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             });
           }
         }
+        // B5: background tabs also auto-compact (previously foreground-only, so
+        // a long session left running in a background tab could hit the context
+        // limit with no warning). Same trigger logic as foreground.
+        const bgCompacted = tryFireAutoCompact(tabId, msg);
         // FIFO drain for background tabs (#142/#70): same logic as foreground.
-        {
+        if (!bgCompacted) {
           const bgDrainTab = store.getTab(tabId);
           const bgNextMsg = store.shiftPendingMessage(tabId);
           const bgFlushStdinId = bgDrainTab?.sessionMeta.stdinId;
@@ -1465,11 +1591,29 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Track output tokens from message_delta (per-turn + cumulative total)
         if (evt.type === 'message_delta' && evt.usage?.output_tokens) {
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
-          const delta = evt.usage.output_tokens;
+          const u = evt.usage;
+          const deltaOut = u.output_tokens || 0;
+          // OpenAI-compat proxy (opencode) sends the full tail usage on its final
+          // message_delta: input_tokens + cache fields. Accumulate them too, so
+          // input and cache (hit + miss) tokens are counted, not just output.
+          const deltaIn = u.input_tokens || 0;
+          const deltaCacheRead = u.cache_read_input_tokens || 0;
+          const deltaCacheCreation = u.cache_creation_input_tokens || 0;
           setSessionMeta({
-            outputTokens: (meta.outputTokens || 0) + delta,
-            totalOutputTokens: (meta.totalOutputTokens || 0) + delta,
+            outputTokens: (meta.outputTokens || 0) + deltaOut,
+            totalOutputTokens: (meta.totalOutputTokens || 0) + deltaOut,
+            inputTokens: (meta.inputTokens || 0) + deltaIn,
+            totalInputTokens: (meta.totalInputTokens || 0) + deltaIn,
+            cacheReadTokens: (meta.cacheReadTokens || 0) + deltaCacheRead,
+            totalCacheReadTokens: (meta.totalCacheReadTokens || 0) + deltaCacheRead,
+            cacheCreationTokens: (meta.cacheCreationTokens || 0) + deltaCacheCreation,
+            totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0) + deltaCacheCreation,
           });
+          // NOTE: Usage persistence for the OpenAI-compat proxy path now happens
+          // in Rust (anthropic_proxy writes the authoritative usage directly to
+          // usage_log). The CLI drops message_delta fields it doesn't know, so
+          // relying on this stream to persist would double-count or miss. The
+          // accumulation above only feeds the live per-turn runtime display.
         }
         break;
       }
@@ -2203,6 +2347,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             outputTokens: resultOutput,
             totalInputTokens: (meta.totalInputTokens || 0) + (resultInput - streamedInput),
             totalOutputTokens: (meta.totalOutputTokens || 0) + (resultOutput - streamedOutput),
+            // B2: full last-request context (incl. cached) for the Ctx bar —
+            // input_tokens alone undercounts by the cache-read share.
+            contextTokens: fullInputContextTokens(msg.usage),
             turnStartTime: undefined,
             lastProgressAt: undefined,
           });
@@ -2222,6 +2369,20 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         agentActions.completeAll(
           msg.subtype === 'success' ? 'completed' : 'error'
         );
+        // Completion system notification: when the main window is unfocused
+        // (task finished while user is elsewhere), notify. Mirrors the
+        // process-exit notification path. Only on success — errors are noisy.
+        if (msg.subtype === 'success' && !document.hasFocus() && 'Notification' in window) {
+          if (Notification.permission === 'granted') {
+            new Notification('Little Claude', { body: t('notification.chatComplete') });
+          } else if (Notification.permission === 'default') {
+            Notification.requestPermission().then((perm) => {
+              if (perm === 'granted') {
+                new Notification('Little Claude', { body: t('notification.chatComplete') });
+              }
+            }).catch(() => {});
+          }
+        }
         useSessionStore.getState().fetchSessions();
         setTimeout(() => useSessionStore.getState().fetchSessions(), 1000);
 
@@ -2261,57 +2422,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
         // --- Auto-compact: threshold follows the declared context window.
         // Default 200K models compact at 160K; declared 1M models compact at 800K.
-        // Fires at most once per session to avoid infinite loops.
-        const resultInputTokens = msg.usage?.input_tokens || 0;
-        const compactMeta = useChatStore.getState().getTab(tabId)?.sessionMeta;
-        const compactStdinId = compactMeta?.stdinId;
-        const compactModel = compactMeta?.spawnedModel || compactMeta?.snapshotModel || useSettingsStore.getState().selectedModel;
-        const compactMode = compactMeta?.snapshotContextWindowMode ?? useSettingsStore.getState().contextWindowMode;
-        const autoCompactThreshold = getAutoCompactThreshold(
-          compactModel,
-          compactMode,
-          useSettingsStore.getState().autoCompactThresholdTokens,
-        );
-        if (resultInputTokens > autoCompactThreshold && !autoCompactFiredRef.current && compactStdinId && msg.subtype === 'success') {
-          autoCompactFiredRef.current = true;
-          debugLog('auto-compact', 'triggered:', { inputTokens: resultInputTokens, threshold: autoCompactThreshold });
-          const compactMsgId = generateMessageId();
-          addMessage({
-            id: compactMsgId,
-            role: 'system',
-            type: 'text',
-            content: t('chat.autoCompacting'),
-            commandType: 'processing',
-            commandData: { command: '/compact' },
-            commandStartTime: Date.now(),
-            commandCompleted: false,
-            timestamp: Date.now(),
-          });
-          // FI-4: Register pendingCommandMsgId so result handler can mark it completed
-          setSessionMeta({ pendingCommandMsgId: compactMsgId });
-          setSessionStatus('running');
-          setActivityStatus({ phase: 'thinking' });
-          bridge.sendStdin(compactStdinId, '/compact').catch((err) => {
-            console.error('[LITTLECLAUDE] Auto-compact failed:', err);
-          });
-          // FI-4: Timeout fallback — if compact doesn't complete within 90s, auto-complete
-          setTimeout(() => {
-            const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
-            if (meta.pendingCommandMsgId === compactMsgId) {
-              useChatStore.getState().updateMessage(tabId, compactMsgId, {
-                commandCompleted: true,
-                commandData: {
-                  ...(useChatStore.getState().getTab(tabId)?.messages ?? []).find((m) => m.id === compactMsgId)?.commandData,
-                  output: 'Compact timed out',
-                  completedAt: Date.now(),
-                },
-              });
-              useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
-              if (useChatStore.getState().getTab(tabId)?.sessionStatus === 'running') {
-                useChatStore.getState().setSessionStatus(tabId, 'idle');
-              }
-            }
-          }, 15_000); // Bug C fix (#27): reduced from 90s to 15s
+        // Fires at most once per session (per-tab flag) to avoid infinite loops.
+        // B1/B3/B4 fixes live in tryFireAutoCompact (full-context comparison,
+        // per-tab fired flag, activity-aware timeout).
+        if (tryFireAutoCompact(tabId, msg)) {
           break; // Skip pending message flush — compact takes priority
         }
 
@@ -2563,7 +2677,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         });
       }
     }
-  }, [handleBackgroundStreamMessage, exitPlanModeSeenRef, autoCompactFiredRef, silentRestartRef, handleSubmitRef, handleStderrLineRef, setInputSync]);
+  }, [handleBackgroundStreamMessage, exitPlanModeSeenRef, silentRestartRef, handleSubmitRef, handleStderrLineRef, setInputSync]);
 
   return { handleStreamMessage, handleBackgroundStreamMessage };
 }

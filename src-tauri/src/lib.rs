@@ -16,7 +16,7 @@ use commands::{
     open_video_analysis_skill_dir, save_video_analysis_multimodal_config,
     set_video_analysis_acceleration, set_video_analysis_asr_model,
 };
-use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
+use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
 use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
@@ -955,7 +955,15 @@ fn resolve_provider_env(
     // session.rs (start_claude_session). That proxy converts Anthropic Messages
     // requests to OpenAI chat/completions and forwards them here.
     if !provider.base_url.is_empty() {
-        env.insert("ANTHROPIC_BASE_URL".to_string(), provider.base_url.clone());
+        // Strip a trailing /v1 or /v1/messages so the CLI's Anthropic SDK
+        // (which appends /v1/messages itself) does not call .../v1/v1/messages.
+        // The user may enter either form; the SDK only reconstructs the
+        // canonical single-/v1 endpoint from the bare host path.
+        let normalized = crate::commands::provider::normalize_anthropic_base_url(
+            &provider.base_url,
+            &provider.api_format,
+        );
+        env.insert("ANTHROPIC_BASE_URL".to_string(), normalized);
     }
 
     // Set API key (plaintext, no encryption).
@@ -1897,6 +1905,9 @@ pub fn run() {
             get_file_size,
             check_file_access,
             read_file_base64,
+            save_imported_pet,
+            read_imported_pet,
+            list_imported_pets,
             list_slash_commands,
             list_skills,
             read_skill,
@@ -1991,6 +2002,15 @@ pub fn run() {
             transcribe_and_reset_local_asr,
             // 通用下载取消（CancellationToken）
             commands::download_cancel::cancel_download,
+            // 前端资源热更新（免重装升级）
+            commands::web_update::download_web_update,
+            commands::web_update::get_web_resource_version,
+            // localStorage 磁盘持久化 + origin 迁移（设置免疫 origin 变更）
+            commands::ls_persist::load_ls_snapshot,
+            commands::ls_persist::save_ls_entry,
+            commands::ls_persist::remove_ls_entry,
+            commands::ls_persist::ensure_migrated,
+            commands::ls_persist::receive_ls_migration_dump,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

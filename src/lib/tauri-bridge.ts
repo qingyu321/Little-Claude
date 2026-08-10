@@ -380,6 +380,13 @@ export interface ProvidersFile {
     proxyUrl?: string;
     preset?: string;
     cliBackend?: string;
+    webSearchFallback?: {
+      baseUrl: string;
+      apiKey?: string;
+      envVar?: string;
+      model?: string;
+      enabled?: boolean;
+    } | null;
     createdAt: number;
     updatedAt: number;
   }[];
@@ -548,6 +555,15 @@ export const bridge = {
 
   readFileContent: (path: string) =>
     invoke<string>('read_file_content', { path }),
+
+  saveImportedPet: (petId: string, petJson: string, spritesheetB64: string) =>
+    invoke<string>('save_imported_pet', { petId, petJson, spritesheetB64 }),
+
+  readImportedPet: (petId: string, fileName: 'pet.json' | 'spritesheet.webp') =>
+    invoke<string>('read_imported_pet', { petId, fileName }),
+
+  listImportedPets: () =>
+    invoke<string[]>('list_imported_pets'),
 
   writeFileContent: (path: string, content: string) =>
     invoke<void>('write_file_content', { path, content }),
@@ -947,6 +963,31 @@ export const bridge = {
 
   installPrerequisite: (key: string) =>
     invoke<void>('install_prerequisite', { key }),
+
+  // ── Web hot update ─────────────────────────────
+
+  /** 下载并原子切换前端资源包（免重装升级）。返回当前生效资源版本。 */
+  downloadWebUpdate: (url: string, sha256: string, version: string) =>
+    invoke<string>('download_web_update', { url, sha256, version }),
+
+  /** 当前生效的前端资源版本（current.json 指针；None = 未热更过）。 */
+  getWebResourceVersion: () =>
+    invoke<string | null>('get_web_resource_version'),
+
+  // ── localStorage 磁盘持久化 + origin 迁移 ─────────────────────────────
+
+  /** 读取 localStorage 磁盘快照（JSON 对象字符串）。启动时灌回 localStorage。 */
+  loadLsSnapshot: () => invoke<string>('load_ls_snapshot'),
+
+  /** 写入单个 key 到磁盘快照（镜像 localStorage.setItem）。 */
+  saveLsEntry: (key: string, value: string) =>
+    invoke<void>('save_ls_entry', { key, value }),
+
+  /** 从磁盘快照删除单个 key（镜像 localStorage.removeItem）。 */
+  removeLsEntry: (key: string) => invoke<void>('remove_ls_entry', { key }),
+
+  /** 一次性迁移旧 origin 的 localStorage 到磁盘。dev 直接返回 0。 */
+  ensureMigrated: () => invoke<number>('ensure_migrated'),
 };
 
 // --- SDK Control Protocol Types ---
@@ -1127,6 +1168,35 @@ export function onFileChange(
   return listen<FileChangeEvent>(
     'fs:change',
     (event) => callback(event.payload),
+  );
+}
+
+// ── Web resource hot update (免重装升级) ────────────────────────
+
+/** 热更进度事件（download/verify/extract/switching/done/error）。 */
+export interface UpdateProgressEvent {
+  phase: 'download' | 'verify' | 'extract' | 'switching' | 'done' | 'error';
+  downloaded: number;
+  total: number | null;
+  message?: string | null;
+}
+
+/** 下载并应用前端资源热更新包（Rust 侧流式下载+校验+原子切换）。 */
+export function downloadWebUpdate(url: string, sha256: string, version: string): Promise<string> {
+  return bridge.downloadWebUpdate(url, sha256, version);
+}
+
+/** 查询当前生效的磁盘资源版本（无热更 → null，前端回退 APP_VERSION）。 */
+export function getWebResourceVersion(): Promise<string | null> {
+  return bridge.getWebResourceVersion();
+}
+
+/** 热更进度（防御性多播：原生监听恒为 1）。 */
+export function onUpdateProgress(
+  callback: (event: UpdateProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return Promise.resolve(
+    subscribeSingletonListener<UpdateProgressEvent>('update:progress', callback),
   );
 }
 

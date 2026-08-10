@@ -598,8 +598,12 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   const effectiveContextMode = sessionMeta.snapshotContextWindowMode ?? contextWindowMode;
   const contextWindow = getContextWindowForModel(modelForContext, effectiveContextMode);
   const compactThreshold = getAutoCompactThreshold(modelForContext, effectiveContextMode, autoCompactThresholdTokens);
+  // B2: prefer contextTokens — the full last-request input context INCLUDING
+  // cached tokens. input_tokens alone excludes prompt-cache content (95%+ of
+  // context in real sessions), making the bar read ~1% on long conversations.
   const used = Math.min(contextWindow, Math.max(0,
-    (sessionMeta.inputTokens ?? 0) + (sessionMeta.outputTokens ?? 0),
+    sessionMeta.contextTokens
+      ?? ((sessionMeta.inputTokens ?? 0) + (sessionMeta.outputTokens ?? 0)),
   ));
   const available = Math.max(0, contextWindow - used);
   const percent = Math.min(100, Math.round((used / contextWindow) * 100));

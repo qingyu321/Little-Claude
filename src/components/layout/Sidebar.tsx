@@ -38,6 +38,7 @@ export function Sidebar() {
   const interviewActive = useInterviewStore((s) => s.active);
   const previewSidebarVisible = useSettingsStore((s) => s.previewSidebarVisible);
   const skillsSidebarVisible = useSettingsStore((s) => s.skillsSidebarVisible);
+  const interviewSidebarVisible = useSettingsStore((s) => s.interviewSidebarVisible);
   const t = useT();
 
   const startProjectDraft = (folderPath: string) => {
@@ -217,6 +218,7 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="pt-3 mt-3 border-t border-border-subtle px-3">
+        {interviewSidebarVisible && (
         <button onClick={() => {
           const { active, openConfirm } = useInterviewStore.getState();
           if (active) {
@@ -249,6 +251,7 @@ export function Sidebar() {
           </div>
           {t('panel.interview')}
         </button>
+        )}
         {previewSidebarVisible && (
         <button onClick={() => setSecondaryTab('preview')}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl

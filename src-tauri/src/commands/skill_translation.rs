@@ -74,6 +74,7 @@ fn translation_provider_from_config(config: SkillTranslationConfig) -> Result<Ap
         created_at: 0,
         updated_at: 0,
         cli_backend: None,
+        web_search_fallback: None,
     })
 }
 

@@ -1,10 +1,20 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
 import { APP_NAME } from '../../lib/edition';
 import { APP_VERSION } from '../../lib/version';
 import { ChangelogModal } from '../shared/ChangelogModal';
 import { isPermissionError, isNetworkError } from './settingsUtils';
+import { bridge, onUpdateProgress } from '../../lib/tauri-bridge';
+import {
+  checkForUpdatesNow,
+  currentWebVersion,
+  getLatestReleaseUrl,
+  getLatestVersion,
+  recordAppliedWebVersion,
+  type UpdateInfo,
+} from '../../hooks/useAutoUpdateCheck';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { GeneralTab } from './GeneralTab';
 import { ProviderTab } from './ProviderTab';
 import { CliTab } from './CliTab';
@@ -15,8 +25,9 @@ import { SpeechTab } from './SpeechTab';
 import { PrerequisitesTab } from './PrerequisitesTab';
 import { ModuleManagementTab } from './ModuleManagementTab';
 import InterviewHelperTab from './InterviewHelperTab';
+import { PetTab } from './PetTab';
 
-type SettingsTab = 'general' | 'provider' | 'videoAnalysis' | 'speech' | 'cli' | 'localModels' | 'mcp' | 'prerequisites' | 'moduleManagement' | 'interviewHelper';
+type SettingsTab = 'general' | 'provider' | 'videoAnalysis' | 'speech' | 'cli' | 'localModels' | 'mcp' | 'prerequisites' | 'moduleManagement' | 'interviewHelper' | 'pet';
 
 const TAB_ICONS: Record<SettingsTab, React.ReactNode> = {
   general: (
@@ -87,6 +98,14 @@ const TAB_ICONS: Record<SettingsTab, React.ReactNode> = {
       <path d="M8 12v3M5 15h6" />
     </svg>
   ),
+  pet: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="8" cy="11" rx="4.5" ry="3.2" />
+      <circle cx="5" cy="6.5" r="1.1" />
+      <circle cx="11" cy="6.5" r="1.1" />
+      <path d="M4.5 5.2L3 2.5M11.5 5.2L13 2.5M8 5.8V3" />
+    </svg>
+  ),
 };
 
 const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
@@ -100,6 +119,7 @@ const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
   { id: 'prerequisites', labelKey: 'settings.tab.prerequisites' },
   { id: 'moduleManagement', labelKey: 'settings.tab.moduleManagement' },
   { id: 'interviewHelper', labelKey: 'settings.tab.interviewHelper' },
+  { id: 'pet', labelKey: 'settings.tab.pet' },
 ];
 
 export function SettingsPanel() {
@@ -181,6 +201,7 @@ export function SettingsPanel() {
             {activeTab === 'prerequisites' && <PrerequisitesTab />}
             {activeTab === 'moduleManagement' && <ModuleManagementTab />}
             {activeTab === 'interviewHelper' && <InterviewHelperTab />}
+            {activeTab === 'pet' && <PetTab />}
           </div>
         </div>
 
@@ -197,72 +218,131 @@ export function SettingsPanel() {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UpdateStatus = 'idle' | 'checking' | 'available' | 'latest' | 'error';
-
-// Primary: GitHub Releases API
-const GITHUB_API = 'https://api.github.com/repos/qingyu321/Little-Claude/releases/latest';
-const GITHUB_RELEASES_URL = 'https://github.com/qingyu321/Little-Claude/releases';
-
-// Fallback: Gitee API (disabled — no Gitee mirror yet; uncomment when ready)
-// const GITEE_API = 'https://gitee.com/api/v5/repos/qingyu321/Little-Claude/releases/latest';
-// const GITEE_RELEASES_URL = 'https://gitee.com/qingyu321/Little-Claude/releases';
+type DownloadState = 'idle' | 'downloading' | 'done' | 'error';
 
 function SettingsFooter() {
   const t = useT();
   const [appVersion] = useState(APP_VERSION);
   const [status, setStatus] = useState<UpdateStatus>('idle');
-  const [latestVersion, setLatestVersion] = useState('');
-  const [latestUrl, setLatestUrl] = useState('');
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [showChangelog, setShowChangelog] = useState(false);
+  const [webVersion, setWebVersion] = useState(currentWebVersion());
+
+  // 热更下载状态
+  const [downloadState, setDownloadState] = useState<DownloadState>('idle');
+  const [progress, setProgress] = useState<{
+    downloaded: number;
+    total: number | null;
+    phase: string;
+  }>({ downloaded: 0, total: null, phase: 'download' });
+  const [downloadError, setDownloadError] = useState('');
+  const unlistenRef = useRef<(() => void) | null>(null);
+
   const storeUpdateVersion = useSettingsStore((s) => s.updateVersion);
 
   // Pre-fill from auto-check result
   useEffect(() => {
     if (storeUpdateVersion && status === 'idle') {
-      setLatestVersion(storeUpdateVersion);
+      setUpdateInfo(getLatestVersion());
       setStatus('available');
     }
   }, [storeUpdateVersion]);
 
+  // 卸载时清理进度事件监听
+  useEffect(() => {
+    return () => {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+    };
+  }, []);
+
   const handleCheck = useCallback(async () => {
     setStatus('checking');
     setErrorMsg('');
-    let lastError = '';
-
-    const tryFetch = async (apiUrl: string, releasesUrl: string): Promise<boolean> => {
-      try {
-        const resp = await fetch(apiUrl, {
-          headers: { Accept: 'application/vnd.github+json' },
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        const tag = data?.tag_name || '';
-        if (!tag) throw new Error('No tag_name in response');
-        setLatestVersion(tag.replace(/^v/, ''));
-        setLatestUrl(data?.html_url || `${releasesUrl}/tag/${tag}`);
+    try {
+      const { info, outcome } = await checkForUpdatesNow();
+      if (outcome === 'updated' && info) {
+        setUpdateInfo(info);
         setStatus('available');
-        return true;
-      } catch (e) {
-        lastError = String(e);
-        return false;
-      }
-    };
-
-    // Try GitHub (Gitee fallback disabled — no mirror yet; uncomment when ready)
-    const ok = await tryFetch(GITHUB_API, GITHUB_RELEASES_URL);
-    if (!ok) {
-      // const giteeOk = await tryFetch(GITEE_API, GITEE_RELEASES_URL);
-      // if (!giteeOk) {
-        setErrorMsg(lastError);
+      } else if (outcome === 'latest') {
+        setUpdateInfo(null);
+        setStatus('latest');
+      } else {
+        setErrorMsg(t('update.checkFailed'));
         setStatus('error');
-      // }
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+      setStatus('error');
+    }
+  }, [t]);
+
+  const handleOpenRelease = useCallback(() => {
+    const url = updateInfo?.url || getLatestReleaseUrl();
+    window.open(url, '_blank');
+  }, [updateInfo]);
+
+  const handleUpdate = useCallback(async () => {
+    if (!updateInfo) return;
+    setDownloadState('downloading');
+    setDownloadError('');
+    setProgress({ downloaded: 0, total: null, phase: 'download' });
+    try {
+      const unlisten = await onUpdateProgress((ev) => {
+        if (ev.phase === 'error') {
+          setDownloadError(ev.message || t('update.error'));
+          setDownloadState('error');
+        } else {
+          setProgress({ downloaded: ev.downloaded, total: ev.total, phase: ev.phase });
+        }
+      });
+      unlistenRef.current = unlisten;
+      await bridge.downloadWebUpdate(updateInfo.zipUrl, updateInfo.sha256, updateInfo.version);
+      // Rust 侧切换成功后会 emit done 事件；再显式兜底一次
+      setDownloadState('done');
+      recordAppliedWebVersion(updateInfo.version);
+      setWebVersion(updateInfo.version.replace(/^v/, ''));
+    } catch (e) {
+      setDownloadError(String(e));
+      setDownloadState('error');
+    } finally {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+    }
+  }, [updateInfo, t]);
+
+  const handleRestart = useCallback(async () => {
+    try {
+      await relaunch();
+    } catch {
+      // 重启失败（如纯浏览器预览）→ 回退刷新页面
+      window.location.reload();
     }
   }, []);
 
-  const handleOpenRelease = useCallback(() => {
-    const url = latestUrl || `${GITHUB_RELEASES_URL}/latest`;
-    window.open(url, '_blank');
-  }, [latestUrl]);
+  const phaseLabel = useCallback(
+    (phase: string) => {
+      switch (phase) {
+        case 'download':
+          return t('update.downloading');
+        case 'verify':
+          return t('update.verifying');
+        case 'extract':
+          return t('update.extracting');
+        case 'switching':
+          return t('update.switching');
+        default:
+          return '';
+      }
+    },
+    [t]
+  );
+
+  const pct =
+    progress.total && progress.total > 0
+      ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+      : null;
 
   return (
     <>
@@ -276,6 +356,11 @@ function SettingsFooter() {
             <path d="M90.01 39.92L102.01 39.92L79.24 129.92L67.24 129.92L79.24 81.92Z" className="fill-accent" />
           </svg>
           {APP_NAME} v{appVersion}
+          {webVersion && webVersion !== appVersion && (
+            <span className="text-accent/90">
+              · {t('settings.footer.webVersion')} v{webVersion}
+            </span>
+          )}
         </span>
 
         {/* Right: action buttons */}
@@ -315,14 +400,75 @@ function SettingsFooter() {
             </span>
           )}
 
-          {status === 'available' && (
-            <button
-              onClick={handleOpenRelease}
-              className="px-2.5 py-1 text-xs font-medium rounded-md
-                bg-accent text-text-inverse hover:bg-accent-hover transition-smooth"
-            >
-              {t('update.available')} v{latestVersion}
-            </button>
+          {status === 'available' && downloadState === 'idle' && (
+            updateInfo && !updateInfo.rustChanged ? (
+              <button
+                onClick={handleUpdate}
+                className="px-2.5 py-1 text-xs font-medium rounded-md
+                  bg-accent text-text-inverse hover:bg-accent-hover transition-smooth"
+              >
+                {t('update.toLatest')} v{updateInfo.version}
+              </button>
+            ) : (
+              <button
+                onClick={handleOpenRelease}
+                title={updateInfo?.rustChanged ? t('update.engineHint') : undefined}
+                className="px-2.5 py-1 text-xs font-medium rounded-md
+                  bg-accent text-text-inverse hover:bg-accent-hover transition-smooth"
+              >
+                {t('update.installPackage')}
+                {updateInfo && ` v${updateInfo.version}`}
+              </button>
+            )
+          )}
+
+          {downloadState === 'downloading' && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-text-muted">{phaseLabel(progress.phase)}</span>
+              <div className="w-28 h-1 bg-bg-secondary rounded-full overflow-hidden">
+                <div
+                  className={`h-full bg-accent rounded-full transition-all ${
+                    pct == null ? 'animate-pulse opacity-50' : ''
+                  }`}
+                  style={{ width: pct == null ? '100%' : `${pct}%` }}
+                />
+              </div>
+              <span className="text-xs text-text-tertiary tabular-nums">
+                {pct == null ? '--' : `${pct}%`}
+              </span>
+            </div>
+          )}
+
+          {downloadState === 'done' && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-green-500 font-medium">
+                ✓ {t('update.downloadDone')}
+              </span>
+              <button
+                onClick={handleRestart}
+                className="px-2.5 py-1 text-xs font-medium rounded-md
+                  bg-accent text-text-inverse hover:bg-accent-hover transition-smooth"
+              >
+                {t('update.restartNow')}
+              </button>
+            </div>
+          )}
+
+          {downloadState === 'error' && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-red-500" title={downloadError}>
+                {t('update.error')}
+              </span>
+              <button
+                onClick={() => {
+                  setDownloadState('idle');
+                  handleUpdate();
+                }}
+                className="px-2 py-0.5 text-xs text-text-muted hover:text-text-primary transition-smooth"
+              >
+                {t('cli.retry')}
+              </button>
+            </div>
           )}
 
           {status === 'error' && (

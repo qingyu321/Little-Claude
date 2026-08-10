@@ -1,6 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import {
+  ensureMigrated,
+  seedFromDisk,
+  installMirror,
+  clearKeysFromDisk,
+} from "./lib/persistent-storage";
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -23,10 +28,21 @@ class ErrorBoundary extends React.Component<
     this.setState({ hasError: false, error: null });
   };
 
-  handleClearAndReload = () => {
+  handleClearAndReload = async () => {
+    const keys = [
+      "tokenicode-settings",
+      "tokenicode_custom_previews",
+      "tokenicode_pet_window_v1",
+      "tokenicode_pet_skins_v1",
+    ];
     try {
-      localStorage.removeItem("tokenicode-settings");
-      localStorage.removeItem("tokenicode_custom_previews");
+      for (const k of keys) localStorage.removeItem(k);
+    } catch {
+      // ignore
+    }
+    // 同步清磁盘快照后再 reload，否则 bootstrap 会把旧值从磁盘灌回，"清除"失效。
+    try {
+      await clearKeysFromDisk(keys);
     } catch {
       // ignore
     }
@@ -89,10 +105,43 @@ class ErrorBoundary extends React.Component<
   }
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>,
-);
+/**
+ * 异步引导：在渲染 App 前把 localStorage 从磁盘灌回（origin 变更免疫）。
+ *
+ * 顺序很关键：
+ *   1. __migrate 短路 —— Rust 迁移用隐藏窗口会带 ?__migrate=1 加载本页，
+ *      只作为读旧 origin localStorage 的载体，不能渲染、不能再触发迁移（防递归）。
+ *   2. ensureMigrated —— 一次性把旧 origin(http://tauri.localhost) 的数据迁到磁盘。
+ *   3. seedFromDisk  —— 读磁盘快照灌回当前 origin 的 localStorage。
+ *   4. installMirror —— 之后运行时对 localStorage 的改动异步回写磁盘。
+ *   5. 动态 import App 并渲染（store 在 App 依赖树里，灌盘后才初始化，读到正确值）。
+ *
+ * 非 Tauri 环境下 ensureMigrated/seedFromDisk/installMirror 全部 no-op，退回原生行为。
+ */
+async function bootstrap() {
+  if (new URLSearchParams(window.location.search).has("__migrate")) {
+    return;
+  }
+
+  try {
+    await ensureMigrated();
+    await seedFromDisk();
+    installMirror();
+  } catch (e) {
+    console.error(
+      "[bootstrap] persistent-storage init failed, falling back to plain localStorage:",
+      e,
+    );
+  }
+
+  const { default: App } = await import("./App");
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </React.StrictMode>,
+  );
+}
+
+bootstrap();

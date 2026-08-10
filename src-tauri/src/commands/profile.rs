@@ -57,6 +57,31 @@ pub fn append_usage_record(
     model: String,
     timestamp: String,
 ) -> Result<(), String> {
+    append_usage_record_impl(
+        &session_id,
+        &message_id,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        &model,
+        &timestamp,
+    )
+}
+
+/// Non-command implementation so the Anthropic→OpenAI conversion proxy can
+/// persist usage directly (the proxy knows the full OpenAI usage incl. cache,
+/// which the CLI drops from message_delta). Same format as the command.
+pub fn append_usage_record_impl(
+    session_id: &str,
+    message_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    model: &str,
+    timestamp: &str,
+) -> Result<(), String> {
     use std::io::Write as _;
 
     let path = tokenicode_usage_log_path();
@@ -87,13 +112,17 @@ pub fn append_usage_record(
 /// Reads the append-only NDJSON log, dedupes by (session_id, message_id), and adds
 /// each record's tokens to the same `daily`/`models` maps that the JSONL scan uses.
 ///
-/// `jsonl_counted_uuids` is the set of turn-level `value.uuid` strings that the
-/// JSONL scan already counted (i.e. turns where the CLI wrote non-zero usage).
-/// Records whose `message_id` is in that set are skipped, so the usage log only
-/// fills gaps where the CLI wrote zero/missing usage -- never double-counting.
+/// `jsonl_counted_uuids` is the set of turn-level `value.uuid` / `message.id`
+/// strings that the JSONL scan already counted WITH reliable input tokens
+/// (input_tokens > 0). Records whose `message_id` is in that set are skipped.
+///
+/// `jsonl_zero_input_ids` is the set for turns the JSONL counted but whose
+/// input tokens were 0 (OpenAI-compat proxy path: message_start carried no
+/// input). Records there SUPPLEMENT input + cache (output already counted).
 fn merge_usage_log_into(
     tracked: &HashSet<String>,
     jsonl_counted_uuids: &HashSet<String>,
+    jsonl_zero_input_ids: &HashSet<String>,
     daily: &mut HashMap<String, ProfileDailyStats>,
     models: &mut HashMap<String, ProfileModelStats>,
     total_input: &mut u64,
@@ -108,7 +137,7 @@ fn merge_usage_log_into(
         return;
     };
     let mut seen: HashSet<String> = HashSet::new();
-    for line in std::io::BufReader::new(file).lines().flatten() {
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -127,10 +156,11 @@ fn merge_usage_log_into(
         if message_id.is_empty() || !seen.insert(message_id.clone()) {
             continue; // dedup within the usage log itself
         }
-        // Skip turns the JSONL scan already counted. The frontend persists
-        // `msg.uuid` as `message_id`, which equals the JSONL `value.uuid`; the
-        // JSONL scan's primary dedup key (`message.id`) is a different ID, so
-        // without this check the same turn would be counted twice.
+        // Skip turns the JSONL scan already counted with full (non-zero) input.
+        // The frontend persists `msg.uuid` as `message_id`, which equals the
+        // JSONL `value.uuid`; the JSONL scan's primary dedup key (`message.id`)
+        // is a different ID, so without this check the same turn would be
+        // counted twice.
         if jsonl_counted_uuids.contains(&message_id) {
             continue;
         }
@@ -144,10 +174,26 @@ fn merge_usage_log_into(
             continue;
         }
 
-        *total_input += input_tokens;
-        *total_output += output_tokens;
-        *total_cache += cache_tokens;
-        *message_count += 1;
+        // Decide what to contribute:
+        //  - JSONL counted this turn but only output (input was 0 on the proxy
+        //    path) → supplement input + cache; output is already in the JSONL.
+        //  - otherwise (JSONL didn't count it at all) → full contribution.
+        let (add_input, add_output, add_cache, add_msg) =
+            if jsonl_zero_input_ids.contains(&message_id) {
+                (input_tokens, 0u64, cache_tokens, false)
+            } else {
+                (input_tokens, output_tokens, cache_tokens, true)
+            };
+        if add_input == 0 && add_output == 0 && add_cache == 0 {
+            continue;
+        }
+
+        *total_input += add_input;
+        *total_output += add_output;
+        *total_cache += add_cache;
+        if add_msg {
+            *message_count += 1;
+        }
 
         let date = value
             .get("timestamp")
@@ -161,11 +207,13 @@ fn merge_usage_log_into(
                 date,
                 ..Default::default()
             });
-        entry.input_tokens += input_tokens;
-        entry.output_tokens += output_tokens;
-        entry.cache_tokens += cache_tokens;
-        entry.total_tokens += total_tokens;
-        entry.message_count += 1;
+        entry.input_tokens += add_input;
+        entry.output_tokens += add_output;
+        entry.cache_tokens += add_cache;
+        entry.total_tokens += add_input + add_output + add_cache;
+        if add_msg {
+            entry.message_count += 1;
+        }
 
         if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
             let model_entry =
@@ -175,8 +223,10 @@ fn merge_usage_log_into(
                         model: model.to_string(),
                         ..Default::default()
                     });
-            model_entry.total_tokens += total_tokens;
-            model_entry.message_count += 1;
+            model_entry.total_tokens += add_input + add_output + add_cache;
+            if add_msg {
+                model_entry.message_count += 1;
+            }
         }
     }
 }
@@ -215,6 +265,10 @@ pub async fn get_profile_stats() -> Result<Value, String> {
     // messages the JSONL scan already counted. Used to suppress those turns in
     // the usage-log merge and avoid double-counting.
     let mut jsonl_counted_uuids: HashSet<String> = HashSet::new();
+    // Turn-level ids where the JSONL only counted output (input was 0 — the
+    // OpenAI-compat proxy path can't put input on message_start). Usage-log
+    // records for these ids SUPPLEMENT input + cache instead of being skipped.
+    let mut jsonl_zero_input_ids: HashSet<String> = HashSet::new();
 
     if let Ok(entries) = std::fs::read_dir(&claude_dir) {
         for entry in entries.flatten() {
@@ -244,7 +298,7 @@ pub async fn get_profile_stats() -> Result<Value, String> {
                 let reader = std::io::BufReader::new(file);
                 let mut seen_message_ids: HashSet<String> = HashSet::new();
 
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     let Ok(value) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
@@ -277,11 +331,41 @@ pub async fn get_profile_stats() -> Result<Value, String> {
                         continue;
                     }
 
-                    // Record the turn-level uuid so the usage-log merge can skip
-                    // turns the JSONL already counted.
-                    if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
-                        if !uuid.is_empty() {
-                            jsonl_counted_uuids.insert(uuid.to_string());
+                    // Record the turn-level identifiers so the usage-log merge
+                    // can decide whether to skip or supplement this turn. Store
+                    // BOTH the top-level `uuid` (official path persists msg.uuid)
+                    // AND `message.id` (OpenAI-compat proxy path persists
+                    // message_start's message.id).
+                    //
+                    // Split by input reliability:
+                    //  - input_tokens > 0 → JSONL counted the full turn (input +
+                    //    output + cache) → usage-log record for this id is SKIPPED.
+                    //  - input_tokens == 0 but total > 0 → the proxy path sent the
+                    //    CLI an Anthropic response whose message_start carried no
+                    //    input (OpenAI usage arrives on the tail chunk), so the
+                    //    JSONL only counted output. The usage-log record must
+                    //    SUPPLEMENT input + cache for this id.
+                    if input_tokens > 0 {
+                        if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
+                            if !uuid.is_empty() {
+                                jsonl_counted_uuids.insert(uuid.to_string());
+                            }
+                        }
+                        if let Some(mid) = message.get("id").and_then(|v| v.as_str()) {
+                            if !mid.is_empty() {
+                                jsonl_counted_uuids.insert(mid.to_string());
+                            }
+                        }
+                    } else {
+                        if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
+                            if !uuid.is_empty() {
+                                jsonl_zero_input_ids.insert(uuid.to_string());
+                            }
+                        }
+                        if let Some(mid) = message.get("id").and_then(|v| v.as_str()) {
+                            if !mid.is_empty() {
+                                jsonl_zero_input_ids.insert(mid.to_string());
+                            }
                         }
                     }
 
@@ -331,6 +415,7 @@ pub async fn get_profile_stats() -> Result<Value, String> {
     merge_usage_log_into(
         &tracked,
         &jsonl_counted_uuids,
+        &jsonl_zero_input_ids,
         &mut daily,
         &mut models,
         &mut total_input,

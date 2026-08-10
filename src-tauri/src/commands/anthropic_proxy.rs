@@ -62,6 +62,8 @@ impl ProxyManager {
         session_id: &str,
         target_url: String,
         api_key: String,
+        main_format: String,
+        fallback: Option<WebSearchFallbackConfig>,
     ) -> Result<String, String> {
         // Replace any existing proxy for this session
         self.stop(session_id).await;
@@ -79,6 +81,9 @@ impl ProxyManager {
             target_url,
             api_key,
             token: token.clone(),
+            session_id: session_id.to_string(),
+            main_format,
+            fallback,
         };
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -119,8 +124,13 @@ impl ProxyManager {
             },
         );
         eprintln!(
-            "[LITTLECLAUDE:proxy] Started Anthropic→OpenAI proxy for session {} on port {} (token {}) → {}",
-            session_id, port, token, state.target_url
+            "[LITTLECLAUDE:proxy] Started proxy for session {} on port {} (token {}) → {} (format {}, fallback {})",
+            session_id,
+            port,
+            token,
+            state.target_url,
+            state.main_format,
+            if state.fallback.is_some() { "yes" } else { "no" }
         );
         Ok(format!("http://127.0.0.1:{}/{}", port, token))
     }
@@ -143,6 +153,26 @@ struct ProxyState {
     target_url: String,
     api_key: String,
     token: String,
+    /// Little Claude session id this proxy serves. Used to persist the
+    /// authoritative OpenAI usage (incl. cache) straight to the usage log —
+    /// the CLI drops message_delta fields it doesn't know, so the frontend
+    /// can't rely on the stream to carry input/cache back.
+    session_id: String,
+    /// Main endpoint format: "openai" → conversion branch; "anthropic" →
+    /// passthrough branch.
+    main_format: String,
+    /// Web-search fallback endpoint; None = plain conversion proxy (legacy).
+    fallback: Option<WebSearchFallbackConfig>,
+}
+
+/// 联网搜索兜底端点配置（密钥已在 session.rs 解析完成，此处永远明文）。
+#[derive(Clone)]
+pub(crate) struct WebSearchFallbackConfig {
+    /// 用户输入的原始端点，请求时经 provider_messages_endpoint 归一化。
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    /// 空串 = 沿用请求体里的 model。
+    pub(crate) model: String,
 }
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -277,8 +307,30 @@ fn upstream_client() -> &'static reqwest::Client {
     })
 }
 
-/// Forward a converted Anthropic request to the OpenAI endpoint.
+/// Dispatcher: routes a request to the fallback endpoint (web_search server
+/// tool present), the main Anthropic endpoint (passthrough), or the OpenAI
+/// conversion pipeline.
 async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response<BoxBody> {
+    if has_web_search_tool(&anthropic_body) {
+        if let Some(fb) = &state.fallback {
+            eprintln!(
+                "[LITTLECLAUDE:proxy] Session {} web_search request → fallback {}",
+                state.session_id, fb.base_url
+            );
+            return forward_passthrough(&fb.base_url, &fb.api_key, &anthropic_body, &fb.model, true)
+                .await;
+        }
+    }
+    if state.main_format.eq_ignore_ascii_case("anthropic") {
+        // 主端点是 Anthropic 格式：原样透传（tools 不改写，与直连行为一致）。
+        return forward_passthrough(&state.target_url, &state.api_key, &anthropic_body, "", false)
+            .await;
+    }
+    forward_openai_conversion(state, anthropic_body).await
+}
+
+/// Forward a converted Anthropic request to the OpenAI endpoint.
+async fn forward_openai_conversion(state: &ProxyState, anthropic_body: Value) -> Response<BoxBody> {
     let openai_body = anthropic_to_openai_req(&anthropic_body);
     let is_stream = openai_body
         .get("stream")
@@ -337,6 +389,36 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
             Ok(text) => match serde_json::from_str::<Value>(&text) {
                 Ok(openai) => {
                     let anthropic = openai_to_anthropic_resp(&openai);
+                    // Persist authoritative usage (incl. cache) for non-streaming
+                    // responses too — same CLI-drops-message_delta rationale.
+                    if let Some(usage) = openai.get("usage") {
+                        let inp = usage.get("prompt_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                        let out = usage.get("completion_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                        let cache_read = usage.get("prompt_cache_hit_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                        let cache_creation = usage.get("prompt_cache_miss_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                        if inp + out + cache_read + cache_creation > 0 {
+                            let mid = openai
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .trim_start_matches("chatcmpl-");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let model = openai.get("model").and_then(|m| m.as_str()).unwrap_or("");
+                            let _ = crate::commands::profile::append_usage_record_impl(
+                                &state.session_id,
+                                mid,
+                                inp,
+                                out,
+                                cache_read,
+                                cache_creation,
+                                model,
+                                &ts.to_string(),
+                            );
+                        }
+                    }
                     json_response(StatusCode::OK, anthropic)
                 }
                 Err(_) => json_response(StatusCode::BAD_GATEWAY, json!({
@@ -354,6 +436,7 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
         // Use an mpsc channel so the conversion task can push frames
         // asynchronously while the response body streams them out.
         let (mut tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(64);
+        let session_id_owned = state.session_id.clone();
         tokio::spawn(async move {
             let mut conv = SseConverter::new();
             let mut stream = resp.bytes_stream();
@@ -370,6 +453,29 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
                     }
                 }
                 true
+            };
+
+            // Persist the authoritative OpenAI usage (input + output + cache)
+            // straight to Little Claude's usage log. The CLI drops message_delta
+            // fields it doesn't know, so input/cache would otherwise never reach
+            // the frontend and the per-turn stats would show input = 0.
+            let persist = |conv: &SseConverter| {
+                if let Some((mid, inp, out, cache_read, cache_creation)) = conv.usage_record() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let _ = crate::commands::profile::append_usage_record_impl(
+                        &session_id_owned,
+                        &mid,
+                        inp,
+                        out,
+                        cache_read,
+                        cache_creation,
+                        &conv.model,
+                        &ts.to_string(),
+                    );
+                }
             };
 
             while let Some(chunk) = stream.next().await {
@@ -391,6 +497,7 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
                         let payload = data.trim();
                         if payload == "[DONE]" {
                             let events = conv.finish();
+                            persist(&conv);
                             if !send_events(&mut tx, events) {
                                 break;
                             }
@@ -407,7 +514,182 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
             // without [DONE] (some providers omit the terminator).
             if !conv.is_finished() {
                 let events = conv.finish();
+                persist(&conv);
                 let _ = send_events(&mut tx, events);
+            }
+            // Dropping tx closes the response body (EOF for the CLI).
+        });
+
+        let body = http_body_util::BodyExt::boxed(StreamBody::new(
+            futures_util::stream::unfold(
+                rx,
+                |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
+            ),
+        ));
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .body(body)
+            .unwrap_or_else(|_| {
+                json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "Stream setup failed"}
+                }))
+            })
+    }
+}
+
+// ─── Web-search fallback passthrough ────────────────────────────────────
+
+/// tools 数组（防御性含顶层 `server_tools`）里是否有 web_search 服务端工具。
+/// 匹配：type == "web_search" | type 以 "web_search_" 开头 | name == "web_search"。
+fn has_web_search_tool(body: &Value) -> bool {
+    let mut arrays: Vec<&Vec<Value>> = Vec::new();
+    if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
+        arrays.push(tools);
+    }
+    if let Some(tools) = body.get("server_tools").and_then(|t| t.as_array()) {
+        arrays.push(tools);
+    }
+    for tools in arrays {
+        for t in tools {
+            let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let tname = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if ttype == "web_search"
+                || ttype.starts_with("web_search_")
+                || tname == "web_search"
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 兜底请求体改写：model → fallback.model（非空时）；web_search 服务端工具
+/// → `{"type":"web_search_20250305","name":"web_search","max_uses":1}`。
+/// 非 web_search 工具原样保留。工具名版本化是 DeepSeek 等兼容端点的要求
+/// （旧名 `web_search` 会被拒绝）。
+fn prepare_fallback_body(body: &Value, model: &str) -> Value {
+    let mut out = body.clone();
+    if !model.trim().is_empty() {
+        out["model"] = Value::String(model.trim().to_string());
+    }
+    for key in ["tools", "server_tools"] {
+        if let Some(tools) = out.get_mut(key).and_then(|t| t.as_array_mut()) {
+            for t in tools.iter_mut() {
+                let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let tname = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if ttype == "web_search"
+                    || ttype.starts_with("web_search_")
+                    || tname == "web_search"
+                {
+                    *t = json!({"type": "web_search_20250305", "name": "web_search", "max_uses": 1});
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Anthropic 格式原样转发（JSON / SSE 字节流，不做任何转换）。
+///
+/// headers: `x-api-key`（替换）、`anthropic-version: 2023-06-01`、content-type。
+/// 注意：DeepSeek 等 anthropic 兼容端点只认 `x-api-key`，不接受 Bearer。
+///
+/// `rewrite = true` 时先过 `prepare_fallback_body`（仅兜底分支用；
+/// 主端点透传 `rewrite = false`，tools 不改写）。透传分支不记 usage——
+/// 前端从 CLI 流事件的 usage 字段直接记账。
+async fn forward_passthrough(
+    base_url: &str,
+    api_key: &str,
+    body: &Value,
+    model: &str,
+    rewrite: bool,
+) -> Response<BoxBody> {
+    let target = crate::commands::provider::provider_messages_endpoint(base_url, "anthropic");
+    let payload = if rewrite {
+        prepare_fallback_body(body, model)
+    } else {
+        body.clone()
+    };
+    let is_stream = payload
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    let client = upstream_client();
+    let mut req = client
+        .post(&target)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&payload);
+    if !is_stream {
+        req = req.timeout(std::time::Duration::from_secs(60));
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return json_response(StatusCode::BAD_GATEWAY, json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": format!("Upstream connection failed: {}", e)}
+            }));
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        // 上游错误响应是 JSON（非 SSE），提取 error.message（脱敏后）包成
+        // Anthropic 错误格式回传。
+        let text = resp.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").cloned())
+            .and_then(|e| e.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| text.chars().take(500).collect());
+        let message = redact_secrets(&message);
+        eprintln!(
+            "[LITTLECLAUDE:proxy] Upstream error HTTP {}: {}",
+            status, message
+        );
+        return json_response(status, json!({
+            "type": "error",
+            "error": {"type": "api_error", "message": message}
+        }));
+    }
+
+    if !is_stream {
+        // 非流式：原样 JSON 返回（Anthropic 格式响应，无需转换）。
+        match resp.text().await {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(v) => json_response(StatusCode::OK, v),
+                Err(_) => json_response(StatusCode::BAD_GATEWAY, json!({
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "Invalid upstream response"}
+                })),
+            },
+            Err(e) => json_response(StatusCode::BAD_GATEWAY, json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": format!("Upstream read failed: {}", e)}
+            })),
+        }
+    } else {
+        // 流式：SSE 原始字节流转发。禁止行解析/重组——任何 event:/data:
+        // 行的丢失都会让 CLI 解析错乱。
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, hyper::Error>>(64);
+        tokio::spawn(async move {
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                if tx.send(Ok(Frame::data(chunk))).await.is_err() {
+                    break; // receiver dropped
+                }
             }
             // Dropping tx closes the response body (EOF for the CLI).
         });
@@ -737,6 +1019,18 @@ fn openai_to_anthropic_resp(body: &Value) -> Value {
         .get("completion_tokens")
         .and_then(|u| u.as_u64())
         .unwrap_or(0);
+    // OpenAI-compatible providers (opencode, DeepSeek…) report cache as
+    // prompt_cache_hit_tokens (cache read) / prompt_cache_miss_tokens
+    // (cache creation). Map them to the Anthropic field names so token
+    // stats can count cache hits and cache misses.
+    let cache_read_input_tokens = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(|u| u.as_u64())
+        .unwrap_or(0);
+    let cache_creation_input_tokens = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(|u| u.as_u64())
+        .unwrap_or(0);
 
     json!({
         "id": format!("msg_{}", id.trim_start_matches("chatcmpl-")),
@@ -746,7 +1040,12 @@ fn openai_to_anthropic_resp(body: &Value) -> Value {
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens
+        }
     })
 }
 
@@ -763,6 +1062,8 @@ struct SseConverter {
     finish_reason: String,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
     finished: bool,
 }
 
@@ -779,12 +1080,33 @@ impl SseConverter {
             finish_reason: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             finished: false,
         }
     }
 
     fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// The accumulated authoritative usage + stable message id, for persisting
+    /// to Little Claude's usage log directly from the proxy (the CLI drops
+    /// message_delta fields it doesn't know, so input/cache never reach the
+    /// frontend stream). Returns None when no usable usage was seen.
+    fn usage_record(&self) -> Option<(String, u64, u64, u64, u64)> {
+        let total = self.input_tokens + self.output_tokens
+            + self.cache_read_tokens + self.cache_creation_tokens;
+        if total == 0 || self.msg_id.is_empty() {
+            return None;
+        }
+        Some((
+            self.msg_id.clone(),
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        ))
     }
 
     /// Process one `data: {json}` payload from the OpenAI SSE stream.
@@ -796,13 +1118,27 @@ impl SseConverter {
             Err(_) => return events,
         };
 
-        // Usage may arrive in a dedicated chunk or with the final chunk
+        // Usage may arrive in a dedicated chunk or with the final chunk.
+        // Map OpenAI cache fields → Anthropic names so input AND cache
+        // (hit + miss) tokens are carried through the conversion.
         if let Some(usage) = v.get("usage") {
             if let Some(t) = usage.get("prompt_tokens").and_then(|u| u.as_u64()) {
                 self.input_tokens = t;
             }
             if let Some(t) = usage.get("completion_tokens").and_then(|u| u.as_u64()) {
                 self.output_tokens = t;
+            }
+            if let Some(t) = usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(|u| u.as_u64())
+            {
+                self.cache_read_tokens = t;
+            }
+            if let Some(t) = usage
+                .get("prompt_cache_miss_tokens")
+                .and_then(|u| u.as_u64())
+            {
+                self.cache_creation_tokens = t;
             }
         }
 
@@ -968,7 +1304,12 @@ impl SseConverter {
         let delta = json!({
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-            "usage": {"output_tokens": self.output_tokens}
+            "usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_read_input_tokens": self.cache_read_tokens,
+                "cache_creation_input_tokens": self.cache_creation_tokens
+            }
         });
         events.push(format!("event: message_delta\ndata: {}", delta));
         events.push(format!("event: message_stop\ndata: {}", json!({"type": "message_stop"})));
@@ -1008,6 +1349,79 @@ impl SseConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn has_web_search_tool_detects_server_tool() {
+        // 裸名
+        assert!(has_web_search_tool(&json!({
+            "model": "m",
+            "tools": [{"type": "web_search", "name": "web_search", "max_uses": 1}]
+        })));
+        // 带版本号
+        assert!(has_web_search_tool(&json!({
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}]
+        })));
+        assert!(has_web_search_tool(&json!({
+            "tools": [{"type": "web_search_20260209", "name": "web_search"}]
+        })));
+        // 只匹配 name
+        assert!(has_web_search_tool(&json!({
+            "tools": [{"type": "custom", "name": "web_search"}]
+        })));
+        // 顶层 server_tools
+        assert!(has_web_search_tool(&json!({
+            "server_tools": [{"type": "web_search", "name": "web_search"}]
+        })));
+        // 非 web_search 工具
+        assert!(!has_web_search_tool(&json!({
+            "tools": [{"type": "custom", "name": "bash", "description": "x"}]
+        })));
+        // 无 tools 字段
+        assert!(!has_web_search_tool(&json!({"model": "m"})));
+        // 空 body
+        assert!(!has_web_search_tool(&json!({})));
+    }
+
+    #[test]
+    fn prepare_fallback_body_rewrites_tools_and_model() {
+        let body = json!({
+            "model": "main-model",
+            "max_tokens": 100,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "web_search", "name": "web_search", "max_uses": 1},
+                {"type": "custom", "name": "bash", "description": "d", "input_schema": {"type": "object"}}
+            ]
+        });
+        let out = prepare_fallback_body(&body, "deepseek-v4-flash");
+        assert_eq!(out["model"], "deepseek-v4-flash");
+        assert_eq!(out["max_tokens"], 100);
+        let tools = out["tools"].as_array().unwrap();
+        // web_search 被规范化
+        assert_eq!(tools[0]["type"], "web_search_20250305");
+        assert_eq!(tools[0]["name"], "web_search");
+        assert_eq!(tools[0]["max_uses"], 1);
+        // 其他工具原样
+        assert_eq!(tools[1]["type"], "custom");
+        assert_eq!(tools[1]["name"], "bash");
+        // 已版本化的工具也被统一到 20250305
+        let out2 = prepare_fallback_body(
+            &json!({"tools": [{"type": "web_search_20260209", "name": "web_search"}]}),
+            "",
+        );
+        assert_eq!(out2["tools"][0]["type"], "web_search_20250305");
+    }
+
+    #[test]
+    fn prepare_fallback_body_keeps_model_when_empty() {
+        let body = json!({"model": "m", "tools": [{"type": "custom"}]});
+        let out = prepare_fallback_body(&body, "  ");
+        assert_eq!(out["model"], "m");
+        // 非 web_search 请求：tools 不误改
+        let tools = out["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["type"], "custom");
+    }
 
     #[test]
     fn anthropic_to_openai_plain() {
@@ -1090,7 +1504,7 @@ mod tests {
                 },
                 "finish_reason": "stop"
             }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "prompt_cache_hit_tokens": 4, "prompt_cache_miss_tokens": 6}
         });
         let an = openai_to_anthropic_resp(&body);
         assert_eq!(an["type"], "message");
@@ -1100,6 +1514,32 @@ mod tests {
         assert_eq!(an["content"][0]["text"], "hi there");
         assert_eq!(an["usage"]["input_tokens"], 10);
         assert_eq!(an["usage"]["output_tokens"], 5);
+        // Cache fields must survive the OpenAI → Anthropic conversion.
+        assert_eq!(an["usage"]["cache_read_input_tokens"], 4);
+        assert_eq!(an["usage"]["cache_creation_input_tokens"], 6);
+    }
+
+    #[test]
+    fn sse_converter_maps_cache_fields_on_final_chunk() {
+        let mut c = SseConverter::new();
+        // Intermediate content chunk (no usage yet).
+        c.on_openai_chunk(r#"{"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"delta":{"content":"hi"}}]}"#);
+        // Final chunk carries the full usage incl. cache hit + miss.
+        c.on_openai_chunk(r#"{"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":84,"completion_tokens":16,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":84}}"#);
+        let events = c.finish();
+        let joined = events.join("\n");
+        let delta = events
+            .iter()
+            .find(|e| e.contains("\"message_delta\""))
+            .expect("message_delta present");
+        let data = delta.split("data: ").nth(1).unwrap();
+        let v: Value = serde_json::from_str(data).unwrap();
+        let usage = &v["usage"];
+        assert_eq!(usage["input_tokens"], 84);
+        assert_eq!(usage["output_tokens"], 16);
+        assert_eq!(usage["cache_read_input_tokens"], 0);
+        assert_eq!(usage["cache_creation_input_tokens"], 84);
+        assert!(joined.contains("message_stop"));
     }
 
     #[test]

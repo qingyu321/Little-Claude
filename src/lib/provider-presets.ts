@@ -155,6 +155,20 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     },
   },
   {
+    id: 'opencode',
+    name: 'OpenCode Go',
+    baseUrl: 'https://opencode.ai/zen/go',
+    apiFormat: 'anthropic',
+    extra_env: {},
+    keyUrl: 'https://opencode.ai',
+    thinkingSupport: 'full',
+    defaultModels: {
+      opus: 'deepseek-v4-pro',
+      sonnet: 'deepseek-v4-flash',
+      haiku: 'deepseek-v4-flash',
+    },
+  },
+  {
     id: 'codex-openai',
     name: 'Codex (OpenAI)',
     baseUrl: 'https://api.openai.com/v1',

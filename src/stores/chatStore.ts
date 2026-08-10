@@ -92,10 +92,25 @@ export interface SessionMeta {
   inputTokens?: number;
   /** Accumulated output tokens from stream events (message_delta) — per turn, reset each turn */
   outputTokens?: number;
+  /** Accumulated cache-read (cache hit) tokens — per turn (OpenAI-compat proxy path) */
+  cacheReadTokens?: number;
+  /** Accumulated cache-creation (cache miss) tokens — per turn (OpenAI-compat proxy path) */
+  cacheCreationTokens?: number;
+  /** Full input context of the LAST request (input + cache-read + cache-creation).
+   *  B2 fix: authoritative "context used" for the Ctx bar and auto-compact —
+   *  input_tokens alone excludes cached content (95%+ of context in real sessions). */
+  contextTokens?: number;
+  /** Auto-compact already fired for this session (B3 fix: per-tab flag; used to be
+   *  a single ref shared across all sessions of the one InputBar instance). */
+  autoCompactFired?: boolean;
   /** Cumulative input tokens across ALL turns in this session/task */
   totalInputTokens?: number;
   /** Cumulative output tokens across ALL turns in this session/task */
   totalOutputTokens?: number;
+  /** Cumulative cache-read (cache hit) tokens across all turns */
+  totalCacheReadTokens?: number;
+  /** Cumulative cache-creation (cache miss) tokens across all turns */
+  totalCacheCreationTokens?: number;
   /** Timestamp (Date.now()) when the current turn started — used for elapsed timer */
   turnStartTime?: number;
   /** Timestamp of last stream activity — used for stall detection instead of total elapsed */

@@ -19,6 +19,52 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.1.2',
+    date: '2026-08-10',
+    highlights: {
+      zh: ['联网搜索兜底模型 + 前端资源热更新（免重装升级）'],
+      en: ['Web Search fallback model + frontend hot update (no reinstall)'],
+    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'New' },
+        items: {
+          zh: [
+            '联网搜索兜底模型 — API 提供商底部可配置兜底端点（DeepSeek 等 Anthropic 兼容端点），请求携带 web_search 工具时自动转发，主提供商无需支持服务端搜索',
+            '支持 API Key 或环境变量两种密钥方式，工具名自动改写为 web_search_20250305 兼容版本化端点',
+            '前端资源热更新 — 设置页点击"更新至新版本"即可升级到最新版，无需重新安装；SHA256 校验 + 原子切换版本目录，更新失败自动回退',
+            '检查源多级降级 — GitHub raw → jsdelivr CDN → ghproxy 镜像（Gitee 预留），GitHub 卡住时自动切换；完整语义化版本比较（支持预发布）',
+            '版本指针与回滚 — 热更资源存于 ~/.tokenicode/web-resources，保留最近 2 版；重启后更新生效',
+            '引擎变更自动引导 — 更新包含 Rust 引擎变更时提示下载安装包，不走热更',
+          ],
+          en: [
+            'Web Search fallback model — configure a fallback endpoint (DeepSeek etc.) at the bottom of API providers; requests carrying the web_search tool are routed there automatically, no server-side search needed on the main provider',
+            'API key or env-var key modes; tool name auto-rewritten to web_search_20250305 for versioned endpoints',
+            'Frontend hot update — click "Update to" in Settings to upgrade without reinstalling; SHA256 verification + atomic version-dir switch with rollback',
+            'Multi-source check — GitHub raw → jsdelivr CDN → ghproxy mirror (Gitee reserved); full semver comparison with prerelease support',
+            'Version pointer & rollback — hot-updated assets live in ~/.tokenicode/web-resources with the last 2 versions kept; applies after restart',
+            'Engine-change detection — releases containing Rust changes route to the installer instead of hot update',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixed' },
+        items: {
+          zh: [
+            '升级后本地设置不再丢失 — 热更协议切换导致窗口 origin 变化，字号 / 主题 / 模型 / 头像等 localStorage 设置会被清空；现改为磁盘持久化 + 旧数据一次性迁移，今后任何 origin 变更都不影响',
+            '自动压缩与上下文条真正生效 — 此前只统计非缓存输入，带缓存的长会话（缓存通常占上下文 95% 以上）永远到不了阈值、自动压缩从不触发、上下文条常年显示 1~2%；现按完整请求上下文（含缓存）计算。同时修复多会话互相阻断、大上下文压缩被误报"超时"',
+            '联网兜底模型启用开关 / 密钥 / 端点保存后重启不丢失',
+          ],
+          en: [
+            'Local settings no longer lost on upgrade — the hot-update protocol switch changed the window origin and wiped localStorage settings (font size / theme / model / avatars); settings are now persisted to disk with a one-time migration of old data, immune to any future origin change',
+            'Auto-compact & context bar now actually work — previously only non-cached input was counted, so long cached sessions (cache is typically 95%+ of context) never reached the threshold, auto-compact never fired and the bar stayed at 1-2%; now uses full request context including cache. Also fixed cross-session blocking and false "compact timed out" on large compacts',
+            'Web Search fallback enable toggle / key / endpoint now persist across restarts',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '0.10.0',
     date: '2026-04-05',
     highlights: {

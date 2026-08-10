@@ -24,8 +24,11 @@ use std::os::windows::process::CommandExt;
 #[serde(rename_all = "camelCase")]
 pub enum CliSource {
     Official = 0,
-    System = 1,
-    AppLocal = 2,
+    // The app's own installs take precedence over system globals (an in-app
+    // CLI update must not be shadowed by an older system copy). Listed before
+    // System so tier ordering matches collect_tiered_dirs' emission order.
+    AppLocal = 1,
+    System = 2,
     VersionManager = 3,
     Dynamic = 4,
 }

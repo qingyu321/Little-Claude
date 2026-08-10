@@ -7,7 +7,9 @@ use tokio::process::Command;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use crate::commands::anthropic_proxy::WebSearchFallbackConfig;
 use crate::commands::claude_process::{ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager};
+use crate::commands::provider::ApiProvider;
 use crate::commands::metadata::session_names_path;
 #[cfg(feature = "video-analysis")]
 use crate::commands::video_analysis::inject_video_analysis_multimodal_env;
@@ -69,6 +71,42 @@ fn consume_pending_permission_request(session_id: &str, request_id: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     map.remove(&permission_key(session_id, request_id));
+}
+
+/// 从 provider 配置解析联网搜索兜底端点（密钥转明文）：
+/// apiKey 非空优先，否则读环境变量 `env_var`（在 Little Claude 进程环境中）。
+/// 停用（enabled=false）、base_url 为空、密钥为空或环境变量未设置 → None（请求继续走主端点）。
+fn build_fallback_config(provider: &ApiProvider) -> Option<WebSearchFallbackConfig> {
+    let fb = provider.web_search_fallback.as_ref()?;
+    if !fb.enabled || fb.base_url.trim().is_empty() {
+        return None;
+    }
+    let key = fb
+        .api_key
+        .as_deref()
+        .filter(|k| !k.trim().is_empty() && !k.starts_with("TENC1:"))
+        .map(|k| k.trim().to_string())
+        .or_else(|| {
+            let var = fb.env_var.as_deref()?.trim();
+            if var.is_empty() {
+                return None;
+            }
+            match std::env::var(var) {
+                Ok(v) if !v.trim().is_empty() => Some(v),
+                _ => {
+                    eprintln!(
+                        "[LITTLECLAUDE:provider] web-search fallback env var '{}' 未设置，跳过兜底",
+                        var
+                    );
+                    None
+                }
+            }
+        })?;
+    Some(WebSearchFallbackConfig {
+        base_url: fb.base_url.clone(),
+        api_key: key,
+        model: fb.model.clone().unwrap_or_default(),
+    })
 }
 
 #[tauri::command]
@@ -189,12 +227,16 @@ pub async fn start_claude_session(
     let (mut resolved_env, inherited_keys_to_remove, provider_extra_args, _provider_used) =
         crate::resolve_provider_env(params.provider_id.as_deref())?;
 
-    // ─── Anthropic→OpenAI conversion proxy ──────────────────────────────
+    // ─── Local proxy (conversion & web-search fallback) ────────────────
     // Claude CLI only speaks the Anthropic Messages API. When the provider
     // exposes ONLY an OpenAI-compatible endpoint (api_format = "openai"),
     // start a local proxy that converts Anthropic requests to OpenAI format
     // and forwards them to the real endpoint, then converts the responses
-    // back. Point ANTHROPIC_BASE_URL at the proxy.
+    // back. When a web-search fallback endpoint is configured, the proxy is
+    // started regardless of format: requests carrying the web_search server
+    // tool are forwarded to the fallback endpoint (Anthropic format),
+    // everything else passes through to the main endpoint untouched.
+    // Point ANTHROPIC_BASE_URL at the proxy.
     if cli_backend == "claude" {
         if let Some(ref provider_id) = params.provider_id {
             if let Ok(providers_file) = crate::commands::provider::load_providers() {
@@ -203,7 +245,9 @@ pub async fn start_claude_session(
                     .iter()
                     .find(|p| p.id == *provider_id)
                 {
-                    if provider.api_format == "openai" {
+                    let fallback = build_fallback_config(provider);
+                    let need_proxy = provider.api_format == "openai" || fallback.is_some();
+                    if need_proxy {
                         let has_key = provider
                             .api_key
                             .as_ref()
@@ -214,14 +258,26 @@ pub async fn start_claude_session(
                                     &session_id,
                                     provider.base_url.clone(),
                                     provider.api_key.clone().unwrap_or_default(),
+                                    provider.api_format.clone(),
+                                    fallback.clone(),
                                 )
                                 .await?;
                             eprintln!(
-                                "[LITTLECLAUDE:proxy] Routing session {} through conversion proxy → {}",
+                                "[LITTLECLAUDE:proxy] Routing session {} through proxy → {}",
                                 session_id, proxy_url
                             );
                             resolved_env
                                 .insert("ANTHROPIC_BASE_URL".to_string(), proxy_url);
+                            // 凭据交换：兜底启用时把 CLI 侧的 ANTHROPIC_API_KEY 换成兜底
+                            // key，保证服务端工具结果的加密内容（encrypted_content）解密
+                            // 密钥与兜底端点收到的凭据一致。代理用自己持有的 key 做上游
+                            // 认证，完全忽略 CLI 发来的 header。
+                            if let Some(fb) = &fallback {
+                                resolved_env.insert(
+                                    "ANTHROPIC_API_KEY".to_string(),
+                                    fb.api_key.clone(),
+                                );
+                            }
                         }
                     }
                 }
@@ -1249,7 +1305,7 @@ pub(crate) fn load_tracked_sessions() -> std::collections::HashSet<String> {
     let path = tracked_sessions_path();
     let mut set = std::collections::HashSet::new();
     if let Ok(file) = std::fs::File::open(&path) {
-        for line in std::io::BufReader::new(file).lines().flatten() {
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
             let trimmed = line.trim().to_string();
             if !trimmed.is_empty() {
                 set.insert(trimmed);
@@ -1353,7 +1409,7 @@ pub async fn track_session(session_id: String) -> Result<(), String> {
     if let Ok(file) = std::fs::File::open(&path) {
         let already_tracked = std::io::BufReader::new(file)
             .lines()
-            .flatten()
+            .map_while(Result::ok)
             .any(|l| l.trim() == session_id);
         if already_tracked {
             return Ok(());
@@ -1378,7 +1434,7 @@ pub(crate) fn cleanup_tracked_sessions() {
     }
     use std::io::{BufRead, Write};
     let lines: Vec<String> = match std::fs::File::open(&path) {
-        Ok(f) => std::io::BufReader::new(f).lines().flatten().collect(),
+        Ok(f) => std::io::BufReader::new(f).lines().map_while(Result::ok).collect(),
         Err(_) => return,
     };
     let mut seen = std::collections::HashSet::new();
@@ -1413,7 +1469,7 @@ pub async fn delete_session(session_id: String, session_path: String) -> Result<
                 .map_err(|e| format!("Failed to read tracked sessions: {}", e))?;
             std::io::BufReader::new(file)
                 .lines()
-                .flatten()
+                .map_while(Result::ok)
                 .filter(|line| line.trim() != session_id)
                 .collect()
         };

@@ -461,8 +461,6 @@ export function InputBar() {
   const handleStderrLineRef = useRef<(line: string, sid: string) => void>(() => {});
   /** Last non-empty stderr line — shown to user if process exits without response */
   const lastStderrRef = useRef('');
-  /** Tracks whether auto-compact has been triggered in this session to avoid repeat fires */
-  const autoCompactFiredRef = useRef(false);
   /** Tracks ExitPlanMode in current turn for Code mode auto-restart */
   const exitPlanModeSeenRef = useRef(false);
   /** When true, next handleSubmit skips creating user message bubble (Code mode silent restart) */
@@ -471,7 +469,6 @@ export function InputBar() {
   // Stream processing hook — handles foreground + background stream messages
   const { handleStreamMessage } = useStreamProcessor({
     exitPlanModeSeenRef,
-    autoCompactFiredRef,
     silentRestartRef,
     handleSubmitRef,
     handleStderrLineRef,
@@ -1109,7 +1106,6 @@ export function InputBar() {
         sessionStdinId = preGeneratedId;
 
         // Reset guards for the new session
-        autoCompactFiredRef.current = false;
         exitPlanModeSeenRef.current = false;
 
         // TK-329 fix: register stdinId → tabId mapping BEFORE listeners,
@@ -1117,6 +1113,11 @@ export function InputBar() {
         const earlyTabId = useSessionStore.getState().selectedSessionId;
         if (earlyTabId) {
           useSessionStore.getState().registerStdinTab(preGeneratedId, earlyTabId);
+          // B3: the auto-compact fired flag is per-tab (sessionMeta) — reset on
+          // every spawn (new / resume / restart) so each session process gets
+          // its own at-most-one compact. Was a single ref shared by all sessions
+          // of the one InputBar instance: one session firing blocked all others.
+          useChatStore.getState().setSessionMeta(earlyTabId, { autoCompactFired: false });
         }
 
         // Register listeners BEFORE starting the session

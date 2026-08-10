@@ -1,0 +1,211 @@
+/* Desktop pet window styles — fully self-contained (NOT the main app stylesheet).
+   Dark fixed palette so the pet reads on any wallpaper. */
+
+.pet-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: #ececef;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* --- Pet canvas --- */
+
+.pet-stage {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  cursor: grab;
+  touch-action: none;
+}
+.pet-stage:active {
+  cursor: grabbing;
+}
+
+/* --- Bubble --- */
+
+.pet-bubble {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 11px;
+  background: rgba(28, 28, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  animation: pet-fade-in 0.18s ease;
+  pointer-events: none;
+}
+.pet-bubble-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.pet-bubble-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.pet-bubble-text {
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pet-token-line {
+  font-size: 10px;
+  line-height: 1.3;
+  color: rgba(236, 236, 239, 0.62);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pet-token-cache {
+  opacity: 0.85;
+}
+
+@keyframes pet-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* --- Badge --- */
+
+.pet-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  animation: pet-fade-in 0.18s ease;
+}
+.pet-badge-item {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+.pet-badge-item.claude {
+  background: rgba(196, 114, 82, 0.22);
+  color: #e8b49b;
+  border: 1px solid rgba(196, 114, 82, 0.5);
+}
+.pet-badge-item.codex {
+  background: rgba(69, 184, 168, 0.22);
+  color: #8fd8ce;
+  border: 1px solid rgba(69, 184, 168, 0.5);
+}
+
+/* --- Token panel (badge expanded) --- */
+
+.pet-badge-wrap {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+.pet-badge-wrap .pet-badge {
+  position: static;
+  display: flex;
+  gap: 4px;
+}
+.pet-token-panel {
+  margin-top: 6px;
+  padding: 8px;
+  background: rgba(28, 28, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  animation: pet-fade-in 0.15s ease;
+  display: flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.pet-token-agent {
+  min-width: 84px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+.pet-token-agent.claude {
+  background: rgba(196, 114, 82, 0.12);
+}
+.pet-token-agent.codex {
+  background: rgba(69, 184, 168, 0.12);
+}
+.pet-token-agent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.pet-token-agent-head .pet-badge-item {
+  padding: 0 6px;
+  font-size: 10px;
+}
+.pet-token-agent-total {
+  font-size: 10px;
+  color: rgba(236, 236, 239, 0.85);
+  font-weight: 600;
+}
+.pet-token-agent-row {
+  font-size: 10px;
+  line-height: 1.5;
+  color: rgba(236, 236, 239, 0.62);
+}
+
+/* --- Context menu --- */
+
+.pet-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  background: transparent;
+}
+.pet-menu {
+  position: absolute;
+  z-index: 6;
+  min-width: 150px;
+  padding: 4px;
+  background: rgba(28, 28, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  animation: pet-fade-in 0.12s ease;
+}
+.pet-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  background: none;
+  border: none;
+  color: #ececef;
+  font-size: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pet-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}

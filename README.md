@@ -18,6 +18,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **多模态工具扩展** — 视频分析（自动下载 → ASR 转写 → 多模态识图 → 交叉验证）、语音输入（自动选择核显 / 独显 / CPU 压缩）、动态壁纸；另有面试助手模块
 - **性能与体验** — 消息虚拟化（长会话依旧顺滑）、内容模糊搜索（带关键词高亮与位置定位）、tok/s 实时速度显示、消息选中复制、中英双语、多主题
 - **便携单 EXE** — 免安装、免管理员、无临时解压、内置 WebView2 检测；JS 混淆闭源打包
+- **前端资源热更新** — 设置页一键热更到最新版，免重装升级；多源检查（GitHub → CDN → 镜像）在 GitHub 卡住时自动降级
 
 ## 与市面同类产品的差异
 
@@ -43,6 +44,20 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **数据完全自主** — 会话以 JSONL 存于本地，可导出 Markdown / JSON，随时迁移，不绑定任何云账号
 
 ## 版本历程
+
+### v1.1.2 (2026-08-10) — 联网搜索兜底 + 前端资源热更新
+
+- **联网搜索兜底模型** — API 提供商底部新增兜底端点配置（如 DeepSeek Anthropic 兼容端点），请求携带 `web_search` 服务端工具时由本地代理自动转发执行搜索，主提供商无需支持服务端搜索（解决 opencode 等网关 401 "Model not supported"）
+- **工具名自动改写** — 代理把 `web_search` 规范化为版本化 `web_search_20250305` + `name` 字段，兼容 DeepSeek 等版本化端点；密钥支持直接输入或环境变量（二选一），TENC1 加密存储
+- **代理层架构扩展** — 现有 Anthropic→OpenAI 转换代理扩展为分发器：Anthropic 格式主端点走 SSE 字节流透传，OpenAI 格式维持转换，搜索请求独立路由到兜底端点
+- **热更新免重装升级** — 设置页"更新至新版本"一键应用：下载前端资源包（SHA256 校验防篡改）→ 解压完整性校验（index.html + manifest 版本匹配）→ 原子切换版本目录并提交指针，无需重新安装
+- **版本指针与回滚** — 热更资源存于 `~/.tokenicode/web-resources/`，版本化目录 `dist-vX.Y.Z` + `current.json` 指针；仅当指针存在时磁盘资源生效（优先于内嵌），保留最近 2 版可回滚；重启不丢
+- **多源检查与降级** — 检查清单 `latest.json`（仓库根目录，非 release 资产）由 `raw.githubusercontent.com → jsdelivr CDN → ghproxy 镜像` 依次读取（Gitee 预留），单源超时 5s 自动切换；GitHub 全挂时保留上次结果不误报
+- **完整语义化版本比较** — 支持 v 前缀与预发布后缀（`1.2.0-alpha.1 < 1.2.0`）；本地预发布可升正式版，正式版不降级到预发布
+- **引擎变更自动引导安装包** — 资源包清单 `rustChanged: true` 时 UI 改为"下载安装包"，热更路径不适用于 Rust 引擎变更
+- **联网兜底持久化修复** — 兜底模型的启用开关 / 密钥 / 端点保存后重启不丢失（渲染循环饿死防抖保存的根因修复）
+- **本地设置防丢** — 热更协议切换改变了窗口 origin，WebView2 按 origin 隔离 localStorage 会清空字号 / 主题 / 模型 / 头像等全部设置；现将 localStorage 镜像到 `~/.tokenicode/localstorage.json`（启动灌回 + 运行时异步落盘），并在首次启动时用隐藏窗口一次性迁移旧 origin 数据，今后任何 origin 变更都不丢设置
+- **自动压缩修复** — 此前触发条件与上下文条只统计非缓存 `input_tokens`，带提示词缓存的会话（缓存占 95%+）永远到不了阈值，功能形同虚设；现按完整请求上下文（input + cache_read + cache_creation）判断。另修复：多会话共享标志互相阻断（改 per-tab）、大上下文压缩被 15s 固定超时误报（改基于流活动判断）、后台会话无自动压缩
 
 ### v1.1.1 (2026-08-02) — 交付形态的里程碑
 

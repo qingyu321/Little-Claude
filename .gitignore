@@ -29,6 +29,8 @@ src-tauri/gen/
 
 # Installer files
 release-artifacts/
+dist-portable/
+web-dist/
 *.dmg
 *.exe
 *.msi
