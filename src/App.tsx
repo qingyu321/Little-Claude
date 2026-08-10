@@ -19,7 +19,6 @@ import { debugLog } from './lib/debug-log';
 import { useAutoUpdateCheck } from './hooks/useAutoUpdateCheck';
 import { usePetBridge } from './hooks/usePetBridge';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import './App.css';
 
 // Lazy-load heavy components not needed for first paint
 const CommandPalette = lazy(() => import('./components/commands/CommandPalette').then(m => ({ default: m.CommandPalette })));

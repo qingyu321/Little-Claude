@@ -1,5 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+// 全量样式（Tailwind）。必须在入口静态导入：异步引导把 App 拆成了独立 chunk，
+// 若样式在 App 里动态加载，index.html 不会生成 <link rel="stylesheet">，
+// 运行时注入在自定义协议下失败 → 页面无样式（一块一块的）。
+import "./App.css";
 import {
   ensureMigrated,
   seedFromDisk,
