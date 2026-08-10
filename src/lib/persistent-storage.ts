@@ -75,16 +75,13 @@ export async function ensureMigrated(): Promise<void> {
 
 /**
  * 从磁盘快照灌回当前 origin 的 localStorage。
- * 仅当当前 origin 的 localStorage 为空时才灌（= origin 变更 / 全新安装 /
- * 数据被清）。正常启动 localStorage 本就正确，跳过以免用旧磁盘数据覆盖
- * 新改动（如上次强杀未来得及落盘）。用原始 setItem 避免触发镜像回写。
+ * 磁盘数据优先：快照中的 key 无条件覆盖同名 key，快照没有的 key 保留。
+ * 不再要求 localStorage 为空——首次升级时新 origin 已被 persist 写入
+ * 新手默认值（如 fontSize 14），empty-only 会让磁盘里迁移恢复的真实
+ * 设置（18）永远灌不回去。快照 = 运行时镜像（400ms 防抖 + 页面隐藏冲刷），
+ * 过期窗口极小，覆盖可接受。用原始 setItem 避免触发镜像回写。
  */
 export async function seedFromDisk(): Promise<void> {
-  try {
-    if (localStorage.length > 0) return;
-  } catch {
-    return;
-  }
   const json = await invokeSafe<string>('load_ls_snapshot');
   if (!json) return; // 非 Tauri 或无快照
   let snapshot: Record<string, string>;

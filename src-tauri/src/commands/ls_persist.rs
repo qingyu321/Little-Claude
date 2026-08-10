@@ -133,12 +133,25 @@ fn old_origin_url() -> &'static str {
 
 /// 注入迁移窗口的脚本：等 __TAURI_INTERNALS__ 就绪后 dump localStorage 并回传。
 /// localStorage 与 IPC 桥均不依赖 React，页面一加载即可用。
-const DUMP_SCRIPT: &str = r#"(function(){try{
-if(!window.__TAURI_INTERNALS__||window.__lcDumpSent)return;
-var d={};for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);d[k]=localStorage.getItem(k);}
-window.__lcDumpSent=true;
-window.__TAURI_INTERNALS__.invoke('receive_ls_migration_dump',{dump:JSON.stringify(d)});
-}catch(e){}})();"#;
+///
+/// 通过 initialization_script 注入（document_start，不受页面 CSP script-src
+/// 限制——v1.1.2 的 CSP 无 'unsafe-eval'，webview.eval 会被拒绝导致迁移静默失败）。
+/// __TAURI_INTERNALS__ 由 Tauri 在 document_start 注入，注入顺序不确定，
+/// 故轮询等待最多 ~5s；__lcDumpSent 防重发（init 脚本与 eval 双保险共用）。
+const DUMP_SCRIPT: &str = r#"(function(){
+if(window.__lcDumpSent)return;
+var tries=0;
+function tryDump(){
+  if(window.__lcDumpSent)return;
+  if(!window.__TAURI_INTERNALS__){if(++tries<50)setTimeout(tryDump,100);return;}
+  try{
+    var d={};for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);d[k]=localStorage.getItem(k);}
+    window.__lcDumpSent=true;
+    window.__TAURI_INTERNALS__.invoke('receive_ls_migration_dump',{dump:JSON.stringify(d)});
+  }catch(e){if(++tries<50)setTimeout(tryDump,100);}
+}
+tryDump();
+})();"#;
 
 /// 实际迁移：建隐藏窗口→轮询 eval dump→写快照→销毁窗口。返回迁移的 key 数。
 async fn run_migration(app: &AppHandle) -> Result<usize, String> {
@@ -154,6 +167,9 @@ async fn run_migration(app: &AppHandle) -> Result<usize, String> {
         .visible(false)
         .focused(false)
         .inner_size(160.0, 120.0)
+        // 主通道：init 脚本绕过 CSP（eval 会被 script-src 拒）。页面加载即注入，
+        // 无需等轮询。
+        .initialization_script(DUMP_SCRIPT)
         .build()
         .map_err(|e| format!("创建迁移窗口失败: {}", e))?;
 
@@ -177,14 +193,16 @@ async fn run_migration(app: &AppHandle) -> Result<usize, String> {
         serde_json::from_str(&dump).map_err(|e| format!("dump 解析失败: {}", e))?;
     let count = map.len();
 
-    // 写入快照：已存在的 key 不覆盖（磁盘数据优先，迁移只补缺）。
+    // 写入快照：旧 origin 数据优先（覆盖）。迁移只在首次升级时跑一次，此时快照
+    // 中可能已有 installMirror 写下的"默认值"（如 fontSize=14 的新手默认），
+    // 而旧 origin 是用户真实设置（fontSize=18）——不覆盖会永久丢设置。
     {
         let state = snapshot_state();
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         ensure_loaded(&mut guard);
         let snap = guard.as_mut().ok_or_else(|| "快照未加载".to_string())?;
         for (k, v) in map {
-            snap.entry(k).or_insert(v);
+            snap.insert(k, v);
         }
         flush_locked(snap)?;
     }
@@ -194,7 +212,11 @@ async fn run_migration(app: &AppHandle) -> Result<usize, String> {
 
 /// 一次性迁移入口（前端 bootstrap 在灌盘前调用）。
 /// dev 构建 origin 从未变过（一直是 Vite dev server），直接跳过。
-/// 返回迁移的 key 数；任何失败都置标志并返回 Ok（非致命）。
+/// 返回迁移的 key 数。
+///
+/// 失败处理：写入 `failed:<unix_ts>` 而非完成标志，距上次失败 ≥6h 时
+/// 自动重试（首跑失败多为旧 origin 暂不可达 / 首次 CSP 拦截等可恢复原因，
+/// 写死会导致设置永久丢失）。成功才写完成标志 "1"，之后不再尝试。
 #[tauri::command]
 pub async fn ensure_migrated(app: AppHandle) -> Result<u64, String> {
     if cfg!(debug_assertions) {
@@ -204,8 +226,24 @@ pub async fn ensure_migrated(app: AppHandle) -> Result<u64, String> {
         Ok(p) => p,
         Err(_) => return Ok(0),
     };
-    if flag.exists() {
-        return Ok(0);
+
+    // 完成标志 → 永不再迁移。
+    if let Ok(content) = std::fs::read_to_string(&flag) {
+        if content.trim() == "1" {
+            return Ok(0);
+        }
+        // 失败时间戳 → 距上次失败 < 6h 则跳过（不拖慢每次启动）。
+        if let Some(ts) = content.trim().strip_prefix("failed:") {
+            if let Ok(ts) = ts.parse::<u64>() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if now.saturating_sub(ts) < 6 * 3600 {
+                    return Ok(0);
+                }
+            }
+        }
     }
 
     let migrated = match run_migration(&app).await {
@@ -219,10 +257,17 @@ pub async fn ensure_migrated(app: AppHandle) -> Result<u64, String> {
         }
     };
 
-    // 无论成败都置标志，避免每次启动重试拖慢。
     if let Some(parent) = flag.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&flag, "1");
+    if migrated > 0 {
+        let _ = std::fs::write(&flag, "1");
+    } else {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = std::fs::write(&flag, format!("failed:{}", ts));
+    }
     Ok(migrated as u64)
 }
