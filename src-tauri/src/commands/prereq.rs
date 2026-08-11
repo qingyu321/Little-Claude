@@ -12,6 +12,9 @@ pub(crate) struct PrerequisiteItem {
     pub(crate) version: Option<String>,
     pub(crate) installable: bool,
     pub(crate) required: bool,
+    /// 手动下载 URL——自动安装失败时的兜底引导（无手动安装途径的项为 None）
+    #[serde(rename = "manualUrl")]
+    pub(crate) manual_url: Option<String>,
 }
 
 // ── Helpers: individual checks with timeout ──────────────────────────────
@@ -38,6 +41,7 @@ async fn check_cli_item() -> PrerequisiteItem {
                 version: status.version,
                 installable: true,
                 required: true,
+                manual_url: None,
             }
         }
         Ok(Err(e)) => {
@@ -50,6 +54,7 @@ async fn check_cli_item() -> PrerequisiteItem {
                 version: Some(e),
                 installable: true,
                 required: true,
+                manual_url: None,
             }
         }
         Err(_elapsed) => {
@@ -62,6 +67,7 @@ async fn check_cli_item() -> PrerequisiteItem {
                 version: Some("检测超时".into()),
                 installable: true,
                 required: true,
+                manual_url: None,
             }
         }
     }
@@ -85,6 +91,7 @@ async fn check_git_item() -> Option<PrerequisiteItem> {
             version: None,
             installable: true,
             required: true,
+            manual_url: Some("https://git-scm.com/downloads/win".into()),
         })
     }
     #[cfg(not(target_os = "windows"))]
@@ -115,6 +122,7 @@ async fn check_node_item() -> PrerequisiteItem {
                 version: status.node_version,
                 installable: true,
                 required: false,
+                manual_url: Some("https://nodejs.org/zh-cn/download/".into()),
             }
         }
         Ok(Err(e)) => {
@@ -127,6 +135,7 @@ async fn check_node_item() -> PrerequisiteItem {
                 version: Some(e),
                 installable: true,
                 required: false,
+                manual_url: Some("https://nodejs.org/zh-cn/download/".into()),
             }
         }
         Err(_elapsed) => {
@@ -139,6 +148,7 @@ async fn check_node_item() -> PrerequisiteItem {
                 version: Some("检测超时".into()),
                 installable: true,
                 required: false,
+                manual_url: Some("https://nodejs.org/zh-cn/download/".into()),
             }
         }
     }
@@ -164,6 +174,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                     version: Some("已登录".into()),
                     installable: true,
                     required: false,
+                    manual_url: None,
                 };
             }
             // Not logged in — check if any provider has an API key
@@ -183,6 +194,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                             version: Some("API Key".into()),
                             installable: true,
                             required: false,
+                            manual_url: None,
                         }
                     } else {
                         eprintln!("[prereq] check_auth_item no auth found");
@@ -194,6 +206,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                             version: None,
                             installable: true,
                             required: false,
+                            manual_url: None,
                         }
                     }
                 }
@@ -207,6 +220,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                         version: None,
                         installable: true,
                         required: false,
+                        manual_url: None,
                     }
                 }
             }
@@ -221,6 +235,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                 version: Some(e),
                 installable: true,
                 required: false,
+                manual_url: None,
             }
         }
         Err(_elapsed) => {
@@ -233,6 +248,7 @@ async fn check_auth_item() -> PrerequisiteItem {
                 version: Some("检测超时".into()),
                 installable: true,
                 required: false,
+                manual_url: None,
             }
         }
     }
@@ -260,6 +276,7 @@ async fn check_ollama_item() -> PrerequisiteItem {
                 version: status.version,
                 installable: false,
                 required: false,
+                manual_url: Some("https://ollama.com/download".into()),
             }
         }
         _ => {
@@ -272,6 +289,7 @@ async fn check_ollama_item() -> PrerequisiteItem {
                 version: None,
                 installable: false,
                 required: false,
+                manual_url: Some("https://ollama.com/download".into()),
             }
         }
     }
@@ -321,6 +339,7 @@ pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
                     version: Some("检测超时，请重试".into()),
                     installable: true,
                     required: true,
+                    manual_url: None,
                 },
                 PrerequisiteItem {
                     key: "node".into(),
@@ -330,6 +349,7 @@ pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
                     version: Some("检测超时，请重试".into()),
                     installable: true,
                     required: false,
+                    manual_url: Some("https://nodejs.org/zh-cn/download/".into()),
                 },
                 PrerequisiteItem {
                     key: "auth".into(),
@@ -339,6 +359,7 @@ pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
                     version: Some("检测超时，请重试".into()),
                     installable: true,
                     required: false,
+                    manual_url: None,
                 },
                 PrerequisiteItem {
                     key: "ollama".into(),
@@ -348,6 +369,7 @@ pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
                     version: None,
                     installable: false,
                     required: false,
+                    manual_url: Some("https://ollama.com/download".into()),
                 },
             ])
         }

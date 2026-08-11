@@ -1002,6 +1002,7 @@ export interface PrerequisiteItem {
   version: string | null;
   installable: boolean;
   required: boolean;
+  manualUrl: string | null;  // 手动下载 URL（自动安装失败时的兜底引导）
 }
 
 export interface PrereqInstallProgress {

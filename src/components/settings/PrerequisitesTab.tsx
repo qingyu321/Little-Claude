@@ -162,10 +162,6 @@ export function PrerequisitesTab() {
     load();
   }, [load]);
 
-  const handleOllamaDownload = useCallback(() => {
-    window.open('https://ollama.com/download', '_blank');
-  }, []);
-
   // Theme-aware colors
   const isDark = theme === 'dark';
   const cardBg = isDark ? 'bg-white/5' : 'bg-black/[0.03]';
@@ -233,7 +229,7 @@ export function PrerequisitesTab() {
                         {t('settings.prereq.required')}
                       </span>
                     )}
-                    {!item.required && item.key !== 'ollama' && (
+                    {!item.required && item.installable && (
                       <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-500/10 text-blue-400 font-medium">
                         {t('settings.prereq.optional')}
                       </span>
@@ -242,6 +238,9 @@ export function PrerequisitesTab() {
                   <p className={`text-xs ${textSecondary}`}>{item.description}</p>
                   {item.version && item.status === 'ok' && !hasError && !isInstalling && (
                     <p className="text-xs text-green-500/70 mt-0.5 truncate">{item.version}</p>
+                  )}
+                  {hasError && item.manualUrl && (
+                    <p className="text-xs text-yellow-500/80 mt-0.5">{t('settings.prereq.errorHint')}</p>
                   )}
                   {hasError && (
                     <p className="text-xs text-red-400 mt-0.5 truncate">{state?.message}</p>
@@ -253,16 +252,9 @@ export function PrerequisitesTab() {
 
                 {/* Action button */}
                 <div className="flex-shrink-0">
-                  {item.key === 'ollama' ? (
-                    item.status !== 'ok' && (
-                      <button
-                        onClick={handleOllamaDownload}
-                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${btnOutline}`}
-                      >
-                        {t('settings.prereq.download')}
-                      </button>
-                    )
-                  ) : item.status !== 'ok' && item.installable && !isInstalling ? (
+                  {item.status === 'ok' ? (
+                    <span className="text-xs text-green-500 font-medium">{t('settings.prereq.installed')}</span>
+                  ) : item.installable && !isInstalling ? (
                     <button
                       onClick={() => handleInstall(item.key)}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${btnPrimary}`}
@@ -270,8 +262,13 @@ export function PrerequisitesTab() {
                       <IconInstall />
                       {t('settings.prereq.install')}
                     </button>
-                  ) : item.status === 'ok' ? (
-                    <span className="text-xs text-green-500 font-medium">{t('settings.prereq.installed')}</span>
+                  ) : item.manualUrl && (!item.installable || hasError) ? (
+                    <button
+                      onClick={() => item.manualUrl && window.open(item.manualUrl, '_blank')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${btnOutline}`}
+                    >
+                      {t('settings.prereq.manualDownload')}
+                    </button>
                   ) : null}
                 </div>
               </div>

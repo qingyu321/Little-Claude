@@ -2482,7 +2482,7 @@ async fn install_node_env_inner(
     }
 
     let bytes = archive_bytes
-        .ok_or_else(|| format!("All Node.js download sources failed: {}", last_err))?;
+        .ok_or_else(|| format!("All Node.js download sources failed: {}", strip_urls(&last_err)))?;
 
     // 下载完成后、解压前再查一次取消（下载与解压之间是长 await 边界）
     if scope.is_cancelled() {
@@ -2669,7 +2669,7 @@ pub(crate) async fn install_git_bash_inner(
     }
 
     let bytes =
-        archive_bytes.ok_or_else(|| format!("All Git download sources failed: {}", last_err))?;
+        archive_bytes.ok_or_else(|| format!("All Git download sources failed: {}", strip_urls(&last_err)))?;
 
     if scope.is_cancelled() {
         cleanup_created_dir(git_dir_existed, &install_dir);
@@ -2808,18 +2808,33 @@ async fn download_with_progress(
 // ─── Download checksum verification (S9) ────────────────────────────────────
 
 /// Extract the SHA-256 digest for `filename` from a checksum file body.
-/// Supports both node SHASUMS256.txt lines ("<hex>  <filename>") and GitHub
-/// release ".sha256" lines ("<hex> *<filename>").
-fn extract_checksum(text: &str, filename: &str) -> Option<String> {
+/// Supports two-field lines:
+/// - node SHASUMS256.txt:   "<hex>  <filename>"
+/// - GitHub release .sha256: "<hex> *<filename>"
+/// When `single_value_ok`, a single-field line (bare 64-hex digest) is also
+/// accepted — mirrors like Huawei Cloud publish "{file}.sha256" files that
+/// contain only the digest, and the caller enables this only for adjacent-
+/// checksum URLs where ownership is unambiguous.
+/// Malformed lines are skipped instead of aborting the whole file: a stray
+/// line must not kill a valid entry on a later line.
+fn extract_checksum(text: &str, filename: &str, single_value_ok: bool) -> Option<String> {
     for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
         let mut parts = line.split_whitespace();
-        let hex = parts.next()?;
-        let name = parts.next()?.trim_start_matches('*');
-        if hex.len() == 64
-            && hex.chars().all(|c| c.is_ascii_hexdigit())
-            && name == filename
-        {
-            return Some(hex.to_ascii_lowercase());
+        let Some(hex) = parts.next() else { continue };
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        match parts.next() {
+            // 单段行：仅限 "{file}.sha256" 紧邻校验文件（华为云等镜像的裸 hash 格式）
+            None if single_value_ok => return Some(hex.to_ascii_lowercase()),
+            Some(name) if name.trim_start_matches('*') == filename => {
+                return Some(hex.to_ascii_lowercase());
+            }
+            _ => continue,
         }
     }
     None
@@ -2838,13 +2853,50 @@ async fn fetch_checksum_for(
         return None;
     }
     let text = resp.text().await.ok()?;
-    extract_checksum(&text, filename)
+    // "{file}.sha256" 是紧邻校验约定：文件里的裸 hash 即目标文件的摘要。
+    // SHASUMS256.txt（多文件清单）保持严格——无文件名的行不算匹配。
+    let single_value_ok = checksum_url.ends_with(&format!("{}.sha256", filename));
+    extract_checksum(&text, filename, single_value_ok)
 }
 
 /// SHA-256 hex digest of a byte slice (lowercase).
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(data))
+}
+
+/// Remove URLs from an error message for user-facing display.
+/// Full details (including per-source URLs) remain in the stderr log; the
+/// UI shows only the cause category so users aren't confronted with a wall
+/// of mirror links when every download source fails.
+fn strip_urls(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while let Some(start) = rest.find("http") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        // URL 终止于空白、右括号，或"冒号+空白"（"https://...exe: msg" 中冒号是
+        // URL 与消息的分隔符；端口冒号后必跟数字/斜杠，不受影响）
+        let end = tail
+            .char_indices()
+            .find(|(i, c)| {
+                if *c == ':' {
+                    (i + 1 >= tail.len())
+                        || matches!(
+                            tail[i + 1..].chars().next(),
+                            Some(n) if n.is_whitespace() || n == ')'
+                        )
+                } else {
+                    c.is_whitespace() || *c == ')'
+                }
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(tail.len());
+        out.push_str("[url]");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -2856,17 +2908,42 @@ mod checksum_tests {
         let text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  node-v22.22.0-win-x64.zip\n\
                     deadbeef00000000000000000000000000000000000000000000000000000000  node-v22.22.0-darwin-arm64.tar.gz\n";
         assert_eq!(
-            extract_checksum(text, "node-v22.22.0-win-x64.zip").as_deref(),
+            extract_checksum(text, "node-v22.22.0-win-x64.zip", false).as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
-        assert!(extract_checksum(text, "node-v22.22.0-linux-x64.tar.gz").is_none());
+        assert!(extract_checksum(text, "node-v22.22.0-linux-x64.tar.gz", false).is_none());
     }
 
     #[test]
     fn parses_github_star_format() {
         let text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 *PortableGit-2.47.1.2-64-bit.7z.exe\n";
         assert_eq!(
-            extract_checksum(text, "PortableGit-2.47.1.2-64-bit.7z.exe").as_deref(),
+            extract_checksum(text, "PortableGit-2.47.1.2-64-bit.7z.exe", false).as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+    }
+
+    #[test]
+    fn parses_single_field_checksum_when_allowed() {
+        // 华为云等镜像的 "{file}.sha256" 是裸 hash 单段格式（实测
+        // d73f0c1a42... 即此形态）——这是 git-bash 自动安装此前三源全灭的根因
+        let bare = "d73f0c1a42afbabe43862bd5abf5a646798125bc33cc02b7da7bbaeddae948f0\n";
+        assert_eq!(
+            extract_checksum(bare, "PortableGit-2.47.1.2-64-bit.7z.exe", true).as_deref(),
+            Some("d73f0c1a42afbabe43862bd5abf5a646798125bc33cc02b7da7bbaeddae948f0")
+        );
+        // 严格模式（SHASUMS256.txt 等）下单段行不算匹配
+        assert!(extract_checksum(bare, "PortableGit-2.47.1.2-64-bit.7z.exe", false).is_none());
+    }
+
+    #[test]
+    fn skips_bad_lines_instead_of_aborting() {
+        // 坏行/空行不能杀死后面的有效条目（原实现 `?` 遇到单段行即整体返回 None）
+        let text = "not-a-checksum  file.zip\n\
+                    \n\
+                    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  file.zip\n";
+        assert_eq!(
+            extract_checksum(text, "file.zip", false).as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
     }
@@ -2875,16 +2952,28 @@ mod checksum_tests {
     fn normalizes_uppercase_hex() {
         let text = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  file.zip\n";
         assert_eq!(
-            extract_checksum(text, "file.zip").as_deref(),
+            extract_checksum(text, "file.zip", false).as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
     }
 
     #[test]
     fn rejects_malformed_lines() {
-        assert!(extract_checksum("not-a-checksum  file.zip\n", "file.zip").is_none());
-        assert!(extract_checksum("abc  file.zip\n", "file.zip").is_none());
-        assert!(extract_checksum("", "file.zip").is_none());
+        assert!(extract_checksum("not-a-checksum  file.zip\n", "file.zip", false).is_none());
+        assert!(extract_checksum("abc  file.zip\n", "file.zip", false).is_none());
+        assert!(extract_checksum("", "file.zip", false).is_none());
+        // 单段但非 64 位 hex：即使允许单段也不能接受
+        assert!(extract_checksum("abc\n", "file.zip", true).is_none());
+    }
+
+    #[test]
+    fn strips_urls_for_user_facing_messages() {
+        assert_eq!(
+            strip_urls("Source https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/PortableGit-2.47.1.2-64-bit.7z.exe: checksum unavailable (https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/PortableGit-2.47.1.2-64-bit.7z.exe.sha256)"),
+            "Source [url]: checksum unavailable ([url])"
+        );
+        assert_eq!(strip_urls("no url here"), "no url here");
+        assert_eq!(strip_urls(""), "");
     }
 
     #[test]

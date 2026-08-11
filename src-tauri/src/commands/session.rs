@@ -494,9 +494,18 @@ pub async fn start_claude_session(
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
             declared_context_window.to_string(),
         );
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS is the only window override that bypasses
+        // the CLI's >200K cap on AUTO_COMPACT_WINDOW (issue anthropics/claude-code#57964).
+        // Without it, unknown third-party models (e.g. deepseek-v4-flash via gateway)
+        // are assumed to have an ~80K window and the CLI compacts at ~70K even though
+        // the API window is 1M. This makes the declared window actually take effect.
+        resolved_env.insert(
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+            declared_context_window.to_string(),
+        );
         eprintln!(
-            "[LITTLECLAUDE] Set CLAUDE_CODE_AUTO_COMPACT_WINDOW={} for model {:?}",
-            declared_context_window, params.model
+            "[LITTLECLAUDE] Set CLAUDE_CODE_AUTO_COMPACT_WINDOW={} and CLAUDE_CODE_MAX_CONTEXT_TOKENS={} for model {:?}",
+            declared_context_window, declared_context_window, params.model
         );
     }
 
