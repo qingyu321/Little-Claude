@@ -59,6 +59,12 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **本地设置防丢** — 热更协议切换改变了窗口 origin，WebView2 按 origin 隔离 localStorage 会清空字号 / 主题 / 模型 / 头像等全部设置；现将 localStorage 镜像到 `~/.tokenicode/localstorage.json`（启动灌回 + 运行时异步落盘），并在首次启动时用隐藏窗口一次性迁移旧 origin 数据，今后任何 origin 变更都不丢设置
 - **自动压缩修复** — 此前触发条件与上下文条只统计非缓存 `input_tokens`，带提示词缓存的会话（缓存占 95%+）永远到不了阈值，功能形同虚设；现按完整请求上下文（input + cache_read + cache_creation）判断。另修复：多会话共享标志互相阻断（改 per-tab）、大上下文压缩被 15s 固定超时误报（改基于流活动判断）、后台会话无自动压缩
 
+**8月11日完整版发布：**
+
+- **动态壁纸卡顿修复** — 带虚拟显示适配器 / 混合显卡的机器上 WebView2 会回退软件渲染，全屏视频壁纸拖垮整个界面；现强制 GPU 硬件加速，并内置帧率自检：掉帧自动降低壁纸透明度，仍卡则切换静态画面，帧率恢复后自动还原
+- **API 请求 502 修复** — Clash 等系统代理劫持导致请求超时 / 空 body；启动 CLI 时强制直连（清空 HTTP(S)_PROXY 并 NO_PROXY=*），修复 Clash Verge 全局模式下到部分 API 端点的 502
+- **完整便携版发布** — 单文件 EXE 以 tauri-cli 标准流程重新构建（53.9 MB，含全部上述修复），已替换 release 中旧构建产物，下载链接不变
+
 ### v1.1.1 (2026-08-02) — 交付形态的里程碑
 
 - **便携单 EXE 正式发布** — 单文件、免安装、免管理员、无临时解压，JS 混淆闭源（控制流扁平化 / 字符串数组 / 死代码注入），双击即用
@@ -128,7 +134,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包：
 
-- Windows：NSIS 安装版 / 便携版（x64）
+- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`Little Claude v1.1.2.exe`
 
 ## 快速开始
 
