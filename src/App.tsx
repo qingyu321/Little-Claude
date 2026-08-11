@@ -26,6 +26,7 @@ const SettingsPanel = lazy(() => import('./components/settings/SettingsPanel').t
 const ImageLightbox = lazy(() => import('./components/shared/ImageLightbox').then(m => ({ default: m.ImageLightbox })));
 const ChangelogModal = lazy(() => import('./components/shared/ChangelogModal').then(m => ({ default: m.ChangelogModal })));
 const InterviewConfirmModal = lazy(() => import('./components/interview/InterviewConfirmModal').then(m => ({ default: m.InterviewConfirmModal })));
+const OnboardingWizard = lazy(() => import('./components/onboarding/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
 
 /** Accent colors per theme for the slash in the icon */
 const THEME_ACCENT_COLORS: Record<ColorTheme, string> = {
@@ -88,6 +89,10 @@ function App() {
   const fontFamily = useSettingsStore((s) => s.fontFamily);
   const monoFontFollowsInterface = useSettingsStore((s) => s.monoFontFollowsInterface);
   const settingsOpen = useSettingsStore((s) => s.settingsOpen);
+  const onboardingOpen = useSettingsStore((s) => s.onboardingOpen);
+  const setupCompleted = useSettingsStore((s) => s.setupCompleted);
+  const onboardingCompleted = useSettingsStore((s) => s.onboardingCompleted);
+  const setOnboardingOpen = useSettingsStore((s) => s.setOnboardingOpen);
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
   const lastSeenVersion = useSettingsStore((s) => s.lastSeenVersion);
   const setLastSeenVersion = useSettingsStore((s) => s.setLastSeenVersion);
@@ -199,6 +204,10 @@ function App() {
   const [currentAppVersion, setCurrentAppVersion] = useState('');
 
   useEffect(() => {
+    // 首启时序：SetupWizard（环境）→ onboarding（功能教学）→ changelog 串行。
+    // setup 未完成或教程未完成时不触发 changelog；教程完成后本 effect 重跑，
+    // 此时 lastSeenVersion 仍为 ''，changelog 顺次弹出。
+    if (!setupCompleted || !onboardingCompleted) return;
     import('@tauri-apps/api/app').then(({ getVersion }) =>
       getVersion().then((version) => {
         setCurrentAppVersion(version);
@@ -213,7 +222,14 @@ function App() {
         }
       }).catch(() => {})
     );
-  }, []);
+  }, [setupCompleted, onboardingCompleted]);
+
+  // Onboarding: first-run feature tour. Opens once the environment setup is
+  // done and the tour hasn't been completed. Deps deliberately exclude
+  // onboardingOpen — closing without finishing must NOT re-trigger (loop).
+  useEffect(() => {
+    if (setupCompleted && !onboardingCompleted) setOnboardingOpen(true);
+  }, [setupCompleted, onboardingCompleted]);
 
   // Disable browser context menu globally (native app feel)
   useEffect(() => {
@@ -443,6 +459,11 @@ function App() {
       <Suspense fallback={null}>
         <InterviewConfirmModal />
       </Suspense>
+      {onboardingOpen && (
+        <Suspense fallback={null}>
+          <OnboardingWizard />
+        </Suspense>
+      )}
       {showChangelog && currentAppVersion && (
         <Suspense fallback={null}>
           <ChangelogModal

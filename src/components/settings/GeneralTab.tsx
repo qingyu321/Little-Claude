@@ -410,6 +410,7 @@ export function GeneralTab() {
   const setUserDisplayName = useSettingsStore((s) => s.setUserDisplayName);
   const includePartialMessages = useSettingsStore((s) => s.includePartialMessages);
   const setIncludePartialMessages = useSettingsStore((s) => s.setIncludePartialMessages);
+  const setOnboardingOpen = useSettingsStore((s) => s.setOnboardingOpen);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const userFileInputRef = useRef<HTMLInputElement>(null);
   const [cropFile, setCropFile] = useState<File | null>(null);
@@ -804,6 +805,23 @@ export function GeneralTab() {
             </p>
           </div>
         </label>
+      </div>
+
+      {/* 新手教程 */}
+      <div>
+        <h3 className="text-[13px] font-medium text-text-primary mb-2">
+          {t('settings.tutorial.title')}
+        </h3>
+        <p className="text-xs text-text-tertiary leading-relaxed mb-3">
+          {t('settings.tutorial.desc')}
+        </p>
+        <button
+          onClick={() => setOnboardingOpen(true)}
+          className="py-2 px-4 rounded-lg text-[13px] font-medium transition-smooth
+            bg-accent hover:bg-accent-hover text-text-inverse"
+        >
+          {t('settings.tutorial.replay')}
+        </button>
       </div>
     </div>
   );

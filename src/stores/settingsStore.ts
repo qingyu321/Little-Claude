@@ -165,6 +165,10 @@ interface SettingsState {
   sidebarWidth: number;
   /** Whether the CLI setup wizard has been completed or skipped */
   setupCompleted: boolean;
+  /** Whether the user has finished the onboarding tutorial (persisted) */
+  onboardingCompleted: boolean;
+  /** Whether the onboarding wizard is currently open (transient, not persisted) */
+  onboardingOpen: boolean;
   /** Thinking effort level: off disables, low/medium/high/max set effort */
   thinkingLevel: ThinkingLevel;
   /** Declares that the selected/provider model supports a 1M context window. */
@@ -292,6 +296,8 @@ interface SettingsState {
   decreaseFontSize: () => void;
   setSidebarWidth: (width: number) => void;
   setSetupCompleted: (completed: boolean) => void;
+  setOnboardingCompleted: (completed: boolean) => void;
+  setOnboardingOpen: (open: boolean) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   setContextWindowMode: (mode: ContextWindowMode) => void;
   setCliBackend: (backend: 'claude' | 'codex') => void;
@@ -373,6 +379,8 @@ export const useSettingsStore = create<SettingsState>()(
       monoFontFollowsInterface: true,
       sidebarWidth: 280,
       setupCompleted: false,
+      onboardingCompleted: false,
+      onboardingOpen: false,
       thinkingLevel: 'medium' as ThinkingLevel,
       contextWindowMode: 'default',
       autoCompactThresholdTokens: 160_000,
@@ -495,6 +503,12 @@ export const useSettingsStore = create<SettingsState>()(
 
       setSetupCompleted: (completed) =>
         set(() => ({ setupCompleted: completed })),
+
+      setOnboardingCompleted: (completed) =>
+        set(() => ({ onboardingCompleted: completed })),
+
+      setOnboardingOpen: (open) =>
+        set(() => ({ onboardingOpen: open })),
 
       setThinkingLevel: (level) =>
         set(() => ({ thinkingLevel: level })),
@@ -660,7 +674,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'tokenicode-settings',
-      version: 24,
+      version: 25,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -802,6 +816,10 @@ export const useSettingsStore = create<SettingsState>()(
         if (version < 24) {
           persisted.petSkin = 'default';
         }
+        if (version < 25) {
+          // 新手教程：老用户（已完成 setup）升级后不弹；真新用户无持久化数据走默认 false
+          persisted.onboardingCompleted = persisted.setupCompleted === true;
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -819,6 +837,7 @@ export const useSettingsStore = create<SettingsState>()(
         monoFontFollowsInterface: state.monoFontFollowsInterface,
         sidebarWidth: state.sidebarWidth,
         setupCompleted: state.setupCompleted,
+        onboardingCompleted: state.onboardingCompleted,
         thinkingLevel: state.thinkingLevel,
         contextWindowMode: state.contextWindowMode,
         autoCompactThresholdTokens: state.autoCompactThresholdTokens,
