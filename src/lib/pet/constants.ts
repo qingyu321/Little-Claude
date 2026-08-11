@@ -24,3 +24,23 @@ export const PET_BUBBLE_TTL_COMPLETED_MS = 3000;
 
 /** Idle (no state change) duration before the pet falls asleep (ms). */
 export const PET_SLEEP_AFTER_MS = 60_000;
+
+/**
+ * Evolution pairs: skin id → the skin it transforms into when clicked.
+ * Used by both windows — the pet window plays the FX sequence (golden tassel
+ * aura + flash) and the main window performs the actual settings skin swap.
+ * Keys must match imported pet bundle ids (pet.json `name` slug).
+ */
+export const EVOLUTION_PAIRS: Record<string, string> = {
+  miaomiao: "wudoukumao", // 喵喵 → 武斗酷猫
+  wudoukumao: "miaomiao", // 武斗酷猫 → 喵喵（退化）
+};
+
+/**
+ * Forward evolution edges (as opposed to reversing). Skins listed here
+ * trigger the gold-aura evolve sequence; the reverse direction plays
+ * roar + green-flash de-evolve.
+ */
+export const EVOLUTION_FORWARD: Record<string, string> = {
+  miaomiao: "wudoukumao",
+};

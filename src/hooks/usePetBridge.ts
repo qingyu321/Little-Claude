@@ -18,7 +18,7 @@ import {
   onPetCommand,
   showPetWindow,
 } from "../lib/pet/bridge";
-import { PET_THROTTLE_MS } from "../lib/pet/constants";
+import { PET_THROTTLE_MS, EVOLUTION_PAIRS } from "../lib/pet/constants";
 import type {
   PetBubbleMessage,
   PetMessageTemplates,
@@ -123,6 +123,17 @@ export function usePetBridge() {
           lastJson = null;
           push();
           break;
+        case "toggle-skin": {
+          // Evolution click: swap to the paired skin (if any). The skin change
+          // flows back via pet:status → pet window hot-swaps appearance.
+          const st = useSettingsStore.getState();
+          const next = EVOLUTION_PAIRS[st.petSkin];
+          if (next && next !== st.petSkin) {
+            st.setPetSkin(next);
+            schedule();
+          }
+          break;
+        }
       }
     }).then((un) => {
       unsubCmd = un;

@@ -68,7 +68,13 @@ export type PetCommand =
   /** User hid the pet via right-click menu — main window must respect it (don't re-show). */
   | { type: "user-hide" }
   /** Pet window mounted and its status listener is ready — main window re-pushes now. */
-  | { type: "request-status" };
+  | { type: "request-status" }
+  /**
+   * Pet clicked with an evolution pair configured — main window switches to the
+   * paired skin (pet window plays the FX sequence; the actual swap comes back
+   * through pet:status → skin).
+   */
+  | { type: "toggle-skin" };
 
 /** Localized message templates injected by the main window (via useT / t). */
 export interface PetMessageTemplates {

@@ -26,7 +26,10 @@ export function PetTab() {
   const [importError, setImportError] = useState('');
 
   const refreshSkins = useCallback(() => {
-    setSkins(loadPetSkins());
+    // localStorage 注册表 ∪ 磁盘 bundle 目录（预置/手动放置的宠物包直接可用）
+    void bridge.listImportedPets().then((disk) => {
+      setSkins([...new Set([...loadPetSkins(), ...disk])]);
+    });
   }, []);
 
   useEffect(() => {

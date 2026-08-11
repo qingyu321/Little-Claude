@@ -140,6 +140,16 @@ export function stepFrame(
 export interface EngineOptions {
   sleepAfterMs: number;
   onStateChange?: (state: PetStateKey) => void;
+  /**
+   * Frame-level FX hooks for overlay effects (evolution auras, roar flames,
+   * camera shake). `beforeDraw` runs before the pet sprite (apply transforms);
+   * `afterDraw` runs after it (draw overlays). Each hook is wrapped in
+   * save()/restore() so transforms never leak into the next frame.
+   */
+  fxHooks?: {
+    beforeDraw?: (ctx: CanvasRenderingContext2D, tMs: number) => void;
+    afterDraw?: (ctx: CanvasRenderingContext2D, tMs: number) => void;
+  };
 }
 
 /**
@@ -252,9 +262,18 @@ export class PetEngine {
       const f = this.config.frame;
       const sx = (this.frameState.frame % f.cols) * f.w;
       const sy = st.row * f.h;
+      ctx.save();
+      this.opts.fxHooks?.beforeDraw?.(ctx, performance.now());
       ctx.drawImage(this.sheet, sx, sy, f.w, f.h, 0, 0, w, h);
+      ctx.restore();
     } else {
+      ctx.save();
+      this.opts.fxHooks?.beforeDraw?.(ctx, performance.now());
       drawProceduralPet(ctx, this.frameState.state, this.frameState.frame, st, w, h);
+      ctx.restore();
     }
+    ctx.save();
+    this.opts.fxHooks?.afterDraw?.(ctx, performance.now());
+    ctx.restore();
   }
 }
