@@ -45,6 +45,16 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 版本历程
 
+### v1.1.3 (2026-08-11) — 新手向导 + 百炼兼容
+
+- **新手教学向导** — 首次进入时逐模块介绍功能（会话 / 输入 / 斜杠命令 / 模式 / 模型 / Rewind / Agent / 文件 / 技能等 15 项），勾选想了解的模块即可，可「以后不再提示」；设置 → 通用 可随时重新体验
+- **运行环境手动下载兜底** — Git / Node.js 自动安装失败时显示官网下载链接，手动装完点「重新检测」即可，不再卡在报错上
+- **百炼（阿里云 MaaS）平台兼容** — 激活 provider 时注入 `--settings` 覆盖环境变量：外部 `~/.claude/settings.json` 的 env 污染（如 AMD Radeon 工具写入的 ANTHROPIC_BASE_URL / 模型变量）不再劫持请求；模型名按百炼列表填写（如 qwen3.8-max）
+- **CLI / Node 下载健壮性** — 校验和解析支持裸 64-hex 单段行（华为云镜像格式）、坏行跳过不中断下载、错误提示不再暴露完整 URL
+- **系统代理残留清除** — 进程 env 与 settings env 双保险清空 HTTP(S)_PROXY，Clash 全局代理不再导致 502 / 超时
+- **上下文窗口声明生效** — 声明 1M 上下文时注入 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，绕过 CLI 200K 窗口上限，第三方模型不再被按 80K 窗口提前压缩
+- **桌宠增强** — 舞台渲染 / 引擎 / 桥接优化，点击有进化关系的皮肤切换形态（金流苏进化特效）
+
 ### v1.1.2 (2026-08-10) — 联网搜索兜底 + 前端资源热更新
 
 - **联网搜索兜底模型** — API 提供商底部新增兜底端点配置（如 DeepSeek Anthropic 兼容端点），请求携带 `web_search` 服务端工具时由本地代理自动转发执行搜索，主提供商无需支持服务端搜索（解决 opencode 等网关 401 "Model not supported"）
@@ -134,7 +144,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包：
 
-- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`Little Claude v1.1.2.exe`
+- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`Little Claude v1.1.3.exe`
 
 ## 快速开始
 
