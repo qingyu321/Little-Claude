@@ -19,6 +19,46 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.1.3',
+    date: '2026-08-11',
+    highlights: {
+      zh: ['新手教学向导 + 运行环境手动下载兜底 + 百炼平台 API 兼容修复（--settings 注入防线）'],
+      en: ['Onboarding tour + manual-download fallback for prerequisites + Bailian (Aliyun MaaS) API compatibility fix'],
+    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'New' },
+        items: {
+          zh: [
+            '新手教学向导 — 首次进入时介绍各功能模块（会话/输入/斜杠命令/模式/模型/Rewind/Agent/文件/技能等 15 项），可勾选想了解的模块、可「以后不再提示」；设置 → 通用 可随时重新体验',
+            '运行环境手动下载兜底 — Git / Node.js / Ollama 自动安装失败时显示官网下载链接，手动装完点「重新检测」即可，不再卡在报错上',
+          ],
+          en: [
+            'Onboarding tour — first-run walkthrough of 15 modules (sessions, input, slash commands, modes, models, Rewind, agents, files, skills…), pick what to learn, "never again" option; replay anytime from Settings → General',
+            'Manual-download fallback — Git / Node.js / Ollama show official download links when auto-install fails; re-check after installing',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixed' },
+        items: {
+          zh: [
+            '百炼（阿里云 MaaS）平台兼容 — 激活 provider 时注入 --settings 覆盖 env：外部 ~/.claude/settings.json 的环境变量污染（如 AMD Radeon 工具写入的 ANTHROPIC_BASE_URL/模型变量）不再劫持请求；模型名需按百炼列表填写（qwen3.8-max 等）',
+            'CLI/Node 下载健壮性 — 校验和解析支持裸 64-hex 单段行（华为云镜像格式），坏行跳过不中断整个下载，错误提示不再暴露完整 URL',
+            '系统代理残留清除完善 — 进程 env 与 settings env 双保险清空 HTTP(S)_PROXY，Clash 等全局代理不再导致 502/超时',
+            '桌宠增强 — 舞台渲染、引擎逻辑与桥接层优化',
+          ],
+          en: [
+            'Bailian (Aliyun MaaS) compatibility — provider activation injects --settings env overrides: external ~/.claude/settings.json env pollution (e.g. ANTHROPIC_BASE_URL/model vars written by AMD Radeon tools) can no longer hijack requests; use Bailian model names (qwen3.8-max etc.)',
+            'CLI/Node download robustness — checksum parsing handles bare 64-hex single-line files (Huawei Cloud mirror format), skips bad lines without aborting, errors no longer leak full URLs',
+            'Proxy residue cleanup — HTTP(S)_PROXY cleared in both process env and settings env, Clash global proxy no longer causes 502/timeouts',
+            'Desktop pet improvements — stage rendering, engine logic and bridge-layer polish',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.1.2',
     date: '2026-08-11',
     highlights: {
