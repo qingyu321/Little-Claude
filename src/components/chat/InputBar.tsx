@@ -677,6 +677,16 @@ export function InputBar() {
       default: {
         const stdinId = getActiveTabState().sessionMeta.stdinId;
         if (stdinId && tabId) {
+          // Gate: no CLI commands while a turn / compact is in flight. Plain
+          // messages queue into the FIFO (addPendingMessage) in that state,
+          // but a direct stdin write here would clobber the in-flight card
+          // (pendingCommandMsgId) — the previous card then never completes and
+          // the compact speed-badge exclusion (isCompactInFlight) breaks.
+          const cmdBusy = useChatStore.getState().getTab(tabId)?.sessionStatus === 'running';
+          if (cmdBusy) {
+            feedback('error', `/${cmd}: ${t('cmd.sessionBusy')}`);
+            return;
+          }
           // Emit a processing card immediately so user sees feedback
           const processingMsgId = generateMessageId();
           addMessage(tabId, {
@@ -691,6 +701,12 @@ export function InputBar() {
             timestamp: Date.now(),
           });
           useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: processingMsgId });
+          // /compact's summary request outputs thousands of tokens in 1-3s —
+          // keep its "compression speed" out of the tok/s badge
+          // (useStreamProcessor.isCompactInFlight matches on command === '/compact').
+          if (cmd === 'compact') {
+            useTokenSpeedStore.getState().reset(tabId);
+          }
           useChatStore.getState().setSessionStatus(tabId, 'running');
           useChatStore.getState().setActivityStatus(tabId, { phase: 'thinking' });
           try {
@@ -699,6 +715,14 @@ export function InputBar() {
             // A10: surface the failure AND recover the UI — otherwise the
             // processing card stays "running" forever with no error shown.
             console.error('Failed to send slash command:', err);
+            useChatStore.getState().updateMessage(tabId, processingMsgId, {
+              commandCompleted: true,
+              commandData: {
+                command: `/${cmd}${args ? ' ' + args : ''}`,
+                output: `Failed: ${String(err)}`,
+                completedAt: Date.now(),
+              },
+            });
             useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
             useChatStore.getState().setSessionStatus(tabId, 'error');
             feedback('error', `/${cmd}: ${t('cmd.sendFailed')}`);

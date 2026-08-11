@@ -10,35 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Little Claude",
-        "url": "tokico://localhost",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true
-      },
-      {
-        "label": "pet",
-        "title": "Little Claude Pet",
-        "url": "tokico://localhost/pet.html",
-        "width": 240,
-        "height": 320,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": false,
-        "focus": false,
-        "maximizable": false,
-        "minimizable": false,
-        "closable": false
-      }
-    ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com https://raw.githubusercontent.com https://cdn.jsdelivr.net https://mirror.ghproxy.com https://gitee.com; media-src 'self' data: blob: asset: https:; frame-src https: http:",
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http: wss:; media-src 'self' data: blob: asset: https:; frame-src https: http:",

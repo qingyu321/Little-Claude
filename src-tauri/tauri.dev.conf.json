@@ -2,35 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "com.tinyzhuang.tokenicode.dev",
   "app": {
-    "windows": [
-      {
-        "title": "Little Claude",
-        "url": "http://localhost:15200",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true
-      },
-      {
-        "label": "pet",
-        "title": "Little Claude Pet",
-        "url": "http://localhost:15200/pet.html",
-        "width": 240,
-        "height": 320,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": false,
-        "focus": false,
-        "maximizable": false,
-        "minimizable": false,
-        "closable": false
-      }
-    ],
     "security": {
       "assetProtocol": {
         "scope": ["$HOME/.tokenicode.dev/wallpapers/**"]

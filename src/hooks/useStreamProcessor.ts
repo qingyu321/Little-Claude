@@ -342,6 +342,24 @@ function resolveApiSpeed(msg: any): { outputTokens: number; durationMs: number }
 }
 
 /**
+ * True while a /compact slash command is in flight (auto-compact or manual).
+ * The compact summary request outputs thousands of tokens in 1-3 seconds
+ * (tiny input, no tools) — counted into the tok/s badge it reads 1000+ tok/s,
+ * which is compression speed, not generation speed. The push/end paths skip
+ * it, so the badge never shows that number. Identified via the pending
+ * processing card's command: any message-id bound in pendingCommandMsgId
+ * whose commandData.command is '/compact'.
+ */
+function isCompactInFlight(tabId: string): boolean {
+  const meta = useChatStore.getState().getTab(tabId)?.sessionMeta;
+  const pendingId = meta?.pendingCommandMsgId;
+  if (!pendingId) return false;
+  const cmdMsg = (useChatStore.getState().getTab(tabId)?.messages ?? [])
+    .find((m) => m.id === pendingId);
+  return cmdMsg?.commandData?.command === '/compact';
+}
+
+/**
  * Persist authoritative per-turn token counts to Little Claude's usage log.
  *
  * The Claude CLI sometimes writes zero/missing usage values to its JSONL session
@@ -366,13 +384,28 @@ type StreamUsage = {
  * input_tokens alone against the compact threshold made auto-compact effectively
  * never fire (real data: input_tokens=6, cache_read=85163). */
 function fullInputContextTokens(usage: StreamUsage | undefined): number {
+  const b = fullInputContextBreakdown(usage);
+  return b.input + b.cacheRead + b.cacheCreation;
+}
+
+/** Split a request's full input context into its billable parts — new input,
+ *  cache hit, cache write. contextTokens = sum of the three; the breakdown
+ *  feeds the Ctx bar tooltip and cache-miss detection (a large input with
+ *  ~0 cache hit means the gateway re-sent the whole history). */
+function fullInputContextBreakdown(usage: StreamUsage | undefined): {
+  input: number;
+  cacheRead: number;
+  cacheCreation: number;
+} {
   const u = usage || {};
   const cc = u.cache_creation || {};
-  return (u.input_tokens || 0)
-    + (u.cache_read_input_tokens || 0)
-    + (u.cache_creation_input_tokens || 0)
-    + (cc.ephemeral_1h_input_tokens || 0)
-    + (cc.ephemeral_5m_input_tokens || 0);
+  return {
+    input: u.input_tokens || 0,
+    cacheRead: u.cache_read_input_tokens || 0,
+    cacheCreation: (u.cache_creation_input_tokens || 0)
+      + (cc.ephemeral_1h_input_tokens || 0)
+      + (cc.ephemeral_5m_input_tokens || 0),
+  };
 }
 
 function persistTurnUsage(
@@ -414,7 +447,7 @@ const COMPACT_CHECK_MS = 30_000;
 const COMPACT_STALL_MS = 60_000;
 const COMPACT_MAX_MS = 600_000;
 
-function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string, startedAt: number): void {
+export function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string, startedAt: number): void {
   setTimeout(() => {
     const tab = useChatStore.getState().getTab(tabId);
     const meta = tab?.sessionMeta ?? {};
@@ -484,8 +517,28 @@ function tryFireAutoCompact(
   store.setSessionMeta(tabId, { pendingCommandMsgId: compactMsgId });
   store.setSessionStatus(tabId, 'running');
   store.setActivityStatus(tabId, { phase: 'thinking' });
+  // Clear any leftover turn accounting — the compact summary's deltas are
+  // excluded from the tok/s badge (isCompactInFlight), so turnTokens must
+  // start from 0 for the badge to stay hidden during and after compaction.
+  useTokenSpeedStore.getState().reset(tabId);
   bridge.sendStdin(stdinId, '/compact').catch((err) => {
     console.error('[LITTLECLAUDE] Auto-compact failed:', err);
+    // Fail loudly, not silently (A10): mark the card completed with the error
+    // and recover the UI — otherwise the card spins forever and the session
+    // stays 'running' until the timeout check fires a misleading "timed out".
+    useChatStore.getState().updateMessage(tabId, compactMsgId, {
+      commandCompleted: true,
+      commandData: {
+        command: '/compact',
+        output: `Auto-compact failed: ${String(err)}`,
+        completedAt: Date.now(),
+      },
+    });
+    useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+    const curStatus = useChatStore.getState().getTab(tabId)?.sessionStatus;
+    if (curStatus === 'running') {
+      useChatStore.getState().setSessionStatus(tabId, 'idle');
+    }
   });
   scheduleCompactTimeoutCheck(tabId, compactMsgId, Date.now());
   return true;
@@ -652,7 +705,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const tokenCount = typeof rawTokens === 'number' && rawTokens > 0
             ? rawTokens
             : estimateTokensFromText(text);
-          if (tokenCount > 0) {
+          // Skip the tok/s badge while /compact is in flight — the summary
+          // output is compression speed (1000+ tok/s), not generation speed.
+          if (!isCompactInFlight(tabId) && tokenCount > 0) {
             useTokenSpeedStore.getState().pushTokens(tabId, tokenCount);
           }
           const stdinId = msg.__stdinId;
@@ -754,8 +809,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           useTokenSpeedStore.getState().reset(tabId);
         }
 
-        // Track tokens in background sessions (per-turn + cumulative total)
-        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens) {
+        // Track tokens in background sessions (per-turn + cumulative total).
+        // Skipped while a /compact card is pending — the summary request's
+        // usage is compression overhead, not dialogue.
+        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens
+            && !isCompactInFlight(tabId)) {
           const bgTab = store.getTab(tabId);
           const delta = evt.message.usage.input_tokens;
           store.setSessionMeta(tabId, {
@@ -763,7 +821,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             totalInputTokens: (bgTab?.sessionMeta.totalInputTokens || 0) + delta,
           });
         }
-        if (evt.type === 'message_delta' && evt.usage?.output_tokens) {
+        if (evt.type === 'message_delta' && evt.usage?.output_tokens
+            && !isCompactInFlight(tabId)) {
           const bgTab = store.getTab(tabId);
           const u = evt.usage;
           const deltaOut = u.output_tokens || 0;
@@ -993,10 +1052,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       }
       case 'result': {
         store.setSessionStatus(tabId, msg.subtype === 'success' ? 'completed' : 'error');
+        // Capture the compact-turn flag BEFORE the pending slot is cleared
+        // below (same rule as the foreground path): the compact summary
+        // request's usage is compression overhead, not dialogue — excluded
+        // from the session's conversation token stats.
+        const bgPendingCmd = store.getTab(tabId)?.sessionMeta.pendingCommandMsgId;
+        const bgWasCompact = !!bgPendingCmd
+          && (store.getTab(tabId)?.messages ?? [])
+            .find((m) => m.id === bgPendingCmd)?.commandData?.command === '/compact';
         // B10: complete a pending slash-command card on the background path —
         // same as the foreground result case, so /compact etc. don't hang.
         {
-          const bgPendingCmd = store.getTab(tabId)?.sessionMeta.pendingCommandMsgId;
           if (bgPendingCmd) {
             const resultOutput = typeof msg.result === 'string' ? msg.result : '';
             store.updateMessage(tabId, bgPendingCmd, {
@@ -1010,13 +1076,16 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             store.setSessionMeta(tabId, { pendingCommandMsgId: undefined });
           }
         }
-        {
+        // Compact summary turns never touch the conversation token stats
+        // (same rule as the foreground path — the card shows its cost).
+        if (!bgWasCompact) {
           const bgTab = store.getTab(tabId);
           const prevMeta = bgTab?.sessionMeta;
           const resultInput = msg.usage?.input_tokens || 0;
           const resultOutput = msg.usage?.output_tokens || 0;
           const streamedInput = prevMeta?.inputTokens || 0;
           const streamedOutput = prevMeta?.outputTokens || 0;
+          const bd = fullInputContextBreakdown(msg.usage);
           store.setSessionMeta(tabId, {
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
@@ -1026,7 +1095,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             totalInputTokens: (prevMeta?.totalInputTokens || 0) + (resultInput - streamedInput),
             totalOutputTokens: (prevMeta?.totalOutputTokens || 0) + (resultOutput - streamedOutput),
             // B2: full last-request context (incl. cached), same as foreground.
-            contextTokens: fullInputContextTokens(msg.usage),
+            contextTokens: bd.input + bd.cacheRead + bd.cacheCreation,
+            // Breakdown for the Ctx bar tooltip + cache-miss detection
+            contextInputTokens: bd.input,
+            contextCacheReadTokens: bd.cacheRead,
+            contextCacheCreationTokens: bd.cacheCreation,
             turnStartTime: undefined,
             lastProgressAt: undefined,
           });
@@ -1043,6 +1116,16 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             msg.usage,
             prevMeta?.model || '',
           );
+        } else {
+          // Same reset as the foreground path — a background /compact must
+          // also drop the Ctx bar to 0 instead of keeping the pre-compact
+          // value until the next normal turn refreshes it.
+          store.setSessionMeta(tabId, {
+            contextTokens: 0,
+            contextInputTokens: 0,
+            contextCacheReadTokens: 0,
+            contextCacheCreationTokens: 0,
+          });
         }
         if (typeof msg.result === 'string' && msg.result) {
           // Only add if not already delivered via 'assistant' event
@@ -1484,7 +1567,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const tokenCount = typeof rawTokens === 'number' && rawTokens > 0
             ? rawTokens
             : estimateTokensFromText(text);
-          if (tokenCount > 0) {
+          // Skip the tok/s badge while /compact is in flight — the summary
+          // output is compression speed (1000+ tok/s), not generation speed.
+          if (!isCompactInFlight(tabId) && tokenCount > 0) {
             useTokenSpeedStore.getState().pushTokens(tabId, tokenCount);
           }
           if (text && msgStdinId) {
@@ -1578,8 +1663,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           useTokenSpeedStore.getState().reset(tabId);
         }
 
-        // Track input tokens from message_start (per-turn + cumulative total)
-        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens) {
+        // Track input tokens from message_start (per-turn + cumulative total).
+        // Skipped while a /compact card is pending — the summary request's
+        // usage is compression overhead, not dialogue.
+        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens
+            && !isCompactInFlight(tabId)) {
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
           const delta = evt.message.usage.input_tokens;
           setSessionMeta({
@@ -1589,7 +1677,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         }
 
         // Track output tokens from message_delta (per-turn + cumulative total)
-        if (evt.type === 'message_delta' && evt.usage?.output_tokens) {
+        if (evt.type === 'message_delta' && evt.usage?.output_tokens
+            && !isCompactInFlight(tabId)) {
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
           const u = evt.usage;
           const deltaOut = u.output_tokens || 0;
@@ -2255,6 +2344,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
         // Mark pending processing card (CLI slash command) as completed
         const pendingCmdMsgId = useChatStore.getState().getTab(tabId)?.sessionMeta.pendingCommandMsgId;
+        // Capture the compact-turn flag BEFORE the pending slot is cleared
+        // below: a card bound to '/compact' means this result is the compact
+        // summary request. Its usage is compression overhead, not dialogue —
+        // it must not pollute the session's conversation token stats (the card
+        // itself already displays the cost summary).
+        const wasCompactTurn = !!pendingCmdMsgId
+          && (useChatStore.getState().getTab(tabId)?.messages ?? [])
+            .find((m) => m.id === pendingCmdMsgId)?.commandData?.command === '/compact';
         if (pendingCmdMsgId) {
           const resultOutput = typeof msg.result === 'string' ? msg.result : '';
           useChatStore.getState().updateMessage(tabId, pendingCmdMsgId, {
@@ -2331,7 +2428,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (msg.subtype !== 'success') {
           setActivityStatus({ phase: 'error', statusMessage: t('chat.error') });
         }
-        {
+        // Compact summary turns never touch the conversation token stats —
+        // the /compact card already shows its cost; counting it here would
+        // inflate totalInputTokens/totalOutputTokens and overwrite contextTokens
+        // (the summary request's small context is not the session's context).
+        if (!wasCompactTurn) {
           // Correct cumulative totals for any drift between streaming
           // accumulation and the authoritative result values.
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
@@ -2339,6 +2440,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const resultOutput = msg.usage?.output_tokens || 0;
           const streamedInput = meta.inputTokens || 0;
           const streamedOutput = meta.outputTokens || 0;
+          const bd = fullInputContextBreakdown(msg.usage);
           setSessionMeta({
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
@@ -2349,7 +2451,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             totalOutputTokens: (meta.totalOutputTokens || 0) + (resultOutput - streamedOutput),
             // B2: full last-request context (incl. cached) for the Ctx bar —
             // input_tokens alone undercounts by the cache-read share.
-            contextTokens: fullInputContextTokens(msg.usage),
+            contextTokens: bd.input + bd.cacheRead + bd.cacheCreation,
+            // Breakdown for the Ctx bar tooltip + cache-miss detection
+            contextInputTokens: bd.input,
+            contextCacheReadTokens: bd.cacheRead,
+            contextCacheCreationTokens: bd.cacheCreation,
             turnStartTime: undefined,
             lastProgressAt: undefined,
           });
@@ -2365,6 +2471,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             msg.usage,
             meta.model || '',
           );
+        } else {
+          // /compact rewrote the context — the Ctx bar must drop now, not
+          // keep the pre-compact ≈100% until the next normal turn refreshes
+          // it (the compact summary's own small context is compression
+          // overhead, not the session's context — see comment above).
+          setSessionMeta({
+            contextTokens: 0,
+            contextInputTokens: 0,
+            contextCacheReadTokens: 0,
+            contextCacheCreationTokens: 0,
+          });
         }
         agentActions.completeAll(
           msg.subtype === 'success' ? 'completed' : 'error'

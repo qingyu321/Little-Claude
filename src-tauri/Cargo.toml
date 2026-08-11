@@ -53,6 +53,7 @@ async-trait = "0.1"
 log = "0.4"
 which = "6"
 sysinfo = "0.31"
+chrono = "0.4"
 sherpa-onnx = { version = "1.13", optional = true }
 
 [dev-dependencies]

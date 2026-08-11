@@ -177,6 +177,27 @@ pub(crate) struct WebSearchFallbackConfig {
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
+/// 代理诊断日志（追加到 %TEMP%/littleclaude-proxy.log）。
+///
+/// release 构建的代理进程没有控制台，eprintln 不可见——文件日志用于排查
+/// "启用兜底后 502" 类问题：记录每次转发的目标、状态码与响应摘要。
+fn proxy_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("littleclaude-proxy.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            f,
+            "[{}] {}",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            msg
+        );
+    }
+}
+
 /// Redact likely API-key material from an upstream error message before it is
 /// forwarded to the UI. Providers sometimes echo keys back in error bodies.
 fn redact_secrets(s: &str) -> String {
@@ -302,6 +323,10 @@ fn upstream_client() -> &'static reqwest::Client {
     UPSTREAM_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
+            // 转发通道必须直连上游：不继承进程 env 的 HTTP(S)_PROXY（用户代理
+            // 残留会拦截本地/上游请求，表现为神秘 502；provider 的 proxyUrl
+            // 走的是 CLI 子进程 env 注入，与这里无关）。
+            .no_proxy()
             .build()
             .unwrap_or_default()
     })
@@ -311,6 +336,44 @@ fn upstream_client() -> &'static reqwest::Client {
 /// tool present), the main Anthropic endpoint (passthrough), or the OpenAI
 /// conversion pipeline.
 async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response<BoxBody> {
+    let tool_count = anthropic_body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map_or(0, |t| t.len());
+    let msg_count = anthropic_body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .map_or(0, |m| m.len());
+    let model = anthropic_body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    let has_web = has_web_search_tool(&anthropic_body);
+    proxy_log(&format!(
+        "REQ session={} has_web={} tools={} msgs={} model={} fallback={}",
+        state.session_id,
+        has_web,
+        tool_count,
+        msg_count,
+        model,
+        if state.fallback.is_some() { "some" } else { "none" }
+    ));
+
+    // Compact summary requests (CLI /compact) declare no tools and carry a
+    // single digest user message. Their usage is compression overhead, not
+    // dialogue — excluded from the usage log so profile stats stay clean.
+    // (The frontend applies the same exclusion to its in-memory session
+    // stats via the pending '/compact' card; this Rust gate covers the
+    // proxy-path usage_log persistence that bypasses the frontend.)
+    let is_compact_request = anthropic_body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map_or(true, |tools| tools.is_empty())
+        && anthropic_body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map_or(0, |msgs| msgs.len())
+            <= 1;
     if has_web_search_tool(&anthropic_body) {
         if let Some(fb) = &state.fallback {
             eprintln!(
@@ -323,14 +386,56 @@ async fn forward_messages(state: &ProxyState, anthropic_body: Value) -> Response
     }
     if state.main_format.eq_ignore_ascii_case("anthropic") {
         // 主端点是 Anthropic 格式：原样透传（tools 不改写，与直连行为一致）。
-        return forward_passthrough(&state.target_url, &state.api_key, &anthropic_body, "", false)
+        let resp = forward_passthrough(&state.target_url, &state.api_key, &anthropic_body, "", false)
             .await;
+        // 主端点 5xx / 连接失败（UPSTREAM_CONN_ERR 也收敛为 502）→ 自动降级到
+        // 兜底端点重试一次。不限于 web_search 请求：CLI 会话的 tools 里没有
+        // web_search 工具（has_web=false），若只按 has_web 判定，兜底对 CLI
+        // 形同虚设，主端点一抖 502 就直接透传给了用户。
+        if resp.status().is_server_error() {
+            if let Some(fb) = &state.fallback {
+                proxy_log(&format!(
+                    "FAILOVER session={} status={} main={} → fallback={}",
+                    state.session_id,
+                    resp.status(),
+                    state.target_url,
+                    fb.base_url
+                ));
+                eprintln!(
+                    "[LITTLECLAUDE:proxy] Session {} main endpoint {} returned {} — failing over to fallback {}",
+                    state.session_id, state.target_url, resp.status(), fb.base_url
+                );
+                return forward_passthrough(&fb.base_url, &fb.api_key, &anthropic_body, &fb.model, true)
+                    .await;
+            }
+        }
+        return resp;
     }
-    forward_openai_conversion(state, anthropic_body).await
+    let resp = forward_openai_conversion(state, anthropic_body.clone(), is_compact_request).await;
+    if resp.status().is_server_error() {
+        // OpenAI 转换分支同样降级：兜底端点是 Anthropic 格式，直接用原始
+        // anthropic body（rewrite=true 只剔除/规范化 web_search 工具）。
+        if let Some(fb) = &state.fallback {
+            proxy_log(&format!(
+                "FAILOVER session={} status={} main={} → fallback={} (openai conversion)",
+                state.session_id,
+                resp.status(),
+                state.target_url,
+                fb.base_url
+            ));
+            return forward_passthrough(&fb.base_url, &fb.api_key, &anthropic_body, &fb.model, true)
+                .await;
+        }
+    }
+    resp
 }
 
 /// Forward a converted Anthropic request to the OpenAI endpoint.
-async fn forward_openai_conversion(state: &ProxyState, anthropic_body: Value) -> Response<BoxBody> {
+async fn forward_openai_conversion(
+    state: &ProxyState,
+    anthropic_body: Value,
+    is_compact: bool,
+) -> Response<BoxBody> {
     let openai_body = anthropic_to_openai_req(&anthropic_body);
     let is_stream = openai_body
         .get("stream")
@@ -391,32 +496,35 @@ async fn forward_openai_conversion(state: &ProxyState, anthropic_body: Value) ->
                     let anthropic = openai_to_anthropic_resp(&openai);
                     // Persist authoritative usage (incl. cache) for non-streaming
                     // responses too — same CLI-drops-message_delta rationale.
-                    if let Some(usage) = openai.get("usage") {
-                        let inp = usage.get("prompt_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
-                        let out = usage.get("completion_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
-                        let cache_read = usage.get("prompt_cache_hit_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
-                        let cache_creation = usage.get("prompt_cache_miss_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
-                        if inp + out + cache_read + cache_creation > 0 {
-                            let mid = openai
-                                .get("id")
-                                .and_then(|i| i.as_str())
-                                .unwrap_or("")
-                                .trim_start_matches("chatcmpl-");
-                            let ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let model = openai.get("model").and_then(|m| m.as_str()).unwrap_or("");
-                            let _ = crate::commands::profile::append_usage_record_impl(
-                                &state.session_id,
-                                mid,
-                                inp,
-                                out,
-                                cache_read,
-                                cache_creation,
-                                model,
-                                &ts.to_string(),
-                            );
+                    // Compact summary turns are compression overhead — skip.
+                    if !is_compact {
+                        if let Some(usage) = openai.get("usage") {
+                            let inp = usage.get("prompt_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                            let out = usage.get("completion_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                            let cache_read = usage.get("prompt_cache_hit_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                            let cache_creation = usage.get("prompt_cache_miss_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
+                            if inp + out + cache_read + cache_creation > 0 {
+                                let mid = openai
+                                    .get("id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("")
+                                    .trim_start_matches("chatcmpl-");
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let model = openai.get("model").and_then(|m| m.as_str()).unwrap_or("");
+                                let _ = crate::commands::profile::append_usage_record_impl(
+                                    &state.session_id,
+                                    mid,
+                                    inp,
+                                    out,
+                                    cache_read,
+                                    cache_creation,
+                                    model,
+                                    &ts.to_string(),
+                                );
+                            }
                         }
                     }
                     json_response(StatusCode::OK, anthropic)
@@ -459,7 +567,11 @@ async fn forward_openai_conversion(state: &ProxyState, anthropic_body: Value) ->
             // straight to Little Claude's usage log. The CLI drops message_delta
             // fields it doesn't know, so input/cache would otherwise never reach
             // the frontend and the per-turn stats would show input = 0.
+            // Compact summary turns are compression overhead — skip.
             let persist = |conv: &SseConverter| {
+                if is_compact {
+                    return;
+                }
                 if let Some((mid, inp, out, cache_read, cache_creation)) = conv.usage_record() {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -543,8 +655,30 @@ async fn forward_openai_conversion(state: &ProxyState, anthropic_body: Value) ->
 
 // ─── Web-search fallback passthrough ────────────────────────────────────
 
+/// 单个工具是否为 web_search 服务端工具（大小写不敏感）。
+///
+/// CLI 2.1.227 起 WebSearch 以普通工具形式进入请求的 `tools` 数组（无
+/// `type` 字段、驼峰大写名 `WebSearch`），不再有顶层 `server_tools`——
+/// 大小写敏感匹配会永久漏判，fallback 永不触发。官方服务端工具格式为
+/// type/name `web_search` / `web_search_20250305`。
+fn is_web_search_tool(t: &Value) -> bool {
+    let ttype = t
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let tname = t
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    ttype == "web_search"
+        || ttype.starts_with("web_search_")
+        || tname == "web_search"
+        || tname == "websearch"
+}
+
 /// tools 数组（防御性含顶层 `server_tools`）里是否有 web_search 服务端工具。
-/// 匹配：type == "web_search" | type 以 "web_search_" 开头 | name == "web_search"。
 fn has_web_search_tool(body: &Value) -> bool {
     let mut arrays: Vec<&Vec<Value>> = Vec::new();
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -555,12 +689,7 @@ fn has_web_search_tool(body: &Value) -> bool {
     }
     for tools in arrays {
         for t in tools {
-            let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let tname = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if ttype == "web_search"
-                || ttype.starts_with("web_search_")
-                || tname == "web_search"
-            {
+            if is_web_search_tool(t) {
                 return true;
             }
         }
@@ -570,8 +699,11 @@ fn has_web_search_tool(body: &Value) -> bool {
 
 /// 兜底请求体改写：model → fallback.model（非空时）；web_search 服务端工具
 /// → `{"type":"web_search_20250305","name":"web_search","max_uses":1}`。
-/// 非 web_search 工具原样保留。工具名版本化是 DeepSeek 等兼容端点的要求
-/// （旧名 `web_search` 会被拒绝）。
+///
+/// 其余工具（bash/read/Edit 等本地工具）**全部移除**，只保留 web_search：
+/// ① 兼容端点流式响应会错误调用请求里的本地工具（实测 DeepSeek 对完整
+/// CLI 工具集会返回 bash 等 server_tool_use）；② 显著减小转发 payload。
+/// 工具名版本化是 DeepSeek 等兼容端点的要求（旧名 `web_search` 会被拒绝）。
 fn prepare_fallback_body(body: &Value, model: &str) -> Value {
     let mut out = body.clone();
     if !model.trim().is_empty() {
@@ -582,6 +714,8 @@ fn prepare_fallback_body(body: &Value, model: &str) -> Value {
             for t in tools.iter_mut() {
                 let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let tname = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                // 只改写 web_search 工具；客户端工具（Agent/Bash/WebSearch 等）
+                // 必须原样保留——降级/兜底请求要带着完整工具集发给 fallback 端点。
                 if ttype == "web_search"
                     || ttype.starts_with("web_search_")
                     || tname == "web_search"
@@ -620,6 +754,18 @@ async fn forward_passthrough(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
+    proxy_log(&format!(
+        "FWD {} rewrite={} key={}.. model={} tools={}",
+        target,
+        rewrite,
+        api_key.chars().take(8).collect::<String>(),
+        payload.get("model").and_then(|m| m.as_str()).unwrap_or(""),
+        payload
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map_or(0, |t| t.len())
+    ));
+
     let client = upstream_client();
     let mut req = client
         .post(&target)
@@ -633,6 +779,7 @@ async fn forward_passthrough(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            proxy_log(&format!("UPSTREAM_CONN_ERR {} err={}", target, e));
             return json_response(StatusCode::BAD_GATEWAY, json!({
                 "type": "error",
                 "error": {"type": "api_error", "message": format!("Upstream connection failed: {}", e)}
@@ -645,6 +792,12 @@ async fn forward_passthrough(
         // 上游错误响应是 JSON（非 SSE），提取 error.message（脱敏后）包成
         // Anthropic 错误格式回传。
         let text = resp.text().await.unwrap_or_default();
+        proxy_log(&format!(
+            "UPSTREAM_ERR {} status={} body={}",
+            target,
+            status,
+            text.chars().take(400).collect::<String>()
+        ));
         let message = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v.get("error").cloned())
@@ -660,6 +813,8 @@ async fn forward_passthrough(
             "error": {"type": "api_error", "message": message}
         }));
     }
+
+    proxy_log(&format!("UPSTREAM_OK {} status={}", target, status));
 
     if !is_stream {
         // 非流式：原样 JSON 返回（Anthropic 格式响应，无需转换）。
@@ -1638,5 +1793,182 @@ mod tests {
         // second chunk must not re-emit message_start / content_block_start
         assert!(!evs.iter().any(|e| e.contains("message_start")));
         assert_eq!(evs.iter().filter(|e| e.contains("content_block_start")).count(), 0);
+    }
+
+    // ── 主端点 5xx / 连接失败自动降级到兜底端点 ──────────────────────────
+
+    /// 起一个本地 fake HTTP 服务器：任意 POST → 固定状态码 + body。
+    async fn spawn_fake_http(
+        status: u16,
+        body: &'static str,
+    ) -> std::net::SocketAddr {
+        use http_body_util::Full;
+        use hyper::service::service_fn;
+        use hyper::{Request, Response, StatusCode};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let srv = service_fn(move |req: Request<hyper::body::Incoming>| async move {
+                eprintln!(
+                    "FAKE_SRV[{}] got {} {}",
+                    status,
+                    req.method(),
+                    req.uri()
+                );
+                let resp = Response::builder()
+                    .status(StatusCode::from_u16(status).unwrap())
+                    .header("content-type", "application/json")
+                    .body(Full::new(hyper::body::Bytes::from(body)))
+                    .unwrap();
+                Ok::<_, std::convert::Infallible>(resp)
+            });
+            loop {
+                let (sock, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let srv = srv.clone();
+                tokio::spawn(async move {
+                    let io = hyper_util::rt::TokioIo::new(sock);
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, srv)
+                        .await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn forward_messages_fails_over_on_main_5xx() {
+        // 主端点：502 + 真空 body（zen 不稳时的典型形态）
+        let main_addr = spawn_fake_http(502, "").await;
+        // 兜底端点：200 + 合法 Anthropic 响应（特征 id=fallback-msg）
+        let fb_addr = spawn_fake_http(
+            200,
+            r#"{"type":"message","id":"fallback-msg-1","model":"m","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .await;
+
+        let state = ProxyState {
+            target_url: format!("http://127.0.0.1:{}", main_addr.port()),
+            api_key: "main-key".into(),
+            token: "t".into(),
+            session_id: "test-failover".into(),
+            main_format: "anthropic".into(),
+            fallback: Some(WebSearchFallbackConfig {
+                base_url: format!("http://127.0.0.1:{}", fb_addr.port()),
+                api_key: "fallback-key".into(),
+                model: "".into(),
+            }),
+        };
+        let resp = forward_messages(
+            &state,
+            json!({
+                "model": "m",
+                "max_tokens": 10,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "custom", "name": "bash", "description": "d", "input_schema": {"type": "object"}}]
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let txt = String::from_utf8_lossy(&bytes);
+        assert!(
+            txt.contains("fallback-msg-1"),
+            "expected response to come from fallback endpoint, got: {}",
+            txt
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_messages_5xx_passthrough_without_fallback() {
+        // 无兜底配置：主端点 5xx 必须原样透传（不降级不吞错）。
+        let main_addr = spawn_fake_http(502, "").await;
+        let state = ProxyState {
+            target_url: format!("http://127.0.0.1:{}", main_addr.port()),
+            api_key: "k".into(),
+            token: "t".into(),
+            session_id: "test-nofailover".into(),
+            main_format: "anthropic".into(),
+            fallback: None,
+        };
+        let resp = forward_messages(
+            &state,
+            json!({"model": "m", "stream": false, "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn forward_messages_main_2xx_no_failover() {
+        // 主端点正常（200）→ 不降级，直接返回主端点响应。
+        let main_addr = spawn_fake_http(
+            200,
+            r#"{"type":"message","id":"main-msg-1","model":"m","role":"assistant","content":[{"type":"text","text":"from main"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .await;
+        let state = ProxyState {
+            target_url: format!("http://127.0.0.1:{}", main_addr.port()),
+            api_key: "k".into(),
+            token: "t".into(),
+            session_id: "test-mainok".into(),
+            main_format: "anthropic".into(),
+            fallback: Some(WebSearchFallbackConfig {
+                base_url: "http://127.0.0.1:1".into(), // 不可达，但不应被请求
+                api_key: "fk".into(),
+                model: "".into(),
+            }),
+        };
+        let resp = forward_messages(
+            &state,
+            json!({"model": "m", "stream": false, "messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("main-msg-1"));
+    }
+
+    #[tokio::test]
+    async fn forward_messages_has_web_goes_straight_to_fallback() {
+        // 带 web_search 工具 → 直接走兜底端点（绕过主端点）。
+        let main_addr = spawn_fake_http(200, r#"{"type":"message","id":"main-should-not-be-hit"}"#).await;
+        let fb_addr = spawn_fake_http(
+            200,
+            r#"{"type":"message","id":"fallback-web-1","model":"m","role":"assistant","content":[{"type":"text","text":"searched"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .await;
+        let state = ProxyState {
+            target_url: format!("http://127.0.0.1:{}", main_addr.port()),
+            api_key: "k".into(),
+            token: "t".into(),
+            session_id: "test-web".into(),
+            main_format: "anthropic".into(),
+            fallback: Some(WebSearchFallbackConfig {
+                base_url: format!("http://127.0.0.1:{}", fb_addr.port()),
+                api_key: "fk".into(),
+                model: "".into(),
+            }),
+        };
+        let resp = forward_messages(
+            &state,
+            json!({
+                "model": "m",
+                "stream": false,
+                "messages": [{"role": "user", "content": "search"}],
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}]
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("fallback-web-1"));
     }
 }

@@ -79,6 +79,11 @@ fn consume_pending_permission_request(session_id: &str, request_id: &str) {
 fn build_fallback_config(provider: &ApiProvider) -> Option<WebSearchFallbackConfig> {
     let fb = provider.web_search_fallback.as_ref()?;
     if !fb.enabled || fb.base_url.trim().is_empty() {
+        eprintln!(
+            "[LITTLECLAUDE:provider] web-search fallback skipped: enabled={}, base_url='{}'",
+            fb.enabled,
+            fb.base_url.trim()
+        );
         return None;
     }
     let key = fb
@@ -101,7 +106,17 @@ fn build_fallback_config(provider: &ApiProvider) -> Option<WebSearchFallbackConf
                     None
                 }
             }
-        })?;
+        });
+    let key = match key {
+        Some(k) => k,
+        None => {
+            eprintln!(
+                "[LITTLECLAUDE:provider] web-search fallback key missing (api_key={:?} TENC1-filtered or env_var empty), 跳过兜底",
+                fb.api_key.as_deref().map(|k| k.starts_with("TENC1:"))
+            );
+            return None;
+        }
+    };
     Some(WebSearchFallbackConfig {
         base_url: fb.base_url.clone(),
         api_key: key,
@@ -227,6 +242,21 @@ pub async fn start_claude_session(
     let (mut resolved_env, inherited_keys_to_remove, provider_extra_args, _provider_used) =
         crate::resolve_provider_env(params.provider_id.as_deref())?;
 
+    // ─── Force direct connections (Clash/Mihomo hijack fix) ────────────
+    // Clash 类工具（Clash Verge Mihomo 等）会在系统/注册表残留代理配置，
+    // Claude Code（Node/undici）检测到 HTTP(S)_PROXY 后把公网 API 请求发给
+    // 本地代理；全局模式下节点到部分端点不通 → 超时/502（实测 zen 端点经
+    // 7897 端口 25s 超时、直连 2.7s）。Little Claude 自带的转换/兜底代理
+    // 走 127.0.0.1 直连端点（upstream 带 .no_proxy()），不需要系统代理。
+    // 因此 spawn CLI 时显式清空代理变量并 NO_PROXY=*，双保险注入到进程
+    // env 与 --settings env（后者覆盖 ~/.claude/settings.json 里的残留）。
+    // 注意大小写都要清：undici 同时读取 HTTP_PROXY 与 http_proxy 两套。
+    const PROXY_CLEAR_VARS: [&str; 6] = [
+        "HTTP_PROXY", "http_proxy",
+        "HTTPS_PROXY", "https_proxy",
+        "ALL_PROXY", "all_proxy",
+    ];
+
     // ─── Local proxy (conversion & web-search fallback) ────────────────
     // Claude CLI only speaks the Anthropic Messages API. When the provider
     // exposes ONLY an OpenAI-compatible endpoint (api_format = "openai"),
@@ -306,6 +336,13 @@ pub async fn start_claude_session(
     #[cfg(feature = "video-analysis")]
     inject_video_analysis_multimodal_env(&mut resolved_env);
 
+    // Process-level proxy cleanup (see PROXY_CLEAR_VARS above)
+    for var in PROXY_CLEAR_VARS {
+        resolved_env.insert(var.to_string(), String::new());
+    }
+    resolved_env.insert("NO_PROXY".to_string(), "*".to_string());
+    resolved_env.insert("no_proxy".to_string(), "*".to_string());
+
     // Build --settings JSON.
     // CRITICAL: The Claude CLI reads ~/.claude/settings.json at startup, and its
     // `env` block takes precedence over actual environment variables. When a
@@ -344,6 +381,28 @@ pub async fn start_claude_session(
             );
         }
 
+        // Override ANTHROPIC_MODEL + ANTHROPIC_DEFAULT_*_MODEL from the provider's
+        // resolved model name. External tools (CCSwitch, manual edits) may have
+        // written capitalized names into ~/.claude/settings.json; the CLI uses
+        // these DEFAULT_* vars for internal requests (title generation, etc.),
+        // NOT --model. Case-sensitive gateways (e.g. opencode's /v1/messages:
+        // "DeepSeek-V4-Flash" → 401 ModelError "not supported") fail on the
+        // capitalized name even though the main conversation (via --model) works.
+        if let Some(ref model) = params.model {
+            for var in [
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            ] {
+                settings_env.insert(
+                    var.to_string(),
+                    serde_json::Value::String(model.clone()),
+                );
+            }
+        }
+
         // Only clear the OAuth token for third-party providers or when using
         // explicit API key auth. For native Anthropic (api.anthropic.com) with
         // OAuth (no API key set), we must preserve the token from the user's
@@ -367,6 +426,24 @@ pub async fn start_claude_session(
         }
         settings_val["env"] = serde_json::Value::Object(settings_env);
     }
+
+    // Proxy cleanup inside --settings env (see PROXY_CLEAR_VARS above).
+    // settings.json env 块优先级高于进程环境变量，必须在这里也清一遍，
+    // 才能压掉 ~/.claude/settings.json 或其他工具写入的代理残留。
+    // 无条件执行——原生 Anthropic 直连同样可能被系统残留代理劫持。
+    if !settings_val["env"].is_object() {
+        settings_val["env"] = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let settings_env_clear = settings_val["env"].as_object_mut().expect("env is object");
+    for var in PROXY_CLEAR_VARS {
+        settings_env_clear.insert(
+            var.to_string(),
+            serde_json::Value::String(String::new()),
+        );
+    }
+    settings_env_clear.insert("NO_PROXY".to_string(), serde_json::Value::String("*".to_string()));
+    settings_env_clear.insert("no_proxy".to_string(), serde_json::Value::String("*".to_string()));
+
     args.push("--settings".to_string());
     args.push(settings_val.to_string());
 

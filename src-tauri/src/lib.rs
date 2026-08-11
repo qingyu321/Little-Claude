@@ -1764,8 +1764,81 @@ fn ensure_webview2_runtime() {
     std::process::exit(1);
 }
 
+/// 窗口 URL：dev 指向 vite dev server；release 走注册的 tokico 协议
+/// （Windows 上 Tauri 将 tokico:// 映射为 http://tokico.localhost）。
+fn app_window_url(path: &str) -> tauri::WebviewUrl {
+    #[cfg(debug_assertions)]
+    {
+        tauri::WebviewUrl::External(
+            format!("http://localhost:15200/{}", path)
+                .parse()
+                .expect("dev window url"),
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        #[cfg(target_os = "windows")]
+        let url = format!("http://tokico.localhost/{}", path);
+        #[cfg(not(target_os = "windows"))]
+        let url = format!("tokico://localhost/{}", path);
+        tauri::WebviewUrl::External(url.parse().expect("tokico window url"))
+    }
+}
+
+/// 手动创建窗口（tauri.conf.json 的 windows 数组已移除）——
+/// 需要 WebviewWindowBuilder 注入 WebView2 附加参数。
+///
+/// 背景：本机主显示器挂在 Intel UHD 核显上，WebView2 151 的 GPU
+/// blocklist 把该 Intel 驱动列入软渲染名单（2026-08-08 自动更新后
+/// 生效），动态壁纸视频因此软解码+软合成掉帧（GPU 进程 CPU 60%+、
+/// renderer 软解 ~16%）。注入 `--ignore-gpu-blocklist` 让核显恢复
+/// 硬件解码/合成。附加参数会覆盖 wry 默认值，须同时带上默认的
+/// msWebOOUI 等 disable 参数。additional_browser_args 仅 Windows
+/// 生效（其他平台 no-op），方法本身全平台可调用。
+fn create_app_windows(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let browser_args =
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --ignore-gpu-blocklist";
+    let _main = {
+        let b = tauri::WebviewWindowBuilder::new(app, "main", app_window_url(""))
+            .title("Little Claude")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(900.0, 600.0);
+        #[cfg(target_os = "macos")]
+        let b = b
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+        b.additional_browser_args(browser_args).build()?
+    };
+    let _pet = tauri::WebviewWindowBuilder::new(app, "pet", app_window_url("pet.html"))
+        .title("Little Claude Pet")
+        .inner_size(240.0, 320.0)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .visible(false)
+        .focus()
+        .maximizable(false)
+        .minimizable(false)
+        .closable(false)
+        .additional_browser_args(browser_args)
+        .build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebView2 GPU 硬件加速兜底：机器带虚拟显示适配器（向日葵/GameViewer
+    // IddDriver）或混合显卡时，Chromium 的 D3D11 初始化常被 GPU blocklist
+    // 误伤而回退 WARP 软件渲染——全屏视频壁纸在软渲染下会拖垮整个 UI
+    // （实测 GPU 进程加载 D3D10Warp.dll，CPU 达数百秒）。在 WebView2 环境
+    // 创建前注入浏览器参数忽略 blocklist，强制走硬件加速；若强开仍失败，
+    // 前端壁纸的掉帧自检降级机制（透明→静态）作为最终兜底。
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--ignore-gpu-blocklist");
+    }
     let t_run = std::time::Instant::now();
     eprintln!("[little-claude] run() start");
     let app = tauri::Builder::default()
@@ -1816,6 +1889,10 @@ pub fn run() {
             #[cfg(not(feature = "video-analysis"))]
             let _ = &app;
             eprintln!("[little-claude] setup start, {:?} since run()", t_run.elapsed());
+            // 手动创建主窗口与桌宠窗口（conf 的 windows 数组已移除，见
+            // create_app_windows 注释：注入 --ignore-gpu-blocklist 修复
+            // Intel 核显被 WebView2 151 blocklist 导致的壁纸软渲染卡顿）
+            create_app_windows(app)?;
             // titleBarStyle: "Overlay" in tauri.conf.json handles macOS traffic lights
             // and native titlebar drag/double-click-to-maximize automatically.
 

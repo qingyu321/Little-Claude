@@ -20,10 +20,10 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     version: '1.1.2',
-    date: '2026-08-10',
+    date: '2026-08-11',
     highlights: {
-      zh: ['联网搜索兜底模型 + 前端资源热更新（免重装升级）'],
-      en: ['Web Search fallback model + frontend hot update (no reinstall)'],
+      zh: ['联网搜索兜底模型 + 前端资源热更新（免重装升级）+ 修复动态壁纸卡顿与 API 502'],
+      en: ['Web Search fallback model + frontend hot update (no reinstall) + wallpaper stutter & API 502 fixes'],
     },
     categories: [
       {
@@ -51,11 +51,17 @@ export const CHANGELOG: ChangelogEntry[] = [
         label: { zh: '修复', en: 'Fixed' },
         items: {
           zh: [
+            '动态壁纸卡顿 — 带虚拟显示适配器/混合显卡的机器上 WebView2 会回退软件渲染，全屏视频壁纸拖垮整个界面；现强制 GPU 硬件加速，并内置帧率自检：检测到掉帧自动降低壁纸透明度，仍卡则切换静态画面，帧率恢复后自动还原',
+            'API 请求被 Clash/系统代理劫持导致 502 — 启动 CLI 时强制直连（清空 HTTP(S)_PROXY 并 NO_PROXY=*），修复 Clash Verge 全局模式下到部分 API 端点超时/空 body 502',
+            '壁纸解码失败不再静默 — 无法解码时弹出提示，引导重新压缩',
             '升级后本地设置不再丢失 — 热更协议切换导致窗口 origin 变化，字号 / 主题 / 模型 / 头像等 localStorage 设置会被清空；现改为磁盘持久化 + 旧数据一次性迁移，今后任何 origin 变更都不影响',
             '自动压缩与上下文条真正生效 — 此前只统计非缓存输入，带缓存的长会话（缓存通常占上下文 95% 以上）永远到不了阈值、自动压缩从不触发、上下文条常年显示 1~2%；现按完整请求上下文（含缓存）计算。同时修复多会话互相阻断、大上下文压缩被误报"超时"',
             '联网兜底模型启用开关 / 密钥 / 端点保存后重启不丢失',
           ],
           en: [
+            'Dynamic wallpaper stutter — on machines with virtual display adapters / hybrid GPUs WebView2 falls back to software rendering, and a fullscreen video wallpaper drags the whole UI down; now forces GPU hardware acceleration, plus a built-in frame-rate watchdog: detects dropped frames, lowers wallpaper opacity, then switches to a static frame if still laggy, and auto-restores when frame rate recovers',
+            'API 502 from system proxy hijack — CLI now forces direct connections (clears HTTP(S)_PROXY and sets NO_PROXY=*) so Clash Verge global mode can no longer time out API endpoints',
+            'Wallpaper decode failures are no longer silent — a toast guides the user to recompress',
             'Local settings no longer lost on upgrade — the hot-update protocol switch changed the window origin and wiped localStorage settings (font size / theme / model / avatars); settings are now persisted to disk with a one-time migration of old data, immune to any future origin change',
             'Auto-compact & context bar now actually work — previously only non-cached input was counted, so long cached sessions (cache is typically 95%+ of context) never reached the threshold, auto-compact never fired and the bar stayed at 1-2%; now uses full request context including cache. Also fixed cross-session blocking and false "compact timed out" on large compacts',
             'Web Search fallback enable toggle / key / endpoint now persist across restarts',

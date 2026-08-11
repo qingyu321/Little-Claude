@@ -34,6 +34,20 @@ fn cache_creation_tokens(usage: &Value) -> u64 {
     top_level + nested
 }
 
+/// Convert an RFC3339 timestamp (UTC or with offset, optional fractional
+/// seconds — the format used by both the Claude CLI JSONL and Little Claude's
+/// own usage log) into a LOCAL calendar date string (YYYY-MM-DD).
+///
+/// The profile UI groups by local date; taking the raw first 10 characters
+/// would split days on UTC midnight, shifting late-evening/early-morning
+/// requests across day boundaries (e.g. 00:00–02:00 local lands on the
+/// previous UTC day). Falls back to the raw prefix on parse failure.
+fn local_date_from_timestamp(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| ts.get(0..10).unwrap_or("unknown").to_string())
+}
+
 /// Path to Little Claude's own usage log (append-only NDJSON).
 /// One file per machine, shared across all sessions -- keyed by date + session + message id.
 /// This is the durability layer that makes token stats correct even when the Claude CLI
@@ -195,12 +209,12 @@ fn merge_usage_log_into(
             *message_count += 1;
         }
 
+        // Local calendar date — same rule as the JSONL scan below.
         let date = value
             .get("timestamp")
             .and_then(|v| v.as_str())
-            .and_then(|s| s.get(0..10))
-            .unwrap_or("unknown")
-            .to_string();
+            .map(local_date_from_timestamp)
+            .unwrap_or_else(|| "unknown".to_string());
         let entry = daily
             .entry(date.clone())
             .or_insert_with(|| ProfileDailyStats {
@@ -374,12 +388,15 @@ pub async fn get_profile_stats() -> Result<Value, String> {
                     total_cache += cache_tokens;
                     message_count += 1;
 
+                    // Local calendar date: the JSONL timestamp is UTC (RFC3339
+                    // with Z); slicing the first 10 chars yields the UTC day,
+                    // which misbuckets 00:00–02:00 local requests onto the
+                    // previous day (the UI groups by local date).
                     let date = value
                         .get("timestamp")
                         .and_then(|v| v.as_str())
-                        .and_then(|s| s.get(0..10))
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .map(local_date_from_timestamp)
+                        .unwrap_or_else(|| "unknown".to_string());
                     let entry = daily
                         .entry(date.clone())
                         .or_insert_with(|| ProfileDailyStats {

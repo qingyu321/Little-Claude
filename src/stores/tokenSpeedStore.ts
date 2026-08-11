@@ -169,8 +169,14 @@ export const useTokenSpeedStore = create<TokenSpeedState>((set, get) => ({
     // (duration_api_ms, excludes local tool execution / permission waits)
     // from the result event. Falls back to the client estimate when the
     // event carries no usable usage data.
+    //
+    // Skip pinning when this turn streamed zero tokens: /compact summary
+    // requests output thousands of tokens in 1-3s (tiny input, no tools)
+    // — the streamed deltas are excluded by the caller (compactInFlight),
+    // so turnTokens stays 0 and the API average would read 1000+ tok/s of
+    // "compression speed", not generation speed.
     let apiAvg = 0;
-    if (api && api.outputTokens > 0 && api.durationMs > 0) {
+    if (api && api.outputTokens > 0 && api.durationMs > 0 && tab.turnTokens > 0) {
       apiAvg = Math.round((api.outputTokens / (api.durationMs / 1000)) * 10) / 10;
     }
     set((s) => {

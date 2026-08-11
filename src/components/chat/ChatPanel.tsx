@@ -31,6 +31,8 @@ import { AiAvatar } from '../shared/AiAvatar';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
 import { parseTurns, type Turn } from '../../lib/turns';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
+import { useTokenSpeedStore } from '../../stores/tokenSpeedStore';
+import { scheduleCompactTimeoutCheck } from '../../hooks/useStreamProcessor';
 
 /** Shared plan panel toggle — used by ChatPanel (panel) and InputBar (button) */
 export const usePlanPanelStore = create<{
@@ -610,6 +612,19 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   const thresholdPercent = Math.min(100, Math.round((compactThreshold / contextWindow) * 100));
   const isBusy = sessionStatus === 'running';
   const canCompact = Boolean(tabId && sessionMeta.stdinId && !isBusy && !isCompacting);
+  // Last-request context breakdown (set on result events). A large `input`
+  // share with ~no cache hit is the signature of a gateway cache invalidation
+  // — the whole history was re-sent as new tokens, which is what makes the
+  // bar jump in a single turn. Surface it instead of letting it look like a bug.
+  const bdInput = sessionMeta.contextInputTokens;
+  const hasBreakdown = bdInput != null;
+  const cachedShare = hasBreakdown && used > 0
+    ? ((sessionMeta.contextCacheReadTokens ?? 0) + (sessionMeta.contextCacheCreationTokens ?? 0)) / used
+    : 1;
+  const cacheMissed = hasBreakdown && used > 10000 && cachedShare < 0.1;
+  const breakdownTitle = hasBreakdown
+    ? `; ${t('ctx.newInput')} ${bdInput.toLocaleString()} · ${t('ctx.cacheHit')} ${(sessionMeta.contextCacheReadTokens ?? 0).toLocaleString()} · ${t('ctx.cacheWrite')} ${(sessionMeta.contextCacheCreationTokens ?? 0).toLocaleString()}`
+    : '';
 
   const handleCompact = async () => {
     if (!tabId || !sessionMeta.stdinId || isBusy) return;
@@ -630,9 +645,25 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
     store.setSessionMeta(tabId, { pendingCommandMsgId: processingMsgId });
     store.setSessionStatus(tabId, 'running');
     store.setActivityStatus(tabId, { phase: 'thinking' });
+    // The compact summary request outputs thousands of tokens in 1-3s —
+    // keep its "compression speed" out of the tok/s badge (see isCompactInFlight).
+    useTokenSpeedStore.getState().reset(tabId);
     try {
       await bridge.sendStdin(sessionMeta.stdinId, '/compact');
+      // Same activity-aware timeout as auto-compact: a CLI that accepted the
+      // command but never streams back must not leave the card spinning
+      // forever (B4 fix parity — manual path previously had no fallback).
+      scheduleCompactTimeoutCheck(tabId, processingMsgId, Date.now());
     } catch (e) {
+      // Mark the card completed so it doesn't spin forever, then recover.
+      store.updateMessage(tabId, processingMsgId, {
+        commandCompleted: true,
+        commandData: {
+          command: '/compact',
+          output: `Failed: ${String(e)}`,
+          completedAt: Date.now(),
+        },
+      });
       store.setSessionMeta(tabId, { pendingCommandMsgId: undefined });
       store.setSessionStatus(tabId, 'error');
       console.warn('[LITTLECLAUDE] manual compact failed:', e);
@@ -647,8 +678,14 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   return (
     <div className="hidden md:flex items-center gap-2 ml-2 px-2 py-1 rounded-lg
       bg-bg-secondary/60 border border-border-subtle text-[10px] text-text-tertiary"
-      title={`Actual model: ${displayDeepSeekModelName(modelForContext)}; context used ${used.toLocaleString()} / ${contextWindow.toLocaleString()}; available ${available.toLocaleString()}; auto compact at ${compactThreshold.toLocaleString()}`}>
+      title={`Actual model: ${displayDeepSeekModelName(modelForContext)}; context used ${used.toLocaleString()} / ${contextWindow.toLocaleString()}; available ${available.toLocaleString()}; auto compact at ${compactThreshold.toLocaleString()}${breakdownTitle}`}>
       <span className="font-medium text-text-muted">Ctx</span>
+      {cacheMissed && (
+        <span
+          className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"
+          title={t('ctx.cacheMissed')}
+        />
+      )}
       <div className="w-20 h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
         <div
           className={`h-full rounded-full ${percent >= thresholdPercent ? 'bg-warning' : 'bg-accent'}`}

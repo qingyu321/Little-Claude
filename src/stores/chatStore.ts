@@ -100,6 +100,11 @@ export interface SessionMeta {
    *  B2 fix: authoritative "context used" for the Ctx bar and auto-compact —
    *  input_tokens alone excludes cached content (95%+ of context in real sessions). */
   contextTokens?: number;
+  /** Breakdown of the last request's context (sums to contextTokens) — for the
+   *  Ctx bar tooltip and cache-miss detection. Only set on result events. */
+  contextInputTokens?: number;
+  contextCacheReadTokens?: number;
+  contextCacheCreationTokens?: number;
   /** Auto-compact already fired for this session (B3 fix: per-tab flag; used to be
    *  a single ref shared across all sessions of the one InputBar instance). */
   autoCompactFired?: boolean;
