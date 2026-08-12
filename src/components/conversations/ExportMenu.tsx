@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { bridge } from '../../lib/tauri-bridge';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useT } from '../../lib/i18n';
+import { showToast } from '../shared/Toast';
+import { friendlyError } from '../../lib/error-format';
 
 interface Props {
   sessionPath?: string;
@@ -61,10 +63,14 @@ export function ExportMenu({ sessionPath }: Props) {
       } else {
         await bridge.exportSessionJson(sessionPath, outputPath);
       }
-      setStatus(`${t('export.success')} ${outputPath.split(/[\\/]/).pop()}`);
+      const fileName = outputPath.split(/[\\/]/).pop() || '';
+      // B20: 导出成功给明确反馈
+      showToast(`${t('export.success')} ${fileName}`, 'success');
+      setStatus(`${t('export.success')} ${fileName}`);
       setTimeout(() => setStatus(null), 3000);
     } catch (err) {
-      setStatus(`Error: ${err}`);
+      // A5: 原始错误经分类器转成友好文案
+      setStatus(friendlyError(String(err)));
       setTimeout(() => setStatus(null), 3000);
     }
   };

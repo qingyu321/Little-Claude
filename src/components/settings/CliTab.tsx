@@ -5,6 +5,7 @@ import { APP_NAME } from '../../lib/edition';
 import { stripAnsi } from '../../lib/strip-ansi';
 import { isPermissionError, isNetworkError } from './settingsUtils';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { friendlyError } from '../../lib/error-format';
 
 type CliCheckStatus = 'idle' | 'checking' | 'found' | 'not_found' | 'installing' | 'installed' | 'install_failed' | 'updating' | 'updated' | 'update_failed';
 
@@ -85,7 +86,8 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
         setStatus('not_found');
       }
     } catch (e) {
-      setErrorMsg(stripAnsi(String(e)));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
       setStatus('not_found');
     }
   }, [bridgeCheck]);
@@ -130,11 +132,13 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
         setCliPath(result.path ?? null);
         setStatus('installed');
       } else {
-        setErrorMsg('CLI not found after installation');
+        // A7: 硬编码英文提示走 i18n
+        setErrorMsg(t('cli.notFoundAfterInstall'));
         setStatus('install_failed');
       }
     } catch (e) {
-      setErrorMsg(stripAnsi(String(e)));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
       setStatus('install_failed');
     } finally {
       unlisten();
@@ -170,7 +174,8 @@ function CliSection({ cliType, title, bridgeCheck, bridgeInstall, bridgeUpdate, 
       setStatus('updated');
       useSettingsStore.setState({ [updateKey]: false, [versionKey]: '' } as any);
     } catch (e) {
-      setErrorMsg(stripAnsi(String(e)));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
       setStatus('update_failed');
     } finally {
       unlisten();
@@ -515,7 +520,8 @@ function CliDiagnostics() {
       setPinnedPath(path);
       setActionMsg(t('cli.pinned'));
     } catch (e) {
-      setActionMsg(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setActionMsg(friendlyError(String(e)));
     }
   }, [t]);
 
@@ -525,7 +531,8 @@ function CliDiagnostics() {
       setPinnedPath(null);
       setActionMsg(t('cli.unpinned'));
     } catch (e) {
-      setActionMsg(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setActionMsg(friendlyError(String(e)));
     }
   }, [t]);
 
@@ -534,7 +541,8 @@ function CliDiagnostics() {
       const result = await bridge.injectCliPath(path);
       setActionMsg(result);
     } catch (e) {
-      setActionMsg(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setActionMsg(friendlyError(String(e)));
     }
   }, []);
 
@@ -551,7 +559,8 @@ function CliDiagnostics() {
       const updated = await bridge.diagnoseCli();
       setCandidates(updated);
     } catch (e) {
-      setActionMsg(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setActionMsg(friendlyError(String(e)));
     }
   }, [t]);
 

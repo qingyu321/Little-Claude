@@ -262,6 +262,10 @@ interface Props {
   className?: string;
   /** Base path for resolving relative image paths (defaults to workingDirectory) */
   basePath?: string;
+  /** Skip syntax highlighting entirely. Used by the streaming footer: its
+   *  partial content re-parses every flush, and highlight.js runs synchronously
+   *  on the main thread — the final message renders with highlighting instead. */
+  skipHighlight?: boolean;
 }
 
 // Sanitize schema: GitHub defaults + className on all elements (needed for highlight.js)
@@ -394,7 +398,7 @@ class MarkdownErrorBoundary extends React.Component<
   }
 }
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, className, basePath }: Props) {
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, className, basePath, skipHighlight }: Props) {
   const t = useT();
   // A6: Don't subscribe to workingDirectory — read it imperatively only when a
   // file-path handler actually needs it. This avoids re-rendering every mounted
@@ -421,8 +425,8 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
   // would block the main thread per render while the block streams in.
   const hasHugeCode = useMemo(() => hasHugeCodeBlock(content), [content]);
   const rehypePlugins = useMemo(
-    () => (hasHugeCode ? REHYPE_PLUGINS_NO_HIGHLIGHT : REHYPE_PLUGINS),
-    [hasHugeCode],
+    () => (hasHugeCode || skipHighlight ? REHYPE_PLUGINS_NO_HIGHLIGHT : REHYPE_PLUGINS),
+    [hasHugeCode, skipHighlight],
   );
 
   // Stable components object — only recreated when `t` changes

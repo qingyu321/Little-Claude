@@ -5,6 +5,8 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { useProviderStore } from '../../stores/providerStore';
 import { displayProviderModelName, normalizeProviderModelName } from '../../lib/model-utils';
 import { useT } from '../../lib/i18n';
+import { showToast } from '../shared/Toast';
+import { friendlyError } from '../../lib/error-format';
 
 /** Tier mapping from official ModelId to provider tier key */
 const TIER_MAP: Record<string, 'opus' | 'sonnet' | 'haiku'> = {
@@ -121,6 +123,9 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
     setRefreshing(true);
     try {
       await useProviderStore.getState().fetchModels(activeProvider.id);
+    } catch (e) {
+      // A6: 刷新模型失败不能无声无息 —— toast 提示（原始错误经分类器转友好文案）
+      showToast(friendlyError(String(e)), 'error');
     } finally {
       setRefreshing(false);
     }

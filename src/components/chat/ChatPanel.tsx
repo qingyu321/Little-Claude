@@ -15,6 +15,7 @@ import {
   mapSessionModeToPermissionMode,
   getContextWindowForModel,
   getAutoCompactThreshold,
+  getContextWarningThreshold,
 } from '../../stores/settingsStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useFileStore } from '../../stores/fileStore';
@@ -45,6 +46,16 @@ export const usePlanPanelStore = create<{
   toggle: () => set((s) => ({ open: !s.open })),
   close: () => set({ open: false }),
 }));
+
+/** Streaming footer renders only the tail of the partial text — parsing +
+ *  highlighting the full buffer on every flush (long answers reach 200KB+)
+ *  was the dominant main-thread cost while streaming (A4). The final message
+ *  renders in full once the turn completes. */
+const PARTIAL_TAIL_CHARS = 16 * 1024; // 16 KiB
+
+/** Stable references for react-virtuoso: an inline closure re-created on every
+ *  ChatPanel render defeats its item-level memoization (M1). */
+const neverFollowOutput = () => false;
 
 /** Resizable right-side plan panel */
 function PlanPanel({ planMessages, onClose }: {
@@ -332,21 +343,26 @@ function ActivityIndicator({ activityStatus, sessionMeta, thinkingLength }: {
     : null;
 
   // Context pressure warning: threshold depends on model context window size
-  // 1M models (mimo-v2-pro[1m]) → warn at 600K; others at 120K (60% of 200K)
+  // and the user's compact timing policy — warns 20K before the auto-compact
+  // point (CLI's WARNING_THRESHOLD_BUFFER_TOKENS semantics). 1M auto → ~947K,
+  // 200K auto → ~147K (the old fixed 60% fired at 600K/120K, months early).
   const selectedModel = useSettingsStore((s) => s.selectedModel);
   const contextWindowMode = useSettingsStore((s) => s.contextWindowMode);
+  const autoCompactMode = useSettingsStore((s) => s.autoCompactMode);
+  const autoCompactThresholdTokens = useSettingsStore((s) => s.autoCompactThresholdTokens);
   const resolvedModel = sessionMeta.spawnedModel
     || sessionMeta.snapshotModel
     || resolveModelForProvider(selectedModel);
-  const contextWindow = getContextWindowForModel(
-    resolvedModel,
-    sessionMeta.snapshotContextWindowMode ?? contextWindowMode,
-  );
   // C1: same metric as the Ctx bar and auto-compact — the FULL last-request
   // context including cached tokens. Bare input_tokens reads ~5% of the real
   // usage on cache-heavy sessions (B2), so a 60% warning on it would never fire.
   const contextTokens = sessionMeta.contextTokens ?? sessionMeta.inputTokens ?? 0;
-  const contextWarning = contextTokens > contextWindow * 0.6;
+  const contextWarning = contextTokens > getContextWarningThreshold(
+    resolvedModel,
+    sessionMeta.snapshotContextWindowMode ?? contextWindowMode,
+    autoCompactThresholdTokens,
+    autoCompactMode,
+  );
 
   // Stall detection: 120s of silence (no stream activity), not total elapsed time.
   const stallWarning = !!sessionMeta.lastProgressAt
@@ -498,96 +514,6 @@ function CliBackendToggle() {
   );
 }
 
-/** Dropdown to switch the current session's backend (with confirmation). */
-function ConvertBackendButton() {
-  const t = useT();
-  const cliBackend = useSettingsStore((s) => s.cliBackend);
-  const setCliBackend = useSettingsStore((s) => s.setCliBackend);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | null>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    if (!dropdownOpen) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [dropdownOpen]);
-
-  const label = (b: string) => b === 'codex' ? 'Codex' : 'Claude';
-
-  return (
-    <div ref={dropdownRef} className="relative">
-      <button
-        onClick={() => setDropdownOpen(!dropdownOpen)}
-        className="flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded
-          transition-smooth hover:bg-bg-tertiary text-text-tertiary cursor-pointer"
-        title={t('conv.convert')}
-      >
-        <span>+</span>
-        <span>{t('conv.convert')}</span>
-        <svg
-          className={`w-2.5 h-2.5 transition-transform duration-150 ${dropdownOpen ? 'rotate-180' : ''}`}
-          fill="none" stroke="currentColor" viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {/* Dropdown menu */}
-      {dropdownOpen && (
-        <div className="absolute top-full left-0 mt-1 min-w-[150px]
-          bg-bg-card border border-border-subtle rounded-xl shadow-lg
-          py-1 z-50 animate-in fade-in slide-in-from-top-1 duration-150">
-          {(['claude', 'codex'] as const).map((target) => {
-            const isCurrent = cliBackend === target;
-            return (
-              <button
-                key={target}
-                disabled={isCurrent}
-                onClick={() => { if (!isCurrent) setConfirmTarget(target); }}
-                className={`w-full text-left px-3 py-1.5 text-xs flex items-center justify-between
-                  transition-smooth cursor-pointer
-                  ${isCurrent
-                    ? 'text-accent bg-accent/5 opacity-50 cursor-default'
-                    : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'
-                  }`}
-              >
-                <span>{t('conv.convertTo', { target: label(target) })}</span>
-                {isCurrent && (
-                  <span className="text-[10px] opacity-60">{t('conv.convertCurrent')}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Confirm dialog */}
-      <ConfirmDialog
-        open={confirmTarget !== null}
-        title={t('conv.backendSwitchTitle', { target: confirmTarget ? label(confirmTarget) : '' })}
-        message={t('conv.backendSwitchMessage', {
-          source: label(cliBackend),
-          target: confirmTarget ? label(confirmTarget) : '',
-        })}
-        confirmLabel={t('conv.backendSwitchBtn')}
-        variant="default"
-        onConfirm={() => {
-          if (confirmTarget) setCliBackend(confirmTarget);
-          setConfirmTarget(null);
-        }}
-        onCancel={() => setConfirmTarget(null)}
-      />
-    </div>
-  );
-}
-
 function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   sessionMeta: SessionMeta;
   tabId: string | null;
@@ -597,6 +523,7 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   const selectedModel = useSettingsStore((s) => s.selectedModel);
   const contextWindowMode = useSettingsStore((s) => s.contextWindowMode);
   const autoCompactThresholdTokens = useSettingsStore((s) => s.autoCompactThresholdTokens);
+  const autoCompactMode = useSettingsStore((s) => s.autoCompactMode);
   const [isCompacting, setIsCompacting] = useState(false);
   const modelForContext = sessionMeta.spawnedModel
     || sessionMeta.snapshotModel
@@ -604,7 +531,12 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
     || resolveModelForProvider(selectedModel);
   const effectiveContextMode = sessionMeta.snapshotContextWindowMode ?? contextWindowMode;
   const contextWindow = getContextWindowForModel(modelForContext, effectiveContextMode);
-  const compactThreshold = getAutoCompactThreshold(modelForContext, effectiveContextMode, autoCompactThresholdTokens);
+  const compactThreshold = getAutoCompactThreshold(
+    modelForContext,
+    effectiveContextMode,
+    autoCompactThresholdTokens,
+    autoCompactMode,
+  );
   // B2: prefer contextTokens — the full last-request input context INCLUDING
   // cached tokens. input_tokens alone excludes prompt-cache content (95%+ of
   // context in real sessions), making the bar read ~1% on long conversations.
@@ -681,10 +613,19 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   };
 
   return (
-    <div className="hidden md:flex items-center gap-2 ml-2 px-2 py-1 rounded-lg
+    // L7: always visible — the label/free/compact extras collapse below md so
+    // the percentage survives on narrow windows (previously the whole bar hid).
+    <div className="flex items-center gap-2 ml-2 px-2 py-1 rounded-lg
       bg-bg-secondary/60 border border-border-subtle text-[10px] text-text-tertiary"
-      title={`Actual model: ${displayDeepSeekModelName(modelForContext)}; context used ${used.toLocaleString()} / ${contextWindow.toLocaleString()}; available ${available.toLocaleString()}; auto compact at ${compactThreshold.toLocaleString()}${breakdownTitle}`}>
-      <span className="font-medium text-text-muted">Ctx</span>
+      title={t('ctx.tooltip', {
+        model: displayDeepSeekModelName(modelForContext),
+        used: used.toLocaleString(),
+        window: contextWindow.toLocaleString(),
+        available: available.toLocaleString(),
+        threshold: compactThreshold.toLocaleString(),
+        breakdown: breakdownTitle,
+      })}>
+      <span className="font-medium text-text-muted hidden md:inline">{t('ctx.label')}</span>
       {cacheMissed && (
         <span
           className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"
@@ -700,15 +641,15 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
       <span className={percent >= thresholdPercent ? 'text-warning' : 'text-text-tertiary'}>
         {percent}%
       </span>
-      <span>{formatTokens(available)} free</span>
+      <span className="hidden md:inline">{formatTokens(available)} {t('ctx.free')}</span>
       <button
         onClick={handleCompact}
         disabled={!canCompact}
-        className="px-1.5 py-0.5 rounded bg-bg-tertiary hover:bg-bg-hover
+        className="hidden md:inline-flex px-1.5 py-0.5 rounded bg-bg-tertiary hover:bg-bg-hover
           text-text-muted hover:text-text-primary disabled:opacity-40 disabled:hover:bg-bg-tertiary"
-        title={canCompact ? 'Compact context now' : 'Compact is available after a live session is idle'}
+        title={canCompact ? t('ctx.compactNow') : t('ctx.compactIdle')}
       >
-        Compact
+        {t('ctx.compact')}
       </button>
     </div>
   );
@@ -1021,7 +962,10 @@ const StreamingIndicator = memo(function StreamingIndicator({
             <div className="w-8 flex-shrink-0" />
           )}
           <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed">
-            <MarkdownRenderer content={partialText} />
+            {/* A4: tail-only render + skipHighlight — parsing/highlighting the
+                full partial buffer per flush froze the main thread on long
+                answers. The completed message renders fully in the list. */}
+            <MarkdownRenderer content={partialText.slice(-PARTIAL_TAIL_CHARS)} skipHighlight />
             <span className="inline-block w-2 h-5 bg-accent ml-0.5
               animate-pulse-soft rounded-sm shadow-[0_0_8px_var(--color-accent-glow)]" />
           </div>
@@ -1220,6 +1164,30 @@ export function ChatPanel() {
   // below stops pinning within one frame, without waiting for a re-render.
   const userScrolledAwayRef = useRef(false);
 
+  // True while a programmatic scrollTop write is in flight (pinToBottom, tab
+  // restore) — the scroll listener uses it to tell our own writes apart from
+  // user scrolls. One shot per write: the browser fires one scroll event per
+  // assignment (assigning an identical value fires none, which is why the
+  // writes below guard on `!==`), so a leftover flag can't swallow a real
+  // user scroll for long — worst case one detach is deferred to the 200ms
+  // atBottom verification.
+  const programmaticScrollRef = useRef(false);
+
+  // Latest real scroll position of the scroller (kept by the scroll
+  // listener). Used to save the outgoing tab's scroll anchor on switch-away
+  // and to restore it on switch-back — without copying the heavy tab state
+  // at scroll frequency.
+  const scrollTopRef = useRef(0);
+  const scrollAnchorRef = useRef<{ scrollTop: number; distanceFromBottom: number } | null>(null);
+
+  // Refs mirroring state for the ResizeObserver callback (which must not
+  // re-create itself on every atBottom/isStreaming flip).
+  const atBottomRef = useRef<boolean | null>(null);
+  const isStreamingRef = useRef(isStreaming);
+  useEffect(() => {
+    isStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
   // The single "pin to bottom" primitive. Operates on the scroller's real DOM
   // (scrollHeight always includes the streaming Footer, even while Virtuoso
   // is still measuring it), so there is no measurement lag to drift against.
@@ -1232,14 +1200,23 @@ export function ChatPanel() {
   // jitter (and a "can't reach the bottom" bounce). On shrink the browser
   // clamps an over-extended scrollTop to the new bottom by itself, so no
   // write is needed — growth is the only case that needs an active pin.
+  // FALLOW BASELINE: the baseline must follow SHRINK as well as growth — the
+  // streaming Footer collapsing on stream end, a collapsed card, or a
+  // measurement correction all lower scrollHeight. A stale peak baseline
+  // gates out every later pin (next turn never scrolls) until content grows
+  // past the old peak again — the "lost tracking" symptom.
   const lastPinHeightRef = useRef(0);
   const pinToBottom = useCallback(() => {
     const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
     if (!scroller) return;
     const { scrollHeight, scrollTop, clientHeight } = scroller;
+    if (scrollHeight < lastPinHeightRef.current) lastPinHeightRef.current = scrollHeight;
     if (scrollHeight > lastPinHeightRef.current && scrollHeight - scrollTop - clientHeight > 2) {
       lastPinHeightRef.current = scrollHeight;
-      scroller.scrollTop = scrollHeight;
+      if (scroller.scrollTop !== scrollHeight) {
+        programmaticScrollRef.current = true;
+        scroller.scrollTop = scrollHeight;
+      }
     }
   }, []);
 
@@ -1306,6 +1283,13 @@ export function ChatPanel() {
         clearTimeout(jumpTimerRef.current);
         jumpTimerRef.current = null;
       }
+      // Save the scroll anchor on unmount — ChatPanel remounts per tab (keyed
+      // App wiring), so this deps-[] cleanup is the ONLY reliable save point.
+      // The closure captures the mounted tab's id (the effect never re-ran),
+      // and the scroll listener keeps scrollAnchorRef fresh.
+      if (scrollAnchorRef.current && selectedSessionId) {
+        useChatStore.getState().setScrollAnchor(selectedSessionId, scrollAnchorRef.current);
+      }
     };
   }, []);
 
@@ -1332,21 +1316,31 @@ export function ChatPanel() {
     if (!prev || prev.tabId !== cur.tabId || prev.ts === cur.ts) return;
     if (!cur.ts) return; // Turn ended (turnStartTime cleared) — don't yank the view
     turnStartAtRef.current = Date.now();
-    userScrolledAwayRef.current = false;
-    pinToBottom();
-    // Second pin once Virtuoso has measured the new Footer: the
-    // ActivityIndicator appears in the same commit as the turn start, but its
-    // height lands asynchronously (ResizeObserver), so the one-shot scroll
-    // above targets the pre-measure bottom and leaves the indicator just
-    // below the fold until the first delta. Re-pin after measurement settles
-    // — unless the user has deliberately scrolled away in the meantime.
-    const id = window.setTimeout(() => {
-      if (!userScrolledAwayRef.current) {
-        pinToBottom();
-      }
-    }, 120);
-    return () => clearTimeout(id);
-  }, [selectedSessionId, sessionMeta.turnStartTime]);
+    // Lift the growth-gate baseline for the new turn regardless of who
+    // started it — the previous turn's peak (e.g. after the Footer collapsed
+    // at stream end) must not gate out this turn's pins. Only RE-PIN when
+    // appropriate: a user turn (InputBar submit) is an explicit "show me the
+    // latest" intent and force-pins; an AUTO turn (FIFO drain, provider-switch
+    // retry) must never yank a user who is reading history.
+    lastPinHeightRef.current = 0;
+    const isUserTurn = sessionMeta.turnStartSource !== 'auto';
+    if (isUserTurn || !userScrolledAwayRef.current) {
+      userScrolledAwayRef.current = false;
+      pinToBottom();
+      // Second pin once Virtuoso has measured the new Footer: the
+      // ActivityIndicator appears in the same commit as the turn start, but its
+      // height lands asynchronously (ResizeObserver), so the one-shot scroll
+      // above targets the pre-measure bottom and leaves the indicator just
+      // below the fold until the first delta. Re-pin after measurement settles
+      // — unless the user has deliberately scrolled away in the meantime.
+      const id = window.setTimeout(() => {
+        if (!userScrolledAwayRef.current) {
+          pinToBottom();
+        }
+      }, 120);
+      return () => clearTimeout(id);
+    }
+  }, [selectedSessionId, sessionMeta.turnStartTime, sessionMeta.turnStartSource]);
 
   // While streaming and the user hasn't scrolled up, keep the view pinned to
   // the newest output as the partial text/thinking grows. Repeated rAF scrolls
@@ -1383,15 +1377,11 @@ export function ChatPanel() {
       // Tab switch — never yank the new view (same principle as the
       // turnStart effect). Reset to "unknown" and let Virtuoso's real
       // reports (scroll events from the pin below, user wheel) restore it.
+      // Note: the App wiring keys ChatPanel by selectedSessionId, so this
+      // branch effectively runs once per mount with fresh refs — the resets
+      // below are belt-and-braces for any future un-keyed reuse.
       lastTabForFollowRef.current = selectedSessionId;
       setAtBottom(null);
-      // Reset per-tab scroll state synchronously (before any passive effect
-      // re-runs): userScrolledAwayRef from the previous tab would silence
-      // the rAF follow effect for a streaming tab switched back to; a
-      // pendingDetach timer armed in the previous tab would fire against
-      // the new tab's scroller and misjudge it as "user scrolled up".
-      // lastPinHeightRef is per-scroller too — a stale height from the old
-      // tab would gate out the new tab's first pins.
       userScrolledAwayRef.current = false;
       lastPinHeightRef.current = 0;
       if (pendingDetachRef.current !== null) {
@@ -1403,6 +1393,40 @@ export function ChatPanel() {
     if (atBottom !== true || userScrolledAwayRef.current) return;
     pinToBottom();
   }, [displayItems, atBottom, pinToBottom, selectedSessionId]);
+
+  // Restore the scroll anchor on mount — ChatPanel remounts per tab (keyed
+  // App wiring), so this runs once per tab switch. Reading history
+  // (distanceFromBottom beyond the detach threshold) → restore the saved
+  // scrollTop and detach follow so a streaming tab isn't yanked back; pinned
+  // to the bottom last time, or a first visit → pin to the true bottom once
+  // Virtuoso has measured the restored items (a restored session must show
+  // the newest output, not the top of history). Standalone effect: the
+  // delayed pin must NOT be cancelled by the follow effect re-running on the
+  // async mount atBottom report (that cleanup race stranded long sessions at
+  // the top).
+  useLayoutEffect(() => {
+    const anchor = useChatStore.getState().scrollAnchors[selectedSessionId ?? ''];
+    if (anchor && anchor.distanceFromBottom > DETACH_DISTANCE_PX) {
+      userScrolledAwayRef.current = true;
+      requestAnimationFrame(() => {
+        const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+        if (scroller) {
+          programmaticScrollRef.current = true;
+          scroller.scrollTop = anchor.scrollTop;
+        }
+      });
+      return;
+    }
+    // Pinned to the bottom last time, or first visit — land on the latest
+    // output once Virtuoso has measured the restored items.
+    const restoreTimer = window.setTimeout(() => {
+      if (!userScrolledAwayRef.current) {
+        lastPinHeightRef.current = 0;
+        pinToBottom();
+      }
+    }, 150);
+    return () => clearTimeout(restoreTimer);
+  }, [selectedSessionId, pinToBottom]);
   const [activeTurnId, setActiveTurnId] = useState<string | undefined>();
   const turns = useMemo(() => parseTurns(messages), [messages]);
 
@@ -1468,13 +1492,179 @@ export function ChatPanel() {
     }
   }, [turns, turnIndexMap]);
 
+  // M1: stable wheel handler (same reason as renderItemContent — refs only,
+  // no reactive dependencies, so the identity never changes).
+  const handleChatWheel = useCallback((e: React.WheelEvent<HTMLElement>) => {
+    if (e.deltaY < 0) {
+      // Scroll up → detach from follow immediately, before Virtuoso's
+      // async atBottomStateChange re-render can lag behind the
+      // pinning rAF loop. Distance-gated: a tiny accidental nudge
+      // (≤4px from the bottom) must not kill tracking.
+      const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+      if (scroller) {
+        if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 4) {
+          userScrolledAwayRef.current = true;
+        }
+      } else {
+        userScrolledAwayRef.current = true;
+      }
+    } else if (e.deltaY > 0) {
+      // Scroll down near the bottom → finish the last few px. A
+      // measurement correction (scrollHeight shrink) leaves the view
+      // a few px short of the true bottom; the growth-gated pin
+      // won't chase it, so land it here — this is the user's
+      // explicit "go to bottom" intent.
+      const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+      if (scroller) {
+        const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        // distance > 0 guard: at the true bottom (distance === 0) writing the
+        // same scrollTop fires no scroll event and would leave the
+        // programmatic flag set, silently swallowing the user's NEXT non-wheel
+        // scroll-up (scrollbar/keyboard/touch) as "programmatic".
+        if (distance > 0 && distance < 8) {
+          lastPinHeightRef.current = 0;
+          programmaticScrollRef.current = true;
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+      }
+    }
+  }, []);
+
+  // Scroll listener — the universal detach path. The wheel handler above
+  // covers wheel scrolls synchronously; this covers everything else:
+  // drag-scrolling the scrollbar, keyboard/touch scrolling, trackpad
+  // inertia, and the InputBar's wheel forwarding (which writes scroller.
+  // scrollTop directly and never reaches onWheel). Programmatic writes
+  // (pinToBottom, tab restore) set programmaticScrollRef so our own pins
+  // don't read as the user scrolling away. Also keeps the scroll anchor
+  // fresh for tab switch-away saves.
+  const handleScrollerScroll = useCallback(() => {
+    const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+    if (!scroller) return;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    scrollTopRef.current = scroller.scrollTop;
+    scrollAnchorRef.current = { scrollTop: scroller.scrollTop, distanceFromBottom: distance };
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+      return;
+    }
+    // Same 4px dead-zone as the wheel handler: a tiny accidental nudge must
+    // not kill tracking. Leaving the bottom detaches; returning to it is
+    // handled by handleAtBottomStateChange(true).
+    if (distance > 4) {
+      userScrolledAwayRef.current = true;
+    }
+  }, []);
+
+  // ResizeObserver for non-streaming async height growth — image loads
+  // (AsyncImage has no onLoad hook), card expand/collapse, and other height
+  // changes that don't touch the displayItems array. While the user is
+  // pinned to the bottom and no stream is running (the rAF loop covers
+  // streaming), re-pin once the browser has laid out the new height so the
+  // bottom edge isn't cut off. Re-created when displayItems changes so the
+  // item-list element is re-located after mount/empty-state flips.
+  useEffect(() => {
+    const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+    // Must be the item-list itself: the scroller's first child is the
+    // fixed-size viewport wrapper (`:scope > div` would observe that and
+    // never fire on content growth).
+    const listEl = scroller?.querySelector<HTMLElement>('[data-testid="virtuoso-item-list"]');
+    if (!listEl) return;
+    let rafId = 0;
+    const ro = new ResizeObserver(() => {
+      if (isStreamingRef.current || userScrolledAwayRef.current) return;
+      if (atBottomRef.current !== true) return;
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => pinToBottom());
+    });
+    ro.observe(listEl);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(rafId);
+    };
+  }, [displayItems, pinToBottom]);
+
+  // M1: stable item renderer — an inline itemContent closure is re-created on
+  // every ChatPanel render, and react-virtuoso re-renders ALL visible items
+  // when the function identity changes. During streaming, partialText flushes
+  // at 60Hz/150ms, so the whole visible window was rebuilding per flush
+  // (bubbles were saved by MessageBubble's arePropsEqual, but wrappers,
+  // ToolGroups and the isFirstInGroup scan re-ran). Dependencies stay stable
+  // across flushes — B12 keeps the tabs Map reference stable while streaming.
+  const renderItemContent = useCallback((index: number, item: DisplayItem) => {
+    // Determine spacing based on item type and previous item
+    const isCompact =
+      item.kind === 'tool_group' ||
+      (item.kind === 'message' &&
+        ['tool_use', 'tool_result', 'thinking', 'todo', 'plan', 'plan_review'].includes(
+          item.msg.type,
+        ));
+    const prevItem = index > 0 ? displayItems[index - 1] : null;
+    const prevIsCompact =
+      prevItem != null &&
+      (prevItem.kind === 'tool_group' ||
+        (prevItem.kind === 'message' &&
+          ['tool_use', 'tool_result', 'thinking', 'todo', 'plan', 'plan_review'].includes(
+            prevItem.msg.type,
+          )));
+    const spacing =
+      index === 0
+        ? 'mt-4'
+        : isCompact && prevIsCompact
+          ? 'mt-0.5'
+          : isCompact || prevIsCompact
+            ? 'mt-2'
+            : 'mt-5';
+
+    if (item.kind === 'tool_group') {
+      return (
+        <div key={`tg_${item.msgs[0].id}`} className={`${spacing} chat-message-item px-20`}>
+          <ToolGroup messages={item.msgs} />
+        </div>
+      );
+    }
+
+    const msg = item.msg;
+    const idx = item.idx;
+    let isFirstInGroup = true;
+    if (msg.role === 'assistant' && msg.type === 'text') {
+      for (let j = idx - 1; j >= 0; j--) {
+        const prev = messages[j];
+        if (prev.role === 'user') break;
+        if (prev.role === 'assistant' && prev.type === 'text') {
+          isFirstInGroup = false;
+          break;
+        }
+      }
+    }
+    const sidePadding = msg.role === 'user'
+      ? 'pl-20 pr-20'
+      : 'pl-5 pr-20';
+    return (
+      <div key={msg.id} className={`${spacing} chat-message-item ${sidePadding}`}>
+        <MessageBubble
+          message={msg}
+          isFirstInGroup={isFirstInGroup}
+          isHighlighted={highlightedMessageId === msg.id}
+        />
+      </div>
+    );
+  }, [displayItems, messages, highlightedMessageId]);
+
   const handleAtBottomStateChange = useCallback((atBottom: boolean) => {
     setAtBottom(atBottom);
+    atBottomRef.current = atBottom;
     // Covers non-wheel scrolls (drag bar, keyboard, touch): back at the
     // bottom → resume following; left the bottom → detach.
     if (atBottom) {
       // Back at the bottom — resume following and cancel any pending detach.
       userScrolledAwayRef.current = false;
+      // Lifting the growth-gate baseline here covers every "returned to the
+      // bottom" path (scrollbar drag, keyboard, touch): the last pinned
+      // height may predate a Footer collapse, and the browser clamps the
+      // view to the new bottom on shrink — any later growth must pin again
+      // immediately instead of being gated out by the stale peak.
+      lastPinHeightRef.current = 0;
       if (pendingDetachRef.current !== null) {
         clearTimeout(pendingDetachRef.current);
         pendingDetachRef.current = null;
@@ -1606,7 +1796,7 @@ export function ChatPanel() {
           {/* Agent status — clickable dot + label → opens AgentPanel */}
           <button onClick={toggleAgentPanel}
             className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-lg
-              transition-smooth text-[9px]
+              transition-smooth text-[10px]
               ${agentPanelOpen ? 'bg-accent/10' : 'hover:bg-bg-secondary/50'}`}
             title={t('agents.toggle')}>
             <span className={`w-[6px] h-[6px] rounded-full flex-shrink-0 transition-smooth
@@ -1616,12 +1806,13 @@ export function ChatPanel() {
                   ? 'bg-success'
                   : 'bg-text-tertiary/30'}`} />
             <span className={`${activeAgentCount > 0 ? 'text-amber-400' : totalAgentCount > 0 ? 'text-success' : 'text-text-tertiary'}`}>
-              Agent{totalAgentCount > 1 ? ` (${totalAgentCount})` : ''}
+              {t('agents.label')}{totalAgentCount > 1 ? ` (${totalAgentCount})` : ''}
             </span>
           </button>
 
           {/* API route status — dot + label */}
-          <div className="flex items-center gap-1.5 text-[9px]">
+          <div className="flex items-center gap-1.5 text-[10px]"
+            title={activeProvider ? (activeProvider.name || 'Custom') : 'CLI'}>
             <span className={`w-[6px] h-[6px] rounded-full flex-shrink-0 transition-smooth
               ${sessionStatus === 'running'
                 ? 'bg-success shadow-[0_0_6px_var(--color-accent-glow)] animate-pulse-soft'
@@ -1633,19 +1824,19 @@ export function ChatPanel() {
             </span>
           </div>
 
-          {/* Current session mode indicator */}
-          <div className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded
+          {/* Current session mode indicator (B22: 10px + explainer tooltip) */}
+          <div className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded
             ${sessionMode === 'bypass'
               ? 'text-warning/80'
-              : 'text-text-tertiary'}`}>
+              : 'text-text-tertiary'}`}
+            title={t('mode.title')}>
             <span>{t(`mode.${sessionMode}`)}</span>
           </div>
 
-          {/* CLI Backend toggle */}
+          {/* CLI Backend toggle (B16: single control — the toggle's dropdown
+              already carries the switch/confirm flow, the duplicate
+              "+ 转换历史" button was removed) */}
           <CliBackendToggle />
-
-          {/* Cross-backend session conversion */}
-          <ConvertBackendButton />
 
           {/* Floating agent panel popover — anchored to agent button */}
           {agentPanelOpen && (
@@ -1699,98 +1890,15 @@ export function ChatPanel() {
           // Disabled on purpose — see the displayItems layout effect above.
           // Built-in follow scrolls to the LAST item's bottom (no streaming
           // Footer) and races the rAF true-bottom pin into up/down jitter.
-          followOutput={() => false}
+          followOutput={neverFollowOutput}
           atBottomStateChange={handleAtBottomStateChange}
           rangeChanged={handleRangeChanged}
-          onWheel={(e) => {
-            if (e.deltaY < 0) {
-              // Scroll up → detach from follow immediately, before Virtuoso's
-              // async atBottomStateChange re-render can lag behind the
-              // pinning rAF loop. Distance-gated: a tiny accidental nudge
-              // (≤4px from the bottom) must not kill tracking.
-              const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
-              if (scroller) {
-                if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 4) {
-                  userScrolledAwayRef.current = true;
-                }
-              } else {
-                userScrolledAwayRef.current = true;
-              }
-            } else if (e.deltaY > 0) {
-              // Scroll down near the bottom → finish the last few px. A
-              // measurement correction (scrollHeight shrink) leaves the view
-              // a few px short of the true bottom; the growth-gated pin
-              // won't chase it, so land it here — this is the user's
-              // explicit "go to bottom" intent.
-              const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
-              if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
-                lastPinHeightRef.current = 0;
-                scroller.scrollTop = scroller.scrollHeight;
-              }
-            }
-          }}
+          onWheel={handleChatWheel}
+          onScroll={handleScrollerScroll}
           computeItemKey={(_, item) =>
             item.kind === 'tool_group' ? `tg_${item.msgs[0].id}` : item.msg.id
           }
-          itemContent={(index, item) => {
-            // Determine spacing based on item type and previous item
-            const isCompact =
-              item.kind === 'tool_group' ||
-              (item.kind === 'message' &&
-                ['tool_use', 'tool_result', 'thinking', 'todo', 'plan', 'plan_review'].includes(
-                  item.msg.type,
-                ));
-            const prevItem = index > 0 ? displayItems[index - 1] : null;
-            const prevIsCompact =
-              prevItem != null &&
-              (prevItem.kind === 'tool_group' ||
-                (prevItem.kind === 'message' &&
-                  ['tool_use', 'tool_result', 'thinking', 'todo', 'plan', 'plan_review'].includes(
-                    prevItem.msg.type,
-                  )));
-            const spacing =
-              index === 0
-                ? 'mt-4'
-                : isCompact && prevIsCompact
-                  ? 'mt-0.5'
-                  : isCompact || prevIsCompact
-                    ? 'mt-2'
-                    : 'mt-5';
-
-            if (item.kind === 'tool_group') {
-              return (
-                <div key={`tg_${item.msgs[0].id}`} className={`${spacing} chat-message-item px-20`}>
-                  <ToolGroup messages={item.msgs} />
-                </div>
-              );
-            }
-
-            const msg = item.msg;
-            const idx = item.idx;
-            let isFirstInGroup = true;
-            if (msg.role === 'assistant' && msg.type === 'text') {
-              for (let j = idx - 1; j >= 0; j--) {
-                const prev = messages[j];
-                if (prev.role === 'user') break;
-                if (prev.role === 'assistant' && prev.type === 'text') {
-                  isFirstInGroup = false;
-                  break;
-                }
-              }
-            }
-            const sidePadding = msg.role === 'user'
-              ? 'pl-20 pr-20'
-              : 'pl-5 pr-20';
-            return (
-              <div key={msg.id} className={`${spacing} chat-message-item ${sidePadding}`}>
-                <MessageBubble
-                  message={msg}
-                  isFirstInGroup={isFirstInGroup}
-                  isHighlighted={highlightedMessageId === msg.id}
-                />
-              </div>
-            );
-          }}
+          itemContent={renderItemContent}
           components={virtuosoComponents}
         />
       )}

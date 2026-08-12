@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore, setSessionModeLocal } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
 import { MarkdownRenderer } from '../shared/MarkdownRenderer';
+import { friendlyError } from '../../lib/error-format';
 
 interface Props {
   message: ChatMessage;
@@ -79,12 +80,27 @@ export const PlanReviewCard = memo(function PlanReviewCard({ message, floating }
             permData.toolUseId,
             permData.input,
           );
+          // L3: write a placeholder tool_result on the ExitPlanMode tool_use —
+          // plan mode may not stream a real tool_result for it, and the idle
+          // check ("any tool_use without a result ⇒ CLI still executing")
+          // would otherwise flag the session never-idle, silently disabling
+          // auto-compact. A later real tool_result event simply overwrites it.
+          // 回归修复: 仅当 tool_use 消息已落库时写入（permission 通常晚于
+          // tool_use 块到达，但极端时序下可能先到 —— 此时写入会静默落空，
+          // 检查存在性避免误以为占位已生效；CLI 正常仍会补发真实 tool_result）。
+          if (planTabId && permData.toolUseId
+              && useChatStore.getState().getTab(planTabId)?.messages.some((m) => m.id === permData.toolUseId)) {
+            useChatStore.getState().updateMessage(planTabId, permData.toolUseId, {
+              toolResultContent: t('plan.approvedPlaceholder'),
+            });
+          }
         } catch (err) {
           console.error('[TC:plan] Failed to respond to ExitPlanMode permission:', err);
           if (planTabId) {
             useChatStore.getState().updateMessage(planTabId, message.id, {
               interactionState: 'failed',
-              interactionError: String(err),
+              // A5: 原始错误经分类器转成友好文案
+              interactionError: friendlyError(String(err)),
             });
           }
           setApproving(false);

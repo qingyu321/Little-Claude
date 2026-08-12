@@ -6,6 +6,7 @@ import { APP_VERSION } from '../../lib/version';
 import { ChangelogModal } from '../shared/ChangelogModal';
 import { isPermissionError, isNetworkError } from './settingsUtils';
 import { bridge, onUpdateProgress } from '../../lib/tauri-bridge';
+import { friendlyError } from '../../lib/error-format';
 import {
   checkForUpdatesNow,
   currentWebVersion,
@@ -114,7 +115,7 @@ const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
   { id: 'videoAnalysis', labelKey: 'settings.tab.videoAnalysis' },
   { id: 'speech', labelKey: 'settings.tab.speech' },
   { id: 'cli', labelKey: 'settings.tab.cli' },
-  { id: 'localModels', labelKey: '本地模型' },
+  { id: 'localModels', labelKey: 'settings.tab.localModels' },
   { id: 'mcp', labelKey: 'settings.tab.mcp' },
   { id: 'prerequisites', labelKey: 'settings.tab.prerequisites' },
   { id: 'moduleManagement', labelKey: 'settings.tab.moduleManagement' },
@@ -125,7 +126,19 @@ const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
 export function SettingsPanel() {
   const t = useT();
   const toggleSettings = useSettingsStore((s) => s.toggleSettings);
+  const settingsOpenRequest = useSettingsStore((s) => s.settingsOpenRequest);
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+
+  // Pet window "设置" → open on the requested tab (③-2). Covers both mounts
+  // (panel closed → request set before toggleSettings opens it) and an already
+  // open panel (request changes while mounted → switch tab, don't close).
+  // The request is one-shot: consumed here, then cleared.
+  useEffect(() => {
+    if (settingsOpenRequest?.tab) {
+      setActiveTab(settingsOpenRequest.tab as SettingsTab);
+      useSettingsStore.getState().setSettingsOpenRequest(null);
+    }
+  }, [settingsOpenRequest]);
 
   // Close on Escape
   useEffect(() => {
@@ -273,7 +286,8 @@ function SettingsFooter() {
         setStatus('error');
       }
     } catch (e) {
-      setErrorMsg(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(String(e)));
       setStatus('error');
     }
   }, [t]);
@@ -304,7 +318,8 @@ function SettingsFooter() {
       recordAppliedWebVersion(updateInfo.version);
       setWebVersion(updateInfo.version.replace(/^v/, ''));
     } catch (e) {
-      setDownloadError(String(e));
+      // A5: 原始错误经分类器转成友好文案
+      setDownloadError(friendlyError(String(e)));
       setDownloadState('error');
     } finally {
       unlistenRef.current?.();

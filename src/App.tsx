@@ -11,7 +11,6 @@ import type { ColorTheme, FontFamily, Theme } from './stores/settingsStore';
 import { useFileStore } from './stores/fileStore';
 import { useChatStore } from './stores/chatStore';
 import { useSessionStore } from './stores/sessionStore';
-import { APP_NAME } from './lib/edition';
 import { useAgentStore } from './stores/agentStore';
 import { bridge, onFileChange } from './lib/tauri-bridge';
 import { useT } from './lib/i18n';
@@ -132,38 +131,44 @@ function App() {
     };
   }, []);
 
-  // Confirm before closing the window (red X / Cmd+Q)
-  const closePendingRef = useRef(false);
-  const tRef = useRef(t);
-  tRef.current = t;
+  // Confirm before closing the window (red X / Cmd+Q). B17: the confirmation
+  // now carries a "don't ask again" checkbox — the native ask() can't host one,
+  // so this uses a small custom dialog; the flag persists in settings
+  // (confirmOnClose). When unchecked, closing exits immediately.
+  const confirmOnClose = useSettingsStore((s) => s.confirmOnClose);
+  const setConfirmOnClose = useSettingsStore((s) => s.setConfirmOnClose);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const closeNeverAgainRef = useRef(false);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       const win = getCurrentWindow();
       win.onCloseRequested(async (event) => {
-        if (closePendingRef.current) { event.preventDefault(); return; }
         event.preventDefault();
-        closePendingRef.current = true;
-        try {
-          const { ask } = await import('@tauri-apps/plugin-dialog');
-          const confirmed = await ask(tRef.current('confirm.exit'), {
-            title: APP_NAME,
-            kind: 'warning',
-            okLabel: tRef.current('common.confirm'),
-            cancelLabel: tRef.current('common.cancel'),
-          });
-          if (confirmed) {
-            const { exit } = await import('@tauri-apps/plugin-process');
-            await exit(0);
-          }
-        } finally {
-          closePendingRef.current = false;
+        if (!confirmOnClose) {
+          const { exit } = await import('@tauri-apps/plugin-process');
+          await exit(0);
+          return;
         }
+        setCloseDialogOpen(true);
       }).then((fn) => { unlisten = fn; });
     });
     return () => { unlisten?.(); };
-  }, []);
+  }, [confirmOnClose]);
+
+  const handleCloseConfirmed = () => {
+    setCloseDialogOpen(false);
+    if (closeNeverAgainRef.current) setConfirmOnClose(false);
+    import('@tauri-apps/plugin-process').then(({ exit }) => exit(0));
+  };
+
+  // 回归修复: 取消路径必须重置 "不再询问" ref — 勾选后取消再确认退出，
+  // 残留的 ref 会静默关闭下一次的关闭确认。
+  const handleCloseDialogCancel = () => {
+    closeNeverAgainRef.current = false;
+    setCloseDialogOpen(false);
+  };
 
   // TK-329: On app startup (incl. browser refresh), detect and kill orphaned backend processes.
   // After refresh, frontend state (stdinToTab, listeners) is wiped, but Rust ProcessManager
@@ -533,6 +538,47 @@ function App() {
         </div>
       )}
       <Toast />
+      {/* B17: close-confirmation dialog with "don't ask again" */}
+      {closeDialogOpen && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40"
+          onClick={handleCloseDialogCancel}
+        >
+          <div
+            className="bg-bg-card border border-border-subtle rounded-xl p-5
+              shadow-lg max-w-sm w-full mx-4 animate-fade-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-text-primary mb-2">{t('confirm.exitTitle')}</h3>
+            <p className="text-sm text-text-primary mb-4">{t('confirm.exit')}</p>
+            <label className="flex items-center gap-2 mb-4 text-xs text-text-muted
+              cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="w-4 h-4 rounded accent-accent"
+                onChange={(e) => { closeNeverAgainRef.current = e.target.checked; }}
+              />
+              {t('confirm.dontAskAgain')}
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleCloseDialogCancel}
+                className="px-3 py-1.5 text-xs rounded-lg bg-bg-secondary
+                  text-text-muted hover:bg-bg-tertiary transition-smooth cursor-pointer"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                onClick={handleCloseConfirmed}
+                className="px-3 py-1.5 text-xs rounded-lg bg-accent/10 text-accent
+                  hover:bg-accent/20 transition-smooth cursor-pointer"
+              >
+                {t('common.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

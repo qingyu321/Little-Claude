@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { bridge, type ClaudePluginInfo } from '../../lib/tauri-bridge';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useT } from '../../lib/i18n';
 
 type InstallScope = 'user' | 'project' | 'local';
 
@@ -127,6 +128,7 @@ function PluginCard({
 
 export function PluginsPanel() {
   const cwd = useSettingsStore((s) => s.workingDirectory);
+  const t = useT();
   const [installed, setInstalled] = useState<ClaudePluginInfo[]>([]);
   const [available, setAvailable] = useState<ClaudePluginInfo[]>([]);
   const [query, setQuery] = useState('');
@@ -209,7 +211,7 @@ export function PluginsPanel() {
       <div className="p-3 border-b border-border-subtle space-y-2">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <h3 className="text-sm font-semibold text-text-primary">Claude Code Plugins</h3>
+            <h3 className="text-sm font-semibold text-text-primary">{t('plugins.title')}</h3>
             <p className="text-[11px] text-text-tertiary mt-0.5">
               New sessions may be required after install or update.
             </p>
@@ -235,16 +237,16 @@ export function PluginsPanel() {
             text-xs text-text-primary placeholder:text-text-tertiary outline-none focus:border-border-focus"
         />
         <div className="flex items-center gap-2 text-[11px]">
-          <span className="text-text-tertiary">Install scope</span>
+          <span className="text-text-tertiary">{t('plugins.installScope')}</span>
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as InstallScope)}
             className="bg-bg-secondary border border-border-subtle rounded-md px-2 py-1
               text-text-primary outline-none"
           >
-            <option value="user">User</option>
-            <option value="project">Project</option>
-            <option value="local">Local</option>
+            <option value="user">{t('plugins.scopeUser')}</option>
+            <option value="project">{t('plugins.scopeProject')}</option>
+            <option value="local">{t('plugins.scopeLocal')}</option>
           </select>
         </div>
         {error && (

@@ -3,6 +3,7 @@ import { type ChatMessage, useChatStore, getActiveTabState } from '../../stores/
 import { useSessionStore } from '../../stores/sessionStore';
 import { bridge } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
+import { friendlyError } from '../../lib/error-format';
 
 interface Props {
   message: ChatMessage;
@@ -56,7 +57,8 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
         setSessionStatus(permTabId, 'running');
         setActivityStatus(permTabId, { phase: 'thinking' });
       } catch (err) {
-        setInteractionState(permTabId, message.id, 'failed', String(err));
+        // A5: 原始错误经分类器转成友好文案
+        setInteractionState(permTabId, message.id, 'failed', friendlyError(String(err)));
       }
     } else {
       // Legacy fallback: send raw y/n to stdin (for bypass/old-style)
@@ -68,7 +70,8 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
         setActivityStatus(permTabId, { phase: 'thinking' });
       } catch (err) {
         console.warn('[TC:permission] Legacy permission response failed:', err);
-        setInteractionState(permTabId, message.id, 'failed', String(err));
+        // A5: 原始错误经分类器转成友好文案
+        setInteractionState(permTabId, message.id, 'failed', friendlyError(String(err)));
       }
     }
     setRetrying(false);
@@ -165,7 +168,8 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
           <div className="px-3 pb-2">
             <div className="text-[11px] text-error bg-error/5 rounded-lg px-2.5 py-2
               border border-error/20">
-              {message.interactionError || 'Failed to send response'}
+              {/* A5: 英文兜底文案换 i18n */}
+              {message.interactionError || t('error.sendFailed')}
             </div>
           </div>
         )}

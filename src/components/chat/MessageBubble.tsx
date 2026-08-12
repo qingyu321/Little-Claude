@@ -315,7 +315,8 @@ function CommandFeedbackMsg({ message }: Props) {
 
     return (
       <div className="ml-11 my-1 animate-fade-in">
-        <div className="inline-block rounded-lg border border-border-subtle
+        {/* L9: info 命令结果卡片加左侧强调边框，与普通系统消息区分 */}
+        <div className="inline-block rounded-lg border border-border-subtle border-l-2 border-l-accent/50
           bg-bg-secondary/50 overflow-hidden max-w-xs">
           {/* Header */}
           <div className="flex items-center gap-2 px-3 py-1.5
@@ -359,7 +360,8 @@ function CommandFeedbackMsg({ message }: Props) {
     const builtins: Array<{ name: string; desc: string }> = data.builtins || [];
     return (
       <div className="ml-11 my-1 animate-fade-in">
-        <div className="rounded-lg border border-border-subtle
+        {/* L9: help 命令结果卡片加左侧强调边框，与普通系统消息区分 */}
+        <div className="rounded-lg border border-border-subtle border-l-2 border-l-accent/50
           bg-bg-secondary/50 overflow-hidden max-w-md">
           {/* Header */}
           <div className="flex items-center gap-2 px-3 py-1.5

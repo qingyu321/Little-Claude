@@ -18,7 +18,7 @@ import { FileUploadChips } from './FileUploadChips';
 import { RewindPanel } from './RewindPanel';
 import { useFileAttachments } from '../../hooks/useFileAttachments';
 import { useRewind } from '../../hooks/useRewind';
-import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab } from '../../hooks/useStreamProcessor';
+import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, formatErrorForUser } from '../../hooks/useStreamProcessor';
 import { useAgentStore } from '../../stores/agentStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useT } from '../../lib/i18n';
@@ -658,7 +658,18 @@ export function InputBar() {
           feedback('error', t('cmd.exportNoPath'));
           return;
         }
-        const outputPath = args || sessionPath.replace(/\.jsonl$/, '.md');
+        // B20: 无参数默认导出到 JSONL 同目录 .md —— 若已存在则追加时间戳去重，
+        // 避免静默覆盖用户已有的导出文件；显式传参时按用户意图直接覆盖
+        let outputPath = args || sessionPath.replace(/\.jsonl$/, '.md');
+        if (!args) {
+          try {
+            await bridge.getFileSize(outputPath); // 不存在会抛错
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+            outputPath = outputPath.replace(/\.md$/, `-${stamp}.md`);
+          } catch {
+            // 目标文件不存在，使用默认路径
+          }
+        }
         try {
           await bridge.exportSessionMarkdown(sessionPath, outputPath);
           feedback('action', `${t('export.success')} ${outputPath}`);
@@ -919,6 +930,7 @@ export function InputBar() {
     setSessionStatus(tabId, 'running');
     setSessionMeta(tabId, {
       turnStartTime: turnStartedAt,
+      turnStartSource: 'user',
       lastProgressAt: turnStartedAt,
       inputTokens: 0,
       outputTokens: 0,
@@ -1347,7 +1359,8 @@ export function InputBar() {
         id: generateMessageId(),
         role: 'system',
         type: 'text',
-        content: `Error: ${err}`,
+        // A5: 原始错误经分类器转成友好文案（markdown 渲染含可折叠详情）
+        content: formatErrorForUser(String(err)),
         timestamp: Date.now(),
       });
       // Spawn failure — restore queued messages to the draft (same semantics
@@ -1368,6 +1381,18 @@ export function InputBar() {
 
   // Keep ref in sync so executeImmediateCommand can call latest handleSubmit
   handleSubmitRef.current = handleSubmit;
+
+  // B15: 取消排队 —— 清空 pending 并回填草稿（与 Stop 的回填语义一致），
+  // 用户可随时取消"静默排队"的消息
+  const cancelPending = useCallback(() => {
+    const tid = useSessionStore.getState().selectedSessionId;
+    if (!tid) return;
+    const queued = useChatStore.getState().flushPendingMessages(tid);
+    if (queued.length > 0) {
+      const draft = useChatStore.getState().getTab(tid)?.inputDraft ?? '';
+      useChatStore.getState().setInputDraft(tid, [draft, ...queued].filter(Boolean).join('\n\n'));
+    }
+  }, []);
 
   // H6: flush the first pending message once a disk-load finishes. During
   // handleLoadSession the tab is 'running' with no stdinId, so submissions
@@ -1689,6 +1714,30 @@ export function InputBar() {
           </div>
         ) : null}
 
+        {/* Pending queue indicator — B15: 运行中发送的消息会静默排队，
+            必须让用户看到数量并可取消 */}
+        {pendingCount > 0 && (
+          <div className="mb-1.5 px-3 py-1.5 rounded-lg
+            bg-warning/10 border border-warning/20
+            flex items-center gap-2 animate-fade-in">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+              stroke="currentColor" strokeWidth="1.5" className="text-warning flex-shrink-0">
+              <rect x="3" y="2" width="6" height="6" rx="1" />
+              <path d="M6 8v2M4.5 10h3" />
+            </svg>
+            <span className="flex-1 text-[11px] text-warning">
+              {t('input.pendingQueued', { n: String(pendingCount) })}
+            </span>
+            <button
+              onClick={cancelPending}
+              className="flex-shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium
+                bg-warning/10 text-warning hover:bg-warning/20 transition-smooth"
+            >
+              {t('input.pendingCancel')}
+            </button>
+          </div>
+        )}
+
         {/* Main input area */}
         <div className="relative">
           <SlashCommandPopover
@@ -1906,7 +1955,7 @@ export function InputBar() {
                     ? 'text-red-500 bg-red-500/10 border border-red-500/20'
                     : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
                   } ${isRunning ? 'opacity-40 pointer-events-none' : ''}`}
-                title="语音输入"
+                title={t('speech.input')}
               >
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
                   stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
@@ -1915,7 +1964,7 @@ export function InputBar() {
                   <path d="M3 7a5 5 0 0010 0" />
                   <path d="M8 13v2M5 15h6" />
                 </svg>
-                <span className="text-[10px]">语音</span>
+                <span className="text-[10px]">{t('speech.input')}</span>
               </button>
 
               {/* Floating speech panel */}

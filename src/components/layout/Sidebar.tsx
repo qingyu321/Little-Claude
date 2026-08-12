@@ -80,7 +80,7 @@ export function Sidebar() {
               <button
                 onClick={() => setProfileOpen(true)}
                 className="rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40"
-                title="个人资料"
+                title={t('sidebar.profile')}
               >
                 <img
                   src="/app-icon.png"
@@ -95,7 +95,7 @@ export function Sidebar() {
                     WebkitBackgroundClip: 'text',
                     WebkitTextFillColor: 'transparent',
                   }}>
-                  DeepSeek：已夺舍
+                  {t('sidebar.deepseekEasterEgg')}
                 </span>
               ) : (
                 <span className="text-[15px] font-bold tracking-tight text-text-primary">
@@ -113,7 +113,7 @@ export function Sidebar() {
               <button
                 onClick={() => setProfileOpen(true)}
                 className="rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40"
-                title="个人资料"
+                title={t('sidebar.profile')}
               >
                 <img
                   src="/app-icon.png"
@@ -128,7 +128,7 @@ export function Sidebar() {
                     WebkitBackgroundClip: 'text',
                     WebkitTextFillColor: 'transparent',
                   }}>
-                  DeepSeek：已夺舍
+                  {t('sidebar.deepseekEasterEgg')}
                 </span>
               ) : (
                 <span className="text-[16px] font-bold tracking-tight text-text-primary">

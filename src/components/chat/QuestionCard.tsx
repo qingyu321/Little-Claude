@@ -3,6 +3,7 @@ import { type ChatMessage, useChatStore, getActiveTabState } from '../../stores/
 import { useSessionStore } from '../../stores/sessionStore';
 import { bridge } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
+import { friendlyError } from '../../lib/error-format';
 
 /** Decode literal Unicode escape sequences (e.g. `\u2014`) that appear in text. */
 function decodeUnicodeEscapes(text: string): string {
@@ -137,7 +138,8 @@ export const QuestionCard = memo(function QuestionCard({ message, floating }: Pr
         setSessionStatus(qTabId, 'running');
         setActivityStatus(qTabId, { phase: 'thinking' });
       } catch (err) {
-        setInteractionState(qTabId, message.id, 'failed', String(err));
+        // A5: 原始错误经分类器转成友好文案
+        setInteractionState(qTabId, message.id, 'failed', friendlyError(String(err)));
       }
     } else {
       setCurrentIdx(currentIdx + 1);
@@ -164,7 +166,8 @@ export const QuestionCard = memo(function QuestionCard({ message, floating }: Pr
       setSessionStatus(skipTabId, 'running');
       setActivityStatus(skipTabId, { phase: 'thinking' });
     } catch (err) {
-      setInteractionState(skipTabId, message.id, 'failed', String(err));
+      // A5: 原始错误经分类器转成友好文案
+      setInteractionState(skipTabId, message.id, 'failed', friendlyError(String(err)));
     }
   }, [isFullyResolved, isSending, awaitingSdkPatch, message.id]);
 

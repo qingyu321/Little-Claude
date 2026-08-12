@@ -42,10 +42,27 @@ export const SessionContextMenu = memo(function SessionContextMenu({
       }
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      // B21: 键盘可达 —— 打开时聚焦首个菜单项，↑↓ 循环导航，Esc 关闭
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const btns = Array.from(
+          menuRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [],
+        );
+        if (btns.length === 0) return;
+        const idx = btns.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === 'ArrowDown'
+          ? (idx + 1) % btns.length
+          : (idx - 1 + btns.length) % btns.length;
+        btns[next]?.focus();
+      } else if (e.key === 'Escape') {
+        onClose();
+      }
     };
     document.addEventListener('mousedown', handler);
     document.addEventListener('keydown', handleKey);
+    // 打开时聚焦第一个菜单项
+    const first = menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]');
+    first?.focus();
     return () => {
       document.removeEventListener('mousedown', handler);
       document.removeEventListener('keydown', handleKey);
@@ -55,11 +72,14 @@ export const SessionContextMenu = memo(function SessionContextMenu({
   return createPortal(
     <div
       ref={menuRef}
+      role="menu"
       className="fixed z-[9999] min-w-[160px] py-1.5 rounded-xl
         bg-bg-card border border-border-subtle shadow-xl animate-fade-in"
       style={{ left: x, top: y }}
     >
       <button
+        role="menuitem"
+        tabIndex={-1}
         onClick={() => { onClose(); onRename(session); }}
         className="w-full flex items-center gap-2.5 px-3 py-1.5
           text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -73,6 +93,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
 
       {onPin && (
         <button
+          role="menuitem"
+          tabIndex={-1}
           onClick={() => { onClose(); onPin(session); }}
           className="w-full flex items-center gap-2.5 px-3 py-1.5
             text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -88,6 +110,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
 
       {onArchive && (
         <button
+          role="menuitem"
+          tabIndex={-1}
           onClick={() => { onClose(); onArchive(session); }}
           className="w-full flex items-center gap-2.5 px-3 py-1.5
             text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -104,6 +128,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
 
       {session.path && (
         <button
+          role="menuitem"
+          tabIndex={-1}
           onClick={() => { onClose(); onRevealInFinder(session); }}
           className="w-full flex items-center gap-2.5 px-3 py-1.5
             text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -118,6 +144,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
 
       {session.path && (
         <button
+          role="menuitem"
+          tabIndex={-1}
           onClick={() => { onClose(); onExport(session); }}
           className="w-full flex items-center gap-2.5 px-3 py-1.5
             text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -133,6 +161,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
       <div className="my-1 border-t border-border-subtle" />
 
       <button
+        role="menuitem"
+        tabIndex={-1}
         onClick={() => { onClose(); onDelete(session); }}
         className="w-full flex items-center gap-2.5 px-3 py-1.5
           text-xs text-red-500 hover:bg-red-500/10 transition-smooth"
@@ -179,10 +209,27 @@ export const ProjectContextMenu = memo(function ProjectContextMenu({
       }
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      // B21: 键盘可达 —— 打开时聚焦首个菜单项，↑↓ 循环导航，Esc 关闭
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const btns = Array.from(
+          menuRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [],
+        );
+        if (btns.length === 0) return;
+        const idx = btns.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === 'ArrowDown'
+          ? (idx + 1) % btns.length
+          : (idx - 1 + btns.length) % btns.length;
+        btns[next]?.focus();
+      } else if (e.key === 'Escape') {
+        onClose();
+      }
     };
     document.addEventListener('mousedown', handler);
     document.addEventListener('keydown', handleKey);
+    // 打开时聚焦第一个菜单项
+    const first = menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]');
+    first?.focus();
     return () => {
       document.removeEventListener('mousedown', handler);
       document.removeEventListener('keydown', handleKey);
@@ -192,11 +239,14 @@ export const ProjectContextMenu = memo(function ProjectContextMenu({
   return createPortal(
     <div
       ref={menuRef}
+      role="menu"
       className="fixed z-[9999] min-w-[160px] py-1.5 rounded-xl
         bg-bg-card border border-border-subtle shadow-xl animate-fade-in"
       style={{ left: x, top: y }}
     >
       <button
+        role="menuitem"
+        tabIndex={-1}
         onClick={() => { onClose(); onNewSession(project); }}
         className="w-full flex items-center gap-2.5 px-3 py-1.5
           text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -211,6 +261,8 @@ export const ProjectContextMenu = memo(function ProjectContextMenu({
       {onSelectMode && (
         <>
           <button
+            role="menuitem"
+            tabIndex={-1}
             onClick={() => { onClose(); onSelectMode(project); }}
             className="w-full flex items-center gap-2.5 px-3 py-1.5
               text-xs text-text-primary hover:bg-bg-secondary transition-smooth"
@@ -230,6 +282,8 @@ export const ProjectContextMenu = memo(function ProjectContextMenu({
       <div className="my-1 border-t border-border-subtle" />
 
       <button
+        role="menuitem"
+        tabIndex={-1}
         onClick={() => { onClose(); onDeleteAll(project); }}
         className="w-full flex items-center gap-2.5 px-3 py-1.5
           text-xs text-red-500 hover:bg-red-500/10 transition-smooth"

@@ -3,6 +3,7 @@ import { useMcpStore } from '../../stores/mcpStore';
 import type { DiscoveredMcpServer, McpServer, McpServerConfig } from '../../stores/mcpStore';
 import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
+import { friendlyError } from '../../lib/error-format';
 
 export function McpTab() {
   const t = useT();
@@ -32,7 +33,8 @@ export function McpTab() {
       try {
         await deleteServer(name);
       } catch (e) {
-        showToast(String(e), 'error');
+        // A5: 原始错误经分类器转成友好文案
+        showToast(friendlyError(String(e)), 'error');
       }
     }
   }, [deleteServer, t]);
@@ -41,7 +43,7 @@ export function McpTab() {
     try {
       await importDiscoveredServers(names);
     } catch (e) {
-      showToast(String(e), 'error');
+      showToast(friendlyError(String(e)), 'error');
     }
   }, [importDiscoveredServers]);
 
@@ -139,7 +141,7 @@ export function McpTab() {
               try {
                 await addServer(name, config);
               } catch (e) {
-                showToast(String(e), 'error');
+                showToast(friendlyError(String(e)), 'error');
               }
             }}
             onCancel={() => setAdding(false)}
@@ -166,7 +168,7 @@ export function McpTab() {
                   try {
                     await updateServer(server.name, name, config);
                   } catch (e) {
-                    showToast(String(e), 'error');
+                    showToast(friendlyError(String(e)), 'error');
                   }
                 }}
                 onCancel={() => setEditing(null)}

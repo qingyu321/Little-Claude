@@ -11,6 +11,7 @@ import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
 import { cleanupStreamListener } from '../../lib/stream-cleanup';
 import { parseSessionMessages } from '../../lib/session-loader';
+import { formatErrorForUser } from '../../hooks/useStreamProcessor';
 import { SessionGroup } from './SessionGroup';
 import { SessionItem } from './SessionItem';
 import { SessionContextMenu, ProjectContextMenu } from './SessionContextMenu';
@@ -82,6 +83,7 @@ export function ConversationList() {
   // Store subscriptions
   const sessions = useSessionStore((s) => s.sessions);
   const isLoading = useSessionStore((s) => s.isLoading);
+  const fetchError = useSessionStore((s) => s.fetchError);
   const searchQuery = useSessionStore((s) => s.searchQuery);
   const fetchSessions = useSessionStore((s) => s.fetchSessions);
   const setSearchQuery = useSessionStore((s) => s.setSearchQuery);
@@ -384,7 +386,8 @@ export function ConversationList() {
         id: generateMessageId(),
         role: 'system',
         type: 'text',
-        content: `${t('conv.loadFailed')}: ${err}`,
+        // A5: 原始错误经分类器转成友好文案（含可折叠的原始详情）
+        content: formatErrorForUser(String(err)),
         timestamp: Date.now(),
       });
     }
@@ -495,10 +498,13 @@ export function ConversationList() {
       filters: [{ name: 'Markdown', extensions: ['md'] }],
     });
     if (outputPath) {
-      bridge.exportSessionMarkdown(session.path, outputPath).catch((err) => {
-        console.error('Failed to export session:', err);
-        showToast(t('conv.exportFailed'), 'error');
-      });
+      bridge.exportSessionMarkdown(session.path, outputPath)
+        // B20: 导出成功给反馈（与顶栏 ExportMenu 一致）
+        .then(() => showToast(`${t('export.success')} ${outputPath.split(/[\\/]/).pop()}`, 'success'))
+        .catch((err) => {
+          console.error('Failed to export session:', err);
+          showToast(t('conv.exportFailed'), 'error');
+        });
     }
   }, [t]);
 
@@ -692,6 +698,20 @@ export function ConversationList() {
               <path d="M6 8h4" />
             </svg>
           </button>
+
+          {/* Refresh — L4: 刷新入口移到搜索栏旁，不再藏在列表最底部 */}
+          <button
+            onClick={() => fetchSessions()}
+            className="flex-shrink-0 p-2 rounded-lg transition-smooth
+              text-text-tertiary hover:bg-bg-secondary hover:text-text-primary"
+            title={t('conv.refresh')}
+          >
+            <svg width="14" height="14" viewBox="0 0 12 12" fill="none"
+              stroke="currentColor" strokeWidth="1.5">
+              <path d="M1 6a5 5 0 019-2M11 6a5 5 0 01-9 2" />
+              <path d="M10 1v3h-3M2 11V8h3" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -700,6 +720,30 @@ export function ConversationList() {
         <div className="flex items-center justify-center py-6">
           <div className="w-5 h-5 border-2 border-accent/30
             border-t-accent rounded-full animate-spin" />
+        </div>
+      )}
+
+      {/* Fetch failed — error row + retry (A6: 不能静默变成空列表) */}
+      {fetchError && !isLoading && (
+        <div className="mx-1 mb-1 px-3 py-2 rounded-lg
+          bg-error/10 border border-error/20
+          flex items-center gap-2">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+            stroke="currentColor" strokeWidth="1.5" className="text-error flex-shrink-0">
+            <circle cx="6" cy="6" r="5" />
+            <path d="M6 4v2.5M6 8v.5" />
+          </svg>
+          <span className="flex-1 min-w-0 text-[11px] text-error truncate"
+            title={fetchError}>
+            {t('conv.loadFailed')}
+          </span>
+          <button
+            onClick={() => fetchSessions()}
+            className="flex-shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium
+              bg-error/10 text-error hover:bg-error/20 transition-smooth"
+          >
+            {t('common.retry')}
+          </button>
         </div>
       )}
 
@@ -784,8 +828,8 @@ export function ConversationList() {
         </div>
       )}
 
-      {/* Empty state */}
-      {!isLoading && filtered.length === 0 && contentOnlyMatches.length === 0 && !isContentSearching && (
+      {/* Empty state — fetchError 时由上方错误行接管，不再显示误导性的"暂无任务" */}
+      {!isLoading && !fetchError && filtered.length === 0 && contentOnlyMatches.length === 0 && !isContentSearching && (
         <div className="text-center py-8 px-4">
           <div className="text-text-tertiary text-xs">
             {searchQuery ? t('conv.noMatch') : t('conv.noConv')}
@@ -875,7 +919,11 @@ export function ConversationList() {
         <ConfirmDialog
           open={true}
           title={t('conv.delete')}
-          message={t('conv.deleteConfirm')}
+          // B19: 运行中的会话删除会终止进程，确认文案必须明确提示
+          message={
+            t('conv.deleteConfirm') +
+            (runningSessions.has(deleteTarget.id) ? `\n${t('conv.deleteRunningWarning')}` : '')
+          }
           detail={displayName(deleteTarget) || deleteTarget.preview}
           variant="danger"
           confirmLabel={t('conv.delete')}

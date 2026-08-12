@@ -114,17 +114,20 @@ function ToastItem({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
   );
 }
 
-/** Mount once in App.tsx — renders at bottom center */
+/** Mount once in App.tsx — renders at top center (L1: 底部会遮挡输入区) */
 export function Toast() {
   const toasts = useToastStore((s) => s.toasts);
   const remove = useToastStore((s) => s.remove);
 
   if (toasts.length === 0) return null;
 
+  // L1: 最多同时展示 3 条，避免堆叠淹没界面
+  const visible = toasts.slice(-3);
+
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9998]
+    <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[9998]
       flex flex-col items-center gap-2 pointer-events-auto">
-      {toasts.map((t) => (
+      {visible.map((t) => (
         <ToastItem key={t.id} toast={t} onDismiss={() => remove(t.id)} />
       ))}
     </div>

@@ -8,6 +8,9 @@ import { useAgentStore } from '../../stores/agentStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { parseSessionMessages } from '../../lib/session-loader';
+import { showToast } from '../shared/Toast';
+import { friendlyError } from '../../lib/error-format';
+import { t } from '../../lib/i18n';
 
 type SearchMode = 'questions-only' | 'questions-first' | 'all';
 type DateFilter = 'all' | 'today' | '3days' | 'week' | 'month';
@@ -24,7 +27,7 @@ function projectLabel(project: string): string {
   return parts[parts.length - 1] || project;
 }
 
-/** Format a timestamp into a readable date string. */
+/** Format a timestamp into a readable date string. (A7: 日期文案走 i18n) */
 function formatDate(ms: number): string {
   const d = new Date(ms);
   const now = new Date();
@@ -34,13 +37,13 @@ function formatDate(ms: number): string {
   const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   const weekStart = todayStart - daysToMonday * 86400000;
 
-  if (ms >= todayStart) return '今天';
-  if (ms >= yesterdayStart) return '昨天';
-  if (ms >= weekStart) return '本周';
+  if (ms >= todayStart) return t('conv.today');
+  if (ms >= yesterdayStart) return t('conv.yesterday');
+  if (ms >= weekStart) return t('conv.thisWeek');
 
   const month = d.getMonth() + 1;
   const day = d.getDate();
-  return `${month}月${day}日`;
+  return t('search.dateMonthDay', { month: String(month), day: String(day) });
 }
 
 /** Get cutoff timestamp for date filter. */
@@ -91,6 +94,8 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
   const [mode, setMode] = useState<SearchMode>('questions-first');
   const [results, setResults] = useState<ContentSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  // A6: 搜索失败与"无结果"严格区分 —— 失败显示错误行 + 可重试
+  const [searchFailed, setSearchFailed] = useState(false);
   const [showReplies, setShowReplies] = useState(false);
   const [focusedIdx, setFocusedIdx] = useState(-1);
   const [showFilters, setShowFilters] = useState(false);
@@ -113,6 +118,7 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
       setDateFilter('all');
       setProjectFilter('all');
       setBackendFilter('all');
+      setSearchFailed(false);
     }
   }, [open]);
 
@@ -139,8 +145,12 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
       const roleFilter = m === 'questions-only' ? 'user' : null;
       const r = await bridge.searchSessions(q, roleFilter);
       setResults(r);
-    } catch {
+      setSearchFailed(false);
+    } catch (err) {
+      // A6: 失败不能伪装成"无结果" —— 置失败态，UI 提供重试入口
+      console.error('Content search failed:', err);
       setResults([]);
+      setSearchFailed(true);
     }
     setSearching(false);
   }, []);
@@ -322,8 +332,10 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
       } else {
         onClose();
       }
-    } catch {
+    } catch (err) {
+      // A6: 跳转失败不再静默关闭 —— 保留错误信息并提示
       setSessionStatus(sessionId, 'idle');
+      showToast(friendlyError(String(err)), 'error');
       onClose();
     }
   }, [onClose]);
@@ -560,7 +572,9 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
               })}
             </p>
             {hasActiveFilters && (
-              <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">已筛选</span>
+              <span className="text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
+                {t('search.filtered')}
+              </span>
             )}
           </div>
         )}
@@ -574,8 +588,26 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
             </div>
           )}
 
+          {/* Search failed — A6: 与"无结果"严格区分，提供重试 */}
+          {!searching && query.trim().length >= 2 && searchFailed && (
+            <div className="flex flex-col items-center justify-center py-10 text-text-tertiary gap-2">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="1.5" className="mb-1 opacity-40">
+                <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+              </svg>
+              <p className="text-xs text-error">{t('search.searchFailed')}</p>
+              <button
+                onClick={() => doSearch(query, mode)}
+                className="px-3 py-1 rounded-md text-[11px] font-medium
+                  bg-error/10 text-error hover:bg-error/20 transition-smooth cursor-pointer"
+              >
+                {t('common.retry')}
+              </button>
+            </div>
+          )}
+
           {/* No results */}
-          {!searching && query.trim().length >= 2 && !hasResults && (
+          {!searching && query.trim().length >= 2 && !hasResults && !searchFailed && (
             <div className="flex flex-col items-center justify-center py-10 text-text-tertiary">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-2 opacity-40">
                 <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
@@ -639,7 +671,7 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
                       ))}
                       <div className="flex items-center justify-between pb-0.5">
                         <span className="text-[10px] text-text-tertiary">
-                          {r.user_match_count} 条匹配
+                          {t('search.nMatches', { n: String(r.user_match_count) })}
                         </span>
                         <span className="text-[10px] text-accent opacity-0 group-hover:opacity-100
                           transition-smooth pr-2">
@@ -690,7 +722,7 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
                           ))}
                           <div className="flex items-center justify-between pb-0.5">
                             <span className="text-[10px] text-text-tertiary">
-                              {r.assistant_match_count} 条匹配
+                              {t('search.nMatches', { n: String(r.assistant_match_count) })}
                             </span>
                             <span className="text-[10px] text-accent opacity-0 group-hover:opacity-100
                               transition-smooth pr-2">

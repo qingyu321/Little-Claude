@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { bridge, onLocalModelPullProgress, type LocalModelInfo } from '../../lib/tauri-bridge';
 import { stripAnsi } from '../../lib/strip-ansi';
 import { useProviderStore } from '../../stores/providerStore';
+import { friendlyError } from '../../lib/error-format';
 
 type ServiceState = 'checking' | 'ready' | 'missing' | 'error';
 
@@ -42,7 +43,8 @@ export function LocalModelsTab() {
       }
     } catch (e) {
       setState('error');
-      setErrorMsg(stripAnsi(String(e)));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
     }
   }, []);
 
@@ -72,7 +74,8 @@ export function LocalModelsTab() {
       setState('ready');
     } catch (e) {
       setState('error');
-      setErrorMsg(stripAnsi(String(e)));
+      // A5: 原始错误经分类器转成友好文案
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
     } finally {
       unlisten();
       setPulling(false);

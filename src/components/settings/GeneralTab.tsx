@@ -7,12 +7,14 @@ import {
   BackgroundTheme,
   FontFamily,
   ContextWindowMode,
+  type AutoCompactMode,
   getContextWindowForModel,
   getAutoCompactThreshold,
 } from '../../stores/settingsStore';
 import { useProviderStore } from '../../stores/providerStore';
 import { useT } from '../../lib/i18n';
 import { displayProviderModelName } from '../../lib/model-utils';
+import { friendlyError } from '../../lib/error-format';
 import { AiAvatar } from '../shared/AiAvatar';
 import { bridge, onWallpaperProgress, type WallpaperInfo } from '../../lib/tauri-bridge';
 import { UserAvatar } from '../shared/UserAvatar';
@@ -110,9 +112,18 @@ const FONT_FAMILY_OPTIONS: { id: FontFamily; label: string; sample: string }[] =
   { id: 'mono', label: '等宽字体', sample: '中文 Aa 123' },
 ];
 
-const CONTEXT_WINDOW_OPTIONS: { id: ContextWindowMode; label: string; hint: string }[] = [
-  { id: 'default', label: '标准 200K', hint: '自动 compact 阈值 160K' },
-  { id: 'large1m', label: '声明 1M', hint: '自动 compact 阈值 800K' },
+// 回归修复: 选项文案 i18n 化（此前硬编码中文，en 用户看到中文）。
+// label/hint 存 key，渲染处经 t() 取文案。
+const CONTEXT_WINDOW_OPTIONS: { id: ContextWindowMode; labelKey: string; hintKey: string }[] = [
+  { id: 'default', labelKey: 'settings.ctxWindowDefault', hintKey: 'settings.ctxWindowDefaultHint' },
+  { id: 'large1m', labelKey: 'settings.ctxWindowLarge1m', hintKey: 'settings.ctxWindowLarge1mHint' },
+];
+
+const AUTO_COMPACT_OPTIONS: { id: AutoCompactMode; labelKey: string; hintKey: string }[] = [
+  { id: 'auto', labelKey: 'settings.compactAuto', hintKey: 'settings.compactAutoHint' },
+  { id: 'pct90', labelKey: 'settings.compactPct90', hintKey: 'settings.compactPct90Hint' },
+  { id: 'pct80', labelKey: 'settings.compactPct80', hintKey: 'settings.compactPct80Hint' },
+  { id: 'custom', labelKey: 'settings.compactCustom', hintKey: 'settings.compactCustomHint' },
 ];
 
 /* Mini app preview — simplified chat interface thumbnail */
@@ -204,7 +215,8 @@ function WallpaperSection() {
       setWallpaperName(info.name);
       setWallpaperEnabled(true);
     }).catch((err) => {
-      setProgress({ stage: 'error', message: String(err), pct: 0 });
+      // A5: 原始错误经分类器转成友好文案
+      setProgress({ stage: 'error', message: friendlyError(String(err)), pct: 0 });
       setCompressing(false);
     });
   };
@@ -397,7 +409,9 @@ export function GeneralTab() {
   const setLocale = useSettingsStore((s) => s.setLocale);
   const setSelectedModel = useSettingsStore((s) => s.setSelectedModel);
   const setContextWindowMode = useSettingsStore((s) => s.setContextWindowMode);
+  const autoCompactMode = useSettingsStore((s) => s.autoCompactMode);
   const setAutoCompactThresholdTokens = useSettingsStore((s) => s.setAutoCompactThresholdTokens);
+  const setAutoCompactMode = useSettingsStore((s) => s.setAutoCompactMode);
   const setFontSize = useSettingsStore((s) => s.setFontSize);
   const setFontFamily = useSettingsStore((s) => s.setFontFamily);
   const setMonoFontFollowsInterface = useSettingsStore((s) => s.setMonoFontFollowsInterface);
@@ -420,7 +434,12 @@ export function GeneralTab() {
     : undefined;
   const actualModel = selectedMapping?.providerModel || selectedModel;
   const contextWindow = getContextWindowForModel(actualModel, contextWindowMode);
-  const compactThreshold = getAutoCompactThreshold(actualModel, contextWindowMode, autoCompactThresholdTokens);
+  const compactThreshold = getAutoCompactThreshold(
+    actualModel,
+    contextWindowMode,
+    autoCompactThresholdTokens,
+    autoCompactMode,
+  );
   const tierMappings = activeProvider?.modelMappings
     .filter((m) => ['opus', 'sonnet', 'haiku'].includes(m.tier) && m.providerModel)
     .map((m) => `${m.tier}=${displayProviderModelName(m.providerModel)}`)
@@ -543,7 +562,7 @@ export function GeneralTab() {
 
       {/* Background Skin */}
       <div>
-        <h3 className="text-[13px] font-medium text-text-primary mb-3">背景风格</h3>
+        <h3 className="text-[13px] font-medium text-text-primary mb-3">{t('settings.backgroundSkin')}</h3>
         <div className="grid grid-cols-4 gap-3">
           {BACKGROUND_THEMES.map((bg) => (
             <button
@@ -719,7 +738,7 @@ export function GeneralTab() {
 
         {/* Context Window */}
         <div>
-          <h3 className="text-[13px] font-medium text-text-primary mb-2">上下文窗口</h3>
+          <h3 className="text-[13px] font-medium text-text-primary mb-2">{t('settings.contextWindow')}</h3>
           <div className="grid grid-cols-2 gap-2">
             {CONTEXT_WINDOW_OPTIONS.map((option) => (
               <button
@@ -731,57 +750,84 @@ export function GeneralTab() {
                     : 'text-text-muted hover:bg-bg-secondary border-border-subtle'
                   }`}
               >
-                <div className="text-[13px] font-medium">{option.label}</div>
-                <div className="mt-0.5 text-[11px] text-text-tertiary">{option.hint}</div>
+                <div className="text-[13px] font-medium">{t(option.labelKey)}</div>
+                <div className="mt-0.5 text-[11px] text-text-tertiary">{t(option.hintKey)}</div>
               </button>
             ))}
           </div>
           <p className="mt-2 text-xs text-text-tertiary leading-relaxed">
-            当前声明：{contextWindow.toLocaleString()} tokens；自动 compact 阈值：{compactThreshold.toLocaleString()} tokens。
-            如果你的 CC Switch / DeepSeek 路由实际支持 1M，请选择“声明 1M”。
+            {/* A7: 中英混合说明文案走 i18n */}
+            {t('settings.contextWindowSummary', {
+              tokens: contextWindow.toLocaleString(),
+              threshold: compactThreshold.toLocaleString(),
+            })}
           </p>
         </div>
 
-        {/* Auto compact threshold */}
+        {/* Auto compact threshold — user-selectable timing policy */}
         <div>
-          <h3 className="text-[13px] font-medium text-text-primary mb-2">自动 compact 阈值</h3>
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              min={10}
-              max={1000}
-              step={10}
-              value={Math.round(autoCompactThresholdTokens / 1000)}
-              onChange={(e) => setAutoCompactThresholdTokens(Number(e.target.value) * 1000)}
-              className="w-28 px-3 py-2 text-[13px] bg-bg-chat border border-border-subtle
-                rounded-lg text-text-primary focus:outline-none focus:border-accent"
-            />
-            <span className="text-xs text-text-tertiary">K tokens</span>
-            <div className="flex flex-wrap gap-1.5">
-              {[160, 400, 800, 950].map((value) => (
-                <button
-                  key={value}
-                  onClick={() => setAutoCompactThresholdTokens(value * 1000)}
-                  className={`px-2 py-1 rounded-md text-[11px] border transition-smooth
-                    ${Math.round(autoCompactThresholdTokens / 1000) === value
-                      ? 'bg-accent/10 text-accent border-accent/30'
-                      : 'text-text-muted hover:bg-bg-secondary border-border-subtle'
-                    }`}
-                >
-                  {value}K
-                </button>
-              ))}
-            </div>
+          <h3 className="text-[13px] font-medium text-text-primary mb-2">{t('settings.autoCompactTiming')}</h3>
+          <div className="flex flex-wrap gap-1.5">
+            {AUTO_COMPACT_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => setAutoCompactMode(opt.id)}
+                className={`px-2 py-1 rounded-md text-[11px] border transition-smooth
+                  ${autoCompactMode === opt.id
+                    ? 'bg-accent/10 text-accent border-accent/30'
+                    : 'text-text-muted hover:bg-bg-secondary border-border-subtle'
+                  }`}
+                title={t(opt.hintKey)}
+              >
+                {t(opt.labelKey)}
+              </button>
+            ))}
           </div>
+          {autoCompactMode === 'custom' && (
+            <div className="flex items-center gap-2 mt-2">
+              <input
+                type="number"
+                min={10}
+                max={1000}
+                step={10}
+                value={Math.round(autoCompactThresholdTokens / 1000)}
+                onChange={(e) => setAutoCompactThresholdTokens(Number(e.target.value) * 1000)}
+                className="w-28 px-3 py-2 text-[13px] bg-bg-chat border border-border-subtle
+                  rounded-lg text-text-primary focus:outline-none focus:border-accent"
+              />
+              <span className="text-xs text-text-tertiary">K tokens</span>
+              <div className="flex flex-wrap gap-1.5">
+                {/* Window-relative presets: warning point / CLI-aligned / buffer-only (A7: 文案 i18n) */}
+                {[
+                  { label: t('settings.compactPresetWarning'), value: contextWindow - 53_000 },
+                  { label: t('settings.compactPresetCliAligned'), value: contextWindow - 33_000 },
+                  { label: t('settings.compactPresetLimit'), value: contextWindow - 13_000 },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    onClick={() => setAutoCompactThresholdTokens(preset.value)}
+                    className={`px-2 py-1 rounded-md text-[11px] border transition-smooth
+                      ${Math.round(autoCompactThresholdTokens / 1000) === Math.round(preset.value / 1000)
+                        ? 'bg-accent/10 text-accent border-accent/30'
+                        : 'text-text-muted hover:bg-bg-secondary border-border-subtle'
+                      }`}
+                  >
+                    {Math.round(preset.value / 1000)}K
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <p className="mt-2 text-xs text-text-tertiary leading-relaxed">
-            这个值会直接决定自动发送 `/compact` 的时机；改完后对当前会话立即生效。
+            {/* A7: 说明文案走 i18n */}
+            {t('settings.autoCompactHint')}
           </p>
         </div>
       </div>
 
       {/* A2: Partial Message Streaming */}
       <div>
-        <h3 className="text-[13px] font-medium text-text-primary mb-2">流式消息粒度</h3>
+        <h3 className="text-[13px] font-medium text-text-primary mb-2">{t('settings.streamGranularity')}</h3>
         <label className="flex items-center gap-3 cursor-pointer select-none">
           <button
             role="switch"
@@ -797,10 +843,11 @@ export function GeneralTab() {
           </button>
           <div>
             <span className="text-sm text-text-primary">
-              --include-partial-messages {includePartialMessages ? '开启' : '关闭'}
+              --include-partial-messages {includePartialMessages ? t('settings.partialOn') : t('settings.partialOff')}
             </span>
             <p className="text-xs text-text-tertiary mt-0.5">
-              开启后逐 token 实时渲染（流畅度 ↓）；关闭后仅展示完整消息块（性能 ↑，低配推荐关闭）
+              {/* A7: 说明文案走 i18n */}
+              {t('settings.partialHint')}
             </p>
           </div>
         </label>

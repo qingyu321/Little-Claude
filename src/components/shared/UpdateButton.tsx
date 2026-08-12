@@ -1,13 +1,13 @@
 import { useCallback } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { getLatestReleaseUrl } from '../../hooks/useAutoUpdateCheck';
 import { useT } from '../../lib/i18n';
 
 /**
  * Compact update notification in the top bar.
  * - Checks GitHub Releases API (via useAutoUpdateCheck) every 10 min.
  * - When a newer version is found, shows the version badge.
- * - Clicking opens the browser to the GitHub releases page for manual download.
+ * - B23: 点击直接打开设置面板 —— 更新区（热更 / 安装包入口）就在设置底部，
+ *   不再跳外部 GitHub 网页，与应用内更新入口保持一致。
  * - Portable EXE: no installer, no auto-download, no silent updates.
  */
 export function UpdateButton() {
@@ -16,8 +16,9 @@ export function UpdateButton() {
   const t = useT();
 
   const handleClick = useCallback(() => {
-    const url = getLatestReleaseUrl();
-    window.open(url, '_blank');
+    if (!useSettingsStore.getState().settingsOpen) {
+      useSettingsStore.getState().toggleSettings();
+    }
   }, []);
 
   if (!updateAvailable) return null;

@@ -175,9 +175,13 @@ export function PetApp() {
     })();
   }, [config, scale]);
 
-  // Bubble expiry: clear after expiresAt.
+  // Bubble expiry: clear after expiresAt. Terminal reports (completed/error)
+  // are PERSISTENT — a finished task must keep reporting until a newer report
+  // replaces it or the user toggles the bubble off; only the non-terminal
+  // fallback (no report kinds currently use it) expires on a timer.
   useEffect(() => {
     if (!bubble) return;
+    if (bubble.kind === "completed" || bubble.kind === "error") return;
     const delay = bubble.expiresAt - Date.now();
     const clear = () => {
       const st = usePetStore.getState();
@@ -224,7 +228,7 @@ export function PetApp() {
     {
       label: t("pet.menu.openSettings"),
       action: () => {
-        void emitPetCommand({ type: "open-settings" });
+        void emitPetCommand({ type: "open-settings", tab: "pet" });
         closeMenu();
       },
     },

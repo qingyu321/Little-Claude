@@ -225,9 +225,14 @@ export const SessionItem = memo(function SessionItem({
               e.stopPropagation();
               onDelete(session);
             }}
-            className="flex-shrink-0 p-0.5 rounded text-text-tertiary opacity-0
-              group-hover:opacity-100 hover:text-error hover:bg-error/10 transition-smooth"
+            // L6: 键盘聚焦 / 选中态下常显，不再只依赖 hover
+            className={`flex-shrink-0 p-0.5 rounded text-text-tertiary transition-smooth
+              ${isSelected
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100'
+              } hover:text-error hover:bg-error/10`}
             title={t('conv.delete')}
+            aria-label={t('conv.delete')}
           >
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">

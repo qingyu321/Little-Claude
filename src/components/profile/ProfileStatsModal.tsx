@@ -3,6 +3,8 @@ import { bridge, ProfileStats } from '../../lib/tauri-bridge';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
 import { dataUrlToBlobUrl } from '../../lib/blob-url';
+import { useT } from '../../lib/i18n';
+import { friendlyError } from '../../lib/error-format';
 
 interface Props {
   open: boolean;
@@ -55,6 +57,7 @@ function monthLabel(date: Date): string {
 }
 
 export function ProfileStatsModal({ open, onClose }: Props) {
+  const t = useT();
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -68,7 +71,8 @@ export function ProfileStatsModal({ open, onClose }: Props) {
     try {
       setStats(await bridge.getProfileStats());
     } catch (err) {
-      setError(String(err));
+      // A5: 原始错误经分类器转成友好文案
+      setError(friendlyError(String(err)));
     } finally {
       setLoading(false);
     }
@@ -146,7 +150,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
           onClick={onClose}
           className="absolute right-5 top-5 z-10 p-2 rounded-full text-text-muted
             hover:text-text-primary hover:bg-bg-secondary transition-smooth"
-          title="关闭"
+          title={t('common.dismiss')}
         >
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none"
             stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -174,7 +178,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
 
           {error && (
             <div className="mt-8 rounded-2xl border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
-              读取统计失败：{error}
+              {t('profile.statsFailed', { error })}
             </div>
           )}
 
