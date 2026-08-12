@@ -1,6 +1,7 @@
 import type { ChatMessage } from '../stores/chatStore';
 import { generateMessageId } from '../stores/chatStore';
 import type { AgentPhase } from '../stores/agentStore';
+import { isSystemText } from './system-text';
 
 // 报告B9 复查: session reload used to inject full tool results straight into
 // memory, bypassing the 256 KiB cap that bounds live streams — reopening a
@@ -28,19 +29,6 @@ export interface LoadedSession {
   messages: ChatMessage[];
   agents: AgentData[];
   mainAgentStartTime: number;
-}
-
-/** Detect system-injected content that should not be shown to users */
-function isSystemText(text: string): boolean {
-  const t = text.trimStart();
-  return t.startsWith('<')                            // XML tags like <system-reminder>
-    || t.startsWith('This session is being continued') // continuation summaries
-    || /^Analysis:\s*\n/.test(t)                       // continuation analysis blocks
-    || /^Summary:\s*\n/.test(t)                        // continuation summary blocks
-    || t.startsWith('In this environment you have access to') // tool definitions
-    || t.startsWith('Human:')                          // raw conversation format leaks
-    || t.includes('<system-reminder>')                 // embedded system reminders
-    || t.includes('</system-reminder>');
 }
 
 /**

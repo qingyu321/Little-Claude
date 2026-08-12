@@ -1,4 +1,5 @@
 import { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback, memo } from 'react';
+import { createPortal } from 'react-dom';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { create } from 'zustand';
 import { useChatStore, useActiveTab, generateMessageId, type ChatMessage, type SessionMeta } from '../../stores/chatStore';
@@ -29,7 +30,7 @@ import { registerStreamListener } from '../../lib/stream-cleanup';
 import { SetupWizard } from '../setup/SetupWizard';
 import { AiAvatar } from '../shared/AiAvatar';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
-import { parseTurns, type Turn } from '../../lib/turns';
+import { parseTurns, relativeTime, type Turn } from '../../lib/turns';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import { useTokenSpeedStore } from '../../stores/tokenSpeedStore';
 import { scheduleCompactTimeoutCheck } from '../../hooks/useStreamProcessor';
@@ -300,6 +301,7 @@ function ActivityIndicator({ activityStatus, sessionMeta, thinkingLength }: {
     turnStartTime?: number;
     outputTokens?: number;
     inputTokens?: number;
+    contextTokens?: number;
     lastProgressAt?: number;
     spawnedModel?: string;
     snapshotModel?: string;
@@ -330,7 +332,7 @@ function ActivityIndicator({ activityStatus, sessionMeta, thinkingLength }: {
     : null;
 
   // Context pressure warning: threshold depends on model context window size
-  // 1M models (claude-opus-4-6-1m, mimo-v2-pro[1m]) → warn at 600K; others at 120K (60% of 200K)
+  // 1M models (mimo-v2-pro[1m]) → warn at 600K; others at 120K (60% of 200K)
   const selectedModel = useSettingsStore((s) => s.selectedModel);
   const contextWindowMode = useSettingsStore((s) => s.contextWindowMode);
   const resolvedModel = sessionMeta.spawnedModel
@@ -340,8 +342,11 @@ function ActivityIndicator({ activityStatus, sessionMeta, thinkingLength }: {
     resolvedModel,
     sessionMeta.snapshotContextWindowMode ?? contextWindowMode,
   );
-  const inputTokens = sessionMeta.inputTokens || 0;
-  const contextWarning = inputTokens > contextWindow * 0.6;
+  // C1: same metric as the Ctx bar and auto-compact — the FULL last-request
+  // context including cached tokens. Bare input_tokens reads ~5% of the real
+  // usage on cache-heavy sessions (B2), so a 60% warning on it would never fire.
+  const contextTokens = sessionMeta.contextTokens ?? sessionMeta.inputTokens ?? 0;
+  const contextWarning = contextTokens > contextWindow * 0.6;
 
   // Stall detection: 120s of silence (no stream activity), not total elapsed time.
   const stallWarning = !!sessionMeta.lastProgressAt
@@ -709,6 +714,106 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   );
 }
 
+/** Left-expanded turn history panel: every turn up to the clicked one,
+ *  newest first, click any entry to jump. Rendered via portal with FIXED
+ *  positioning — the timeline rail's container has overflow-y-auto, which
+ *  computes overflow-x to auto and would clip an absolutely-positioned
+ *  left-expanding panel. memo'd — the rendered list only depends on `turns`
+ *  (stable: parseTurns is useMemo'd on messages) and the two turn ids, so
+ *  chat-stream re-renders don't rebuild the panel. */
+const TurnPreviewPanel = memo(function TurnPreviewPanel({
+  panelRef,
+  turns,
+  expandedTurn,
+  activeTurnId,
+  anchorRect,
+  onJump,
+  onClose,
+}: {
+  panelRef: React.RefObject<HTMLDivElement | null>;
+  turns: Turn[];
+  expandedTurn: Turn;
+  activeTurnId?: string;
+  /** Button rect at click time — panel is fixed-positioned to its left. */
+  anchorRect: DOMRect;
+  onJump: (turn: Turn) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  // 当前轮在最上（倒序），往下是更早的轮次；filter + reverse 一次遍历。
+  const items = useMemo(
+    () => turns.filter((tr) => tr.index <= expandedTurn.index).reverse(),
+    [turns, expandedTurn.index],
+  );
+  // Clamp: keep the panel inside the viewport horizontally (left edge), and
+  // vertically prefer aligning top with the button, flipping up when the
+  // panel would overflow the bottom.
+  const left = Math.max(8, anchorRect.left - 300 - 8);
+  const top = Math.min(anchorRect.top, window.innerHeight - 460);
+
+  const panel = (
+    <div
+      ref={panelRef}
+      style={{ left, top, width: 300 }}
+      className="fixed z-[60] max-h-[min(60vh,440px)]
+        flex flex-col rounded-xl border border-border-subtle bg-bg-card/95 backdrop-blur
+        shadow-2xl overflow-y-auto overflow-x-auto
+        [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5
+        [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-text-tertiary/40"
+    >
+      {/* Header — sticky so the history stays labelled while scrolling */}
+      <div className="sticky top-0 z-10 px-3 py-1.5 text-[11px] font-medium
+        text-text-tertiary bg-bg-card/95 backdrop-blur border-b border-border-subtle/60
+        flex items-center justify-between">
+        <span>{t('chat.turnHistory')}</span>
+        <button
+          onClick={onClose}
+          className="px-1.5 rounded hover:bg-bg-tertiary hover:text-text-primary transition-smooth"
+          title={t('panel.close')}
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex flex-col">
+        {items.map((tr) => {
+          const isCurrent = tr.index === expandedTurn.index;
+          const isActive = activeTurnId === tr.userMessageId;
+          return (
+            <button
+              key={tr.userMessageId}
+              onClick={() => onJump(tr)}
+              className={`text-left px-3 py-2 border-b border-border-subtle/40
+                transition-smooth [content-visibility:auto] [contain-intrinsic-size:auto_46px]
+                ${isCurrent
+                  ? 'bg-accent/10'
+                  : 'hover:bg-bg-tertiary'}`}
+            >
+              <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary mb-0.5">
+                <span className={`flex-shrink-0 min-w-[26px] px-1 rounded text-center font-semibold
+                  ${isCurrent
+                    ? 'bg-accent text-text-inverse'
+                    : 'bg-bg-tertiary text-text-muted'}`}>
+                  {tr.index > 99 ? '99+' : tr.index}
+                </span>
+                <span className="flex-shrink-0">{relativeTime(tr.timestamp)}</span>
+                {isCurrent && <span className="text-accent font-medium">{t('chat.turnCurrent')}</span>}
+                {isActive && !isCurrent && (
+                  <span className="ml-auto w-1.5 h-1.5 rounded-full bg-accent/70" title={t('chat.running')} />
+                )}
+              </div>
+              <div className="text-xs text-text-primary whitespace-pre-wrap break-words leading-relaxed">
+                {tr.userContentFull || t('chat.turnEmpty')}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return createPortal(panel, document.body);
+});
+
 function ConversationTimeline({ turns, activeTurnId, showScrollBtn, onJumpTurn, onJumpBottom }: {
   turns: Turn[];
   activeTurnId?: string;
@@ -717,7 +822,43 @@ function ConversationTimeline({ turns, activeTurnId, showScrollBtn, onJumpTurn, 
   onJumpBottom: () => void;
 }) {
   const t = useT();
+  // Expanded turn (null = collapsed) + the button's rect at click time —
+  // the panel is fixed-positioned relative to it (the rail container has
+  // overflow-y-auto, which would clip an absolutely-positioned panel).
+  // Component-local state — the timeline is the only consumer.
+  const [expanded, setExpanded] = useState<{ turn: Turn; rect: DOMRect } | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  /** The currently-expanded rail button — clicks on it must NOT be treated as
+   *  outside-clicks (mousedown would close the panel before click re-opens it,
+   *  making the toggle button unable to close). */
+  const expandedBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  // Close on outside mousedown / Escape — listeners exist only while expanded.
+  useEffect(() => {
+    if (!expanded) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (panelRef.current?.contains(t)) return;
+      if (expandedBtnRef.current === t || expandedBtnRef.current?.contains(t)) return;
+      setExpanded(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpanded(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [expanded]);
+
   if (turns.length === 0) return null;
+
+  const jump = (turn: Turn) => {
+    onJumpTurn(turn);
+    setExpanded(null);
+  };
 
   return (
     <div className="hidden lg:flex absolute right-3 top-24 bottom-28 z-10
@@ -728,20 +869,32 @@ function ConversationTimeline({ turns, activeTurnId, showScrollBtn, onJumpTurn, 
         <div className="flex flex-col items-center gap-1.5">
           {turns.map((turn) => {
             const active = activeTurnId === turn.userMessageId;
+            const isExpanded = expanded?.turn.index === turn.index;
             return (
-              <button
-                key={turn.userMessageId}
-                onClick={() => onJumpTurn(turn)}
-                className={`group relative w-7 h-7 rounded-full text-[10px]
-                  flex items-center justify-center border transition-smooth
-                  ${active
-                    ? 'bg-accent text-text-inverse border-accent shadow-md'
-                    : 'bg-bg-secondary/70 text-text-tertiary border-border-subtle hover:text-text-primary hover:bg-bg-tertiary'
-                  }`}
-                title={`${t('chat.turn')} ${turn.index}: ${turn.userContent}`}
-              >
-                {turn.index > 99 ? '99+' : turn.index}
-              </button>
+              <div key={turn.userMessageId} className="relative">
+                <button
+                  ref={isExpanded ? expandedBtnRef : undefined}
+                  onClick={(e) =>
+                    setExpanded(
+                      isExpanded
+                        ? null
+                        : { turn, rect: e.currentTarget.getBoundingClientRect() },
+                    )
+                  }
+                  className={`group relative w-7 h-7 rounded-full text-[10px]
+                    flex items-center justify-center border transition-smooth
+                    ${isExpanded
+                      ? 'bg-accent/20 text-accent border-accent ring-2 ring-accent/40'
+                      : active
+                        ? 'bg-accent text-text-inverse border-accent shadow-md'
+                        : 'bg-bg-secondary/70 text-text-tertiary border-border-subtle hover:text-text-primary hover:bg-bg-tertiary'
+                    }`}
+                  title={isExpanded ? undefined : `${t('chat.turn')} ${turn.index}: ${turn.userContent}`}
+                  aria-expanded={isExpanded}
+                >
+                  {turn.index > 99 ? '99+' : turn.index}
+                </button>
+              </div>
             );
           })}
         </div>
@@ -764,6 +917,18 @@ function ConversationTimeline({ turns, activeTurnId, showScrollBtn, onJumpTurn, 
         </svg>
         <span>{t('chat.latest')}</span>
       </button>
+
+      {expanded && (
+        <TurnPreviewPanel
+          panelRef={panelRef}
+          turns={turns}
+          expandedTurn={expanded.turn}
+          activeTurnId={activeTurnId}
+          anchorRect={expanded.rect}
+          onJump={jump}
+          onClose={() => setExpanded(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1060,11 +1225,21 @@ export function ChatPanel() {
   // is still measuring it), so there is no measurement lag to drift against.
   // Short-circuits when already at the bottom (≤2px) to avoid churning scroll
   // events on every token.
+  // GROWTH-GATED: only pin when scrollHeight actually grew since the last
+  // pin. Virtuoso's virtualized height estimate is corrected asynchronously
+  // (ResizeObserver) — corrections SHRINK scrollHeight; chasing the shrunk
+  // value with a scrollTop write races the next growth and shows as up/down
+  // jitter (and a "can't reach the bottom" bounce). On shrink the browser
+  // clamps an over-extended scrollTop to the new bottom by itself, so no
+  // write is needed — growth is the only case that needs an active pin.
+  const lastPinHeightRef = useRef(0);
   const pinToBottom = useCallback(() => {
     const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
     if (!scroller) return;
-    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 2) {
-      scroller.scrollTop = scroller.scrollHeight;
+    const { scrollHeight, scrollTop, clientHeight } = scroller;
+    if (scrollHeight > lastPinHeightRef.current && scrollHeight - scrollTop - clientHeight > 2) {
+      lastPinHeightRef.current = scrollHeight;
+      scroller.scrollTop = scrollHeight;
     }
   }, []);
 
@@ -1076,13 +1251,10 @@ export function ChatPanel() {
   // past the re-measure window; returning to the bottom cancels it.
   const pendingDetachRef = useRef<number | null>(null);
 
-  // Mirror of the current tab's live streaming content. The deferred detach
-  // runs outside React renders, so it can't read the store reactively — this
-  // ref distinguishes "content grew" (Footer height change while streaming)
-  // from "user scrolled up", which is exactly the gap that lost tracking on
-  // fast streams.
-  const streamStateRef = useRef({ partialText: '', partialThinking: '', isStreaming: false });
-  streamStateRef.current = { partialText, partialThinking, isStreaming };
+  // (The old streamStateRef mirror — distinguishing "content grew" from
+  // "user scrolled up" in the deferred detach — was replaced by the
+  // scrollHeight-growth comparison armed in handleAtBottomStateChange; no
+  // reactive mirror is needed anymore.)
 
   // When the stream ends, the answer "pops" into the list in the same commit
   // the streaming Footer collapses (clearPartial + final message insert).
@@ -1147,12 +1319,19 @@ export function ChatPanel() {
   // arrived). Only react to turnStartTime changes within the same tab —
   // switching tabs must not yank the view.
   const lastTurnStartRef = useRef<{ tabId: string; ts: number } | undefined>(undefined);
+  /** Wall-clock time of the last turn submit — the pending-detach verification
+   *  uses it as a last-resort guard: right after submit (before the first
+   *  token sets isStreaming) Virtuoso can transiently report atBottom=false;
+   *  if the Footer height hasn't changed yet (no growth to prove it's
+   *  measurement lag), this window keeps follow attached. */
+  const turnStartAtRef = useRef(0);
   useEffect(() => {
     const cur = { tabId: selectedSessionId ?? '', ts: sessionMeta.turnStartTime ?? 0 };
     const prev = lastTurnStartRef.current;
     lastTurnStartRef.current = cur;
     if (!prev || prev.tabId !== cur.tabId || prev.ts === cur.ts) return;
     if (!cur.ts) return; // Turn ended (turnStartTime cleared) — don't yank the view
+    turnStartAtRef.current = Date.now();
     userScrolledAwayRef.current = false;
     pinToBottom();
     // Second pin once Virtuoso has measured the new Footer: the
@@ -1211,7 +1390,10 @@ export function ChatPanel() {
       // the rAF follow effect for a streaming tab switched back to; a
       // pendingDetach timer armed in the previous tab would fire against
       // the new tab's scroller and misjudge it as "user scrolled up".
+      // lastPinHeightRef is per-scroller too — a stale height from the old
+      // tab would gate out the new tab's first pins.
       userScrolledAwayRef.current = false;
+      lastPinHeightRef.current = 0;
       if (pendingDetachRef.current !== null) {
         clearTimeout(pendingDetachRef.current);
         pendingDetachRef.current = null;
@@ -1310,20 +1492,29 @@ export function ChatPanel() {
       if (pendingDetachRef.current !== null) {
         clearTimeout(pendingDetachRef.current);
       }
+      // Record the scroll height at detach-start; the verification below
+      // compares against it to tell "content grew" from "user scrolled up".
+      const detachScroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+      const heightAtDetach = detachScroller ? detachScroller.scrollHeight : 0;
       pendingDetachRef.current = window.setTimeout(() => {
         pendingDetachRef.current = null;
         const scroller = chatAreaRef.current?.querySelector('[data-testid="virtuoso-scroller"]');
         if (scroller) {
           const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
           if (distance <= DETACH_DISTANCE_PX) return; // measurement lag, not a real scroll-up
-          // Live content is still growing (Footer height change mid-stream):
-          // Virtuoso transiently reports atBottom=false while re-measuring,
-          // and a big delta batch can land past DETACH_DISTANCE_PX. That's
-          // growth, not the user scrolling up — wheel scroll-ups detach
-          // synchronously in onWheel, so don't detach here while content is
-          // actively streaming in.
-          const live = streamStateRef.current;
-          if (live.isStreaming && (live.partialText || live.partialThinking)) return;
+          // CONTENT GROWTH is the definitive "not a scroll-up" signal: the
+          // Footer growing (thinking/answer streaming, ActivityIndicator) or
+          // an item landing (tool results, cards) raises scrollHeight past
+          // what we saw when the detach was armed — a transient atBottom=false
+          // while measuring, NOT the user scrolling (a real wheel scroll-up
+          // already detached synchronously in onWheel, and a drag-scroll-up
+          // leaves scrollHeight unchanged). This replaces the old
+          // partialText-based guard, which missed the thinking/tool phases
+          // (no partial text) and the slow-provider pre-first-token window.
+          if (scroller.scrollHeight > heightAtDetach) return;
+          // Just submitted: before the first token sets isStreaming, the
+          // Footer may not have grown yet — keep following for 3s.
+          if (turnStartAtRef.current && Date.now() - turnStartAtRef.current < 3000) return;
           // Stream just ended: the answer popped into the list and the Footer
           // collapsed in the same commit — the transient atBottom=false here
           // is growth, not a user scroll-up (real scroll-ups detach
@@ -1346,6 +1537,9 @@ export function ChatPanel() {
   const scrollToBottom = useCallback(() => {
     // Explicit "jump to latest" — resume following.
     userScrolledAwayRef.current = false;
+    // Bypass the growth gate: the user explicitly asked to reach the bottom,
+    // even if scrollHeight hasn't grown since the last pin.
+    lastPinHeightRef.current = 0;
     // Scroll the container to its true bottom — scrollToIndex(last item)
     // stops at the last item's start, leaving the streaming Footer below the
     // viewport (looks like jumping to the middle). pinToBottom targets the
@@ -1509,10 +1703,31 @@ export function ChatPanel() {
           atBottomStateChange={handleAtBottomStateChange}
           rangeChanged={handleRangeChanged}
           onWheel={(e) => {
-            // Scroll up (deltaY < 0) → detach from follow immediately, before
-            // Virtuoso's async atBottomStateChange re-render can lag behind
-            // the pinning rAF loop.
-            if (e.deltaY < 0) userScrolledAwayRef.current = true;
+            if (e.deltaY < 0) {
+              // Scroll up → detach from follow immediately, before Virtuoso's
+              // async atBottomStateChange re-render can lag behind the
+              // pinning rAF loop. Distance-gated: a tiny accidental nudge
+              // (≤4px from the bottom) must not kill tracking.
+              const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+              if (scroller) {
+                if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 4) {
+                  userScrolledAwayRef.current = true;
+                }
+              } else {
+                userScrolledAwayRef.current = true;
+              }
+            } else if (e.deltaY > 0) {
+              // Scroll down near the bottom → finish the last few px. A
+              // measurement correction (scrollHeight shrink) leaves the view
+              // a few px short of the true bottom; the growth-gated pin
+              // won't chase it, so land it here — this is the user's
+              // explicit "go to bottom" intent.
+              const scroller = chatAreaRef.current?.querySelector<HTMLElement>('[data-testid="virtuoso-scroller"]');
+              if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
+                lastPinHeightRef.current = 0;
+                scroller.scrollTop = scroller.scrollHeight;
+              }
+            }
           }}
           computeItemKey={(_, item) =>
             item.kind === 'tool_group' ? `tg_${item.msgs[0].id}` : item.msg.id

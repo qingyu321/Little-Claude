@@ -17,6 +17,8 @@ export interface Turn {
   userMessageId: string;
   /** Preview of the user message (truncated to 80 chars) */
   userContent: string;
+  /** Full user message text (no truncation) — for the timeline expand panel. */
+  userContentFull: string;
   /** Timestamp of the user message */
   timestamp: number;
   /** Index in the messages[] array where this turn starts */
@@ -59,6 +61,7 @@ export function parseTurns(messages: ChatMessage[]): Turn[] {
       index: turnIndex,
       userMessageId: msg.id,
       userContent: content.length > 80 ? content.slice(0, 80) + '…' : content,
+      userContentFull: content,
       timestamp: msg.timestamp,
       startMsgIdx: i,
       codeChanges: [], // filled in when the next user message (or array end) is found

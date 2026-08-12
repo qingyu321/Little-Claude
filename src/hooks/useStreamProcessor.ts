@@ -17,6 +17,7 @@ import { envFingerprint, resolveModelForProvider, resolveThinkingLevelForProvide
 import { useProviderStore } from '../stores/providerStore';
 import { t } from '../lib/i18n';
 import { cleanupStreamListener, registerStreamListener, clearLegacyListener } from '../lib/stream-cleanup';
+import { isSystemText } from '../lib/system-text';
 
 // --- Error classification for user-facing messages ---
 // Each pattern maps to a friendly i18n key. Matched errors show the friendly
@@ -889,12 +890,45 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         const bgHasAskUserQuestion = content.some(
           (b: any) => b.type === 'tool_use' && b.name === 'AskUserQuestion',
         );
+        // M7: materialize thinking blocks to the background transcript too —
+        // the foreground path dedups against re-delivery; without the same
+        // handling here, a session that thought while backgrounded shows NO
+        // thinking bubbles after switching back (only a reload would).
+        const bgThinkingBlocks = content.filter(
+          (b: any) => b.type === 'thinking' && b.thinking,
+        );
+        for (const tblock of bgThinkingBlocks) {
+          const thinkingText: string = tblock.thinking;
+          const bgMsgs = store.getTab(tabId)?.messages ?? [];
+          let lastThinking: ChatMessage | undefined;
+          for (let i = bgMsgs.length - 1; i >= 0; i--) {
+            if (bgMsgs[i].role === 'user') break; // stay within this turn
+            if (bgMsgs[i].type === 'thinking') { lastThinking = bgMsgs[i]; break; }
+          }
+          if (lastThinking && lastThinking.content === thinkingText) continue;
+          if (lastThinking && thinkingText.startsWith(lastThinking.content)) {
+            store.updateMessage(tabId, lastThinking.id, { content: thinkingText });
+            continue;
+          }
+          if (lastThinking && lastThinking.content.startsWith(thinkingText)) continue;
+          store.addMessage(tabId, {
+            id: generateMessageId(),
+            role: 'assistant',
+            type: 'thinking',
+            content: thinkingText,
+            timestamp: Date.now(),
+          });
+        }
+
         // Collect and batch-add all new messages in a single set()
         const bgNewMessages: ChatMessage[] = [];
         for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
           const block = content[blockIdx];
           if (block.type === 'text') {
             if (bgHasAskUserQuestion) continue;
+            // C2: same system-text filter as the foreground path — background
+            // tabs must not cache /compact continuation summaries either.
+            if (isSystemText(block.text || '')) continue;
             const textId = msg.uuid ? `${msg.uuid}_text_${blockIdx}` : generateMessageId();
             bgNewMessages.push({
               id: textId,
@@ -1017,6 +1051,22 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 : typeof block.content === 'string' ? block.content : '';
               if (block.tool_use_id && resultText) {
                 store.updateMessage(tabId, block.tool_use_id, { toolResultContent: capToolResult(resultText) });
+              }
+            }
+          }
+        }
+        // M7: mirror the foreground checkpoint storage — a background user
+        // message without checkpointUuid leaves every turn checkpoint-less,
+        // which disables Rewind file restore for backgrounded sessions.
+        {
+          const isToolResult = Array.isArray(userContent)
+            && userContent.some((b: any) => b.type === 'tool_result');
+          if (msg.uuid && !isToolResult) {
+            const bgMsgs = store.getTab(tabId)?.messages ?? [];
+            for (let i = bgMsgs.length - 1; i >= 0; i--) {
+              if (bgMsgs[i].role === 'user') {
+                store.updateMessage(tabId, bgMsgs[i].id, { checkpointUuid: msg.uuid });
+                break;
               }
             }
           }
@@ -1834,6 +1884,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const block = content[blockIdx];
           if (block.type === 'text') {
             if (hasAskUserQuestion) continue;
+            // C2: hide system-injected content in the live stream too, matching
+            // session-loader's reload behavior (isSystemText). Without this, a
+            // /compact continuation summary renders as a normal assistant
+            // message in the live session but disappears after reload.
+            if (isSystemText(block.text || '')) continue;
             setActivityStatus({ phase: 'writing' });
             agentActions.updatePhase(agentId, 'writing');
             // Use msg.uuid + block index as stable ID so re-delivered
@@ -2292,8 +2347,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                   snapshotProviderId: retryProviderId,
                   snapshotCliBackend: retryCliBackend,
                 });
-                const tabId = useSessionStore.getState().selectedSessionId;
-                if (tabId) useSessionStore.getState().registerStdinTab(retryId, tabId);
+                // H4: register the retry process to the tab that OWNED the
+                // failed message (outer `tabId`), not the currently selected
+                // tab — re-reading selectedSessionId here would route the
+                // whole retry stream into whichever conversation the user
+                // switched to during the async startSession. (No cache sync
+                // needed: restoreFromCache no longer overwrites sessionMeta —
+                // the live tabs map is the single source of truth.)
+                useSessionStore.getState().registerStdinTab(retryId, tabId);
                 bridge.trackSession(session.session_id).catch(() => {});
               } catch (retryErr) {
                 console.error('[LITTLECLAUDE] Provider-switch auto-retry failed:', retryErr);
@@ -2403,7 +2464,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Only add result text if it wasn't already delivered via an
         // 'assistant' event (which is the normal case for stream-json output)
         // AND there's no pending command card (which already displays the output).
-        if (resultDisplayText && !pendingCmdMsgId) {
+        if (resultDisplayText && !pendingCmdMsgId && !isSystemText(resultDisplayText)) {
           const currentMessages = (useChatStore.getState().getTab(tabId)?.messages ?? []);
           const isDuplicate = currentMessages.some(
             (m) => m.role === 'assistant' && m.type === 'text'
