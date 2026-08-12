@@ -19,6 +19,56 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.1.4',
+    date: '2026-08-12',
+    highlights: {
+      zh: ['聊天滚动追踪全面修复（思考/工具阶段不再中断跟随、底部无抖动）+ 轮次历史展开预览 + 安全与稳定性修复批次'],
+      en: ['Chat scroll tracking overhaul (follow survives thinking/tool phases, no bottom jitter) + turn-history preview + security & stability fixes'],
+    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'New' },
+        items: {
+          zh: [
+            '轮次历史展开预览 — 点击右侧轮次序号向左展开面板，查看该轮次的完整用户提问（当前轮优先倒序展示），可滚动浏览全部历史，Esc / 点击外部关闭',
+          ],
+          en: [
+            'Turn-history preview — click a turn number on the right to expand a leftward panel showing the full user prompt of that turn (current turn first, reverse-chronological), scrollable, closes on Esc / outside click',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '修复对话跑动时无法追踪最新内容：提交后等待首 token 与工具调用阶段不再误判为「用户滚走」，自动跟随不再中断',
+            '修复思考阶段上下抖动与「拉不到底」：滚动 pin 只在内容增长时执行，测量修正不再引发跳动',
+            '「最新」按钮一键到底，滚动到底部时自动收尾',
+            '桌宠默认关闭双保险 — 窗口创建即强制隐藏 + 前端启动时显式隐藏，不再被历史设置意外唤起',
+            '桌宠右键菜单不再被裁剪 — 菜单水平/垂直双向钳制 + 窗口宽度下限，宠物缩到最小也能完整显示全部菜单项',
+            '桌宠气泡与徽章不再重叠 — 气泡改为左侧锚定并让出右上角徽章区，多会话运行时汇报文字不再被遮挡',
+            '运行环境安装后立即生效（PortableGit / Node 安装与检测实时刷新，无需重启）',
+            '导出供应商配置时明文 API 密钥确认改为原生对话框（原确认形同虚设）',
+            '修复含括号/逗号的文件名无法用默认应用打开；修复 alpha/beta 预发布版本永远不提示更新',
+            '桌宠轮次面板改为纵向布局不再被遮挡；行为气泡只保留完成/错误汇报',
+          ],
+          en: [
+            'Auto-scroll no longer breaks mid-conversation: the pre-first-token window and tool phases no longer misjudged as user scroll-away',
+            "No more up/down jitter during thinking: pin only fires on content growth, measurement corrections don't bounce the view",
+            '"Latest" button lands exactly at the bottom with a closing nudge',
+            'Pet stays off by default — double belt: window created hidden + explicit frontend hide at startup, no surprise popups from stale settings',
+            'Pet context menu never clipped — horizontal/vertical clamping + a window-width floor keep all items visible even at minimum pet scale',
+            'Pet bubble and badge no longer overlap — bubble left-anchors and yields the top-right corner, reports stay readable with other sessions running',
+            'Runtime installs take effect immediately (PortableGit / Node detection refreshes without restart)',
+            'Plaintext API-key export warning now uses the native dialog (window.confirm was a no-op)',
+            'Fixed files with parentheses/commas failing to open; fixed alpha/beta prerelease never notifying updates',
+            'Pet token panel switched to a stacked layout (no clipping); bubbles now report completion/errors only',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.1.3',
     date: '2026-08-11',
     highlights: {
