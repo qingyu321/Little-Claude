@@ -4,7 +4,7 @@
  * expiry, and the right-click menu.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
@@ -24,11 +24,19 @@ import "./pet.css";
 /** Vertical space reserved above the pet for the bubble (logical px). */
 const BUBBLE_SPACE = 96;
 const SIDE_PAD = 8;
+/** Context-menu geometry (logical px) — used for both window-width flooring
+ *  and menu clamping so the 4-item menu is always fully visible. */
+const MENU_W = 158; // min-width 150 + panel padding 8
+const MENU_ITEM_H = 31; // item ≈ 7px padding ×2 + ~17px line
+const MENU_H = 4 * MENU_ITEM_H + 12; // 4 items + panel padding 8 + breathing room
+/** Floor the window width so a right-click menu can never be clipped,
+ *  even at the smallest pet scale / narrowest imported skin. */
+const MIN_WINDOW_W = MENU_W + 16 + 16; // menu + side margins + slack
 
 function targetPhysicalSize(config: PetSheetConfig, scale: number) {
   const sf = window.devicePixelRatio || 1;
   return {
-    width: Math.round((config.frame.w * scale + SIDE_PAD * 2) * sf),
+    width: Math.round(Math.max(config.frame.w * scale + SIDE_PAD * 2, MIN_WINDOW_W) * sf),
     height: Math.round((config.frame.h * scale + BUBBLE_SPACE + SIDE_PAD) * sf),
     sf,
   };
@@ -72,6 +80,10 @@ export function PetApp() {
   const menuPos = usePetStore((s) => s.menuPos);
   const scale = usePetStore((s) => s.scale);
 
+  /** Seq of the last bubble that expired — same-seq re-emits are ignored so a
+   *  completion report can't resurrect after its TTL (see the listener). */
+  const expiredSeqRef = useRef(0);
+
   // Load pet config for the current skin. Re-runs when `skin` changes → hot-swap.
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +110,12 @@ export function PetApp() {
       }
       const msg = e.payload.message;
       if (msg) {
+        // A completion report whose seq we already showed AND let expire must
+        // not come back to life: the main window keeps re-emitting the same
+        // report (same seq) whenever ANY payload field changes (scale slider,
+        // another session's tokens). `!prev` can't tell "never shown" from
+        // "shown and expired" — track the expired seq explicitly.
+        if (msg.seq === expiredSeqRef.current) return;
         const prev = st.bubble;
         if (!prev || prev.seq !== msg.seq) {
           st.setBubble({
@@ -163,7 +181,10 @@ export function PetApp() {
     const delay = bubble.expiresAt - Date.now();
     const clear = () => {
       const st = usePetStore.getState();
-      if (st.bubble && st.bubble.seq === bubble.seq) st.setBubble(null);
+      if (st.bubble && st.bubble.seq === bubble.seq) {
+        expiredSeqRef.current = bubble.seq; // same-seq re-emits stay ignored
+        st.setBubble(null);
+      }
     };
     if (delay <= 0) {
       clear();
@@ -219,8 +240,11 @@ export function PetApp() {
         <div
           className="pet-menu"
           style={{
-            left: Math.min(menuPos.x, window.innerWidth - 164),
-            top: Math.min(menuPos.y, window.innerHeight - menuItems.length * 34 - 8),
+            // Clamp BOTH edges: without the lower bound, a window narrower
+            // than the menu (small petScale / narrow skin) puts left into
+            // negative space and .pet-root's overflow:hidden clips the menu.
+            left: Math.max(8, Math.min(menuPos.x, window.innerWidth - MENU_W - 8)),
+            top: Math.max(8, Math.min(menuPos.y, window.innerHeight - MENU_H)),
           }}
         >
           {menuItems.map((it) => (

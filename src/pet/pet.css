@@ -32,9 +32,14 @@
 .pet-bubble {
   position: absolute;
   top: 4px;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 200px;
+  /* Left-anchored with the right edge yielding to the badge (top-right).
+     Centering used to overlap the badge by ~30-60px whenever another tab
+     stayed active during a completion report (the exact clip scenario the
+     main-window fix addressed). right: 76px ≈ badge width (two pills) +
+     window margin + slack, so the bubble and badge never collide at any
+     window width (min 190px → bubble ≤ 114px wide). */
+  left: 8px;
+  right: 76px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -78,11 +83,11 @@
 @keyframes pet-fade-in {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(4px);
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
   }
 }
 
@@ -96,9 +101,13 @@
   gap: 4px;
   background: none;
   border: none;
-  padding: 0;
   cursor: pointer;
   animation: pet-fade-in 0.18s ease;
+  /* Bigger click target without changing the visual layout: the pill items
+     are small (~30×22px) — padding extends the hit area, negative margin
+     keeps the badge's bounding box in place. */
+  padding: 6px;
+  margin: -6px;
 }
 .pet-badge-item {
   padding: 2px 8px;
@@ -138,8 +147,15 @@
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   animation: pet-fade-in 0.15s ease;
+  /* Column layout: the pet window is only ~208px wide at default scale —
+     two 84px agent cards side by side (~194px + paddings) clipped against
+     the window edge. Stacking narrows the panel to one card so it fits at
+     any scale; cap the height so it can't overflow the window bottom. */
   display: flex;
+  flex-direction: column;
   gap: 8px;
+  max-height: calc(100vh - 46px);
+  overflow-y: auto;
   font-variant-numeric: tabular-nums;
 }
 .pet-token-agent {

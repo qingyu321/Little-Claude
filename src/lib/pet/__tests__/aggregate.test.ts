@@ -41,7 +41,9 @@ describe("computePetStatus", () => {
     expect(out.message).toBeNull();
   });
 
-  it("counts and phases an active claude writing tab with a bubble", () => {
+  it("counts and phases an active claude writing tab but produces NO bubble", () => {
+    // Live-phase bubbles were removed (they flashed by faster than readable);
+    // the pet reports completion/error only.
     const tabs = new Map([["t1", tab({ activityStatus: { phase: "writing" } })]]);
     const running = new Set(["t1"]);
     const streams = new Map([["t1", { partialText: "hello", isStreaming: true }]]);
@@ -50,7 +52,7 @@ describe("computePetStatus", () => {
     expect(out.claude.active).toBe(1);
     expect(out.claude.phase).toBe("writing");
     expect(out.codex.active).toBe(0);
-    expect(out.message).toMatchObject({ source: "claude", kind: "writing", text: "hello" });
+    expect(out.message).toBeNull();
   });
 
   it("merges higher-priority phase across same-agent sessions", () => {
@@ -100,7 +102,7 @@ describe("computePetStatus", () => {
     );
     expect(out.codex.active).toBe(1);
     expect(out.codex.phase).toBe("awaiting");
-    expect(out.message?.text).toBe("等待权限：Read");
+    expect(out.message).toBeNull(); // awaiting 是活跃阶段，不产生气泡
   });
 
   it("writing with empty partialText produces no bubble", () => {
@@ -112,13 +114,46 @@ describe("computePetStatus", () => {
     expect(out.message).toBeNull();
   });
 
-  it("truncates long writing previews to 60 chars + ellipsis", () => {
-    const long = "x".repeat(100);
-    const tabs = new Map([["t1", tab({ activityStatus: { phase: "writing" } })]]);
+  it("reports completion on an active completed tab", () => {
+    const tabs = new Map([
+      ["t1", tab({ sessionStatus: "completed", activityStatus: { phase: "completed" } })],
+    ]);
     const running = new Set(["t1"]);
-    const streams = new Map([["t1", { partialText: long, isStreaming: true }]]);
-    const out = computePetStatus(input({ tabs, runningSessions: running, streams }));
-    expect(out.message?.text.length).toBe(61);
+    const out = computePetStatus(input({ tabs, runningSessions: running }));
+    expect(out.message).toMatchObject({ source: "claude", kind: "completed" });
+    expect(out.message?.ttlMs).toBe(8000);
+  });
+
+  it("reports completion even after the session left the active set", () => {
+    // The 200ms aggregation cycle after exit: not running, not streaming —
+    // but the tab still carries the terminal status. Without this branch the
+    // report would be invisible (this was the original "一闪而过" bug).
+    const tabs = new Map([
+      ["t1", tab({ sessionStatus: "completed", activityStatus: { phase: "completed" } })],
+    ]);
+    const out = computePetStatus(input({ tabs }));
+    expect(out.totalActive).toBe(0); // badge/tokens unaffected
+    expect(out.message).toMatchObject({ source: "claude", kind: "completed", text: "完成" });
+  });
+
+  it("reports error after the session left the active set", () => {
+    const tabs = new Map([
+      [
+        "t1",
+        tab({
+          sessionStatus: "error",
+          activityStatus: { phase: "error", statusMessage: "boom" },
+        }),
+      ],
+    ]);
+    const out = computePetStatus(input({ tabs }));
+    expect(out.message).toMatchObject({ kind: "error", text: "出错了：boom" });
+  });
+
+  it("terminal-phase reports never come from an idle-status tab", () => {
+    const tabs = new Map([["t1", tab({ sessionStatus: "idle" })]]);
+    const out = computePetStatus(input({ tabs }));
+    expect(out.message).toBeNull();
   });
 
   it("inactive tabs (not running, not streaming) are ignored", () => {

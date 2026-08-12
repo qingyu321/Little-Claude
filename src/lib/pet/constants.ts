@@ -18,9 +18,12 @@ export const PET_DEFAULT_SIZE = { width: 240, height: 320 };
 /** Keep the pet fully visible: margin from monitor edges (physical px). */
 export const PET_EDGE_MARGIN = 8;
 
-/** Bubble TTL for short-lived states (ms). */
+/** Bubble TTL for short-lived states (ms). No longer used for live-phase
+ *  bubbles (those were removed — see aggregate.ts); kept for error states. */
 export const PET_BUBBLE_TTL_MS = 5000;
-export const PET_BUBBLE_TTL_COMPLETED_MS = 3000;
+/** Completion/error report TTL (ms). Long enough to actually read — the
+ *  report must survive the session leaving the active set. */
+export const PET_BUBBLE_TTL_COMPLETED_MS = 8000;
 
 /** Idle (no state change) duration before the pet falls asleep (ms). */
 export const PET_SLEEP_AFTER_MS = 60_000;

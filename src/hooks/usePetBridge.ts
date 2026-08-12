@@ -44,10 +44,28 @@ function buildTemplates(): PetMessageTemplates {
   };
 }
 
+// The completion/error report stays in the aggregation loop for many cycles
+// (the tab keeps its terminal status). PetApp resets the bubble expiry on
+// every NEW seq — a fresh seq per cycle would keep the report visible
+// forever. Reuse the previous seq for identical reports; a null message in
+// between resets the key so the NEXT completion re-reports with a new seq.
+let lastBubbleKey: string | null = null;
+let lastBubbleSeq = 0;
+
 function toPayload(computed: PetStatusComputed, scale: number, skin: string): PetStatusPayload {
-  const message: PetBubbleMessage | null = computed.message
-    ? { seq: ++petSeq, ...computed.message }
-    : null;
+  let message: PetBubbleMessage | null = null;
+  if (computed.message) {
+    const key = `${computed.message.kind}${computed.message.source}${computed.message.text}`;
+    if (key === lastBubbleKey) {
+      message = { seq: lastBubbleSeq, ...computed.message };
+    } else {
+      lastBubbleKey = key;
+      lastBubbleSeq = ++petSeq;
+      message = { seq: lastBubbleSeq, ...computed.message };
+    }
+  } else {
+    lastBubbleKey = null;
+  }
   return { v: 1, scale, skin, ...computed, message };
 }
 
@@ -83,14 +101,18 @@ export function usePetBridge() {
         templates: buildTemplates(),
         now: Date.now(),
       });
-      // Dedup key excludes `ts` (Date.now() — changes every tick); include scale
-      // + skin so slider/skin changes re-emit even when session state is unchanged.
+      // Dedup key excludes `ts` (Date.now() — changes every tick) AND the
+      // message `ts` (the report's ts is also Date.now()-based; without
+      // stripping it, a persistent completion report re-emits every cycle,
+      // and each emit carries a new seq → PetApp never lets the expiry clear
+      // it). Include scale + skin so slider/skin changes re-emit even when
+      // session state is unchanged.
       const json = JSON.stringify({
         scale: settings.petScale,
         skin: settings.petSkin,
         claude: computed.claude,
         codex: computed.codex,
-        message: computed.message,
+        message: computed.message ? { ...computed.message, ts: 0 } : computed.message,
       });
       if (json === lastJson) return;
       lastJson = json;
@@ -156,8 +178,15 @@ export function usePetBridge() {
     });
 
     // Initial state: show if already enabled, and push the first snapshot so the
-    // pet window can decide its first frame + visibility.
-    if (useSettingsStore.getState().petEnabled) showPet();
+    // pet window can decide its first frame + visibility. When disabled, hide
+    // explicitly — a belt-and-braces guard against the window having been
+    // shown by anything before this effect runs (e.g. a platform quirk where
+    // the initial visible(false) didn't stick).
+    if (useSettingsStore.getState().petEnabled) {
+      showPet();
+    } else {
+      void hidePetWindow();
+    }
     push();
 
     return () => {

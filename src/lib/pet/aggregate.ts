@@ -4,7 +4,7 @@
  * without pulling the stores (or i18n) in.
  */
 
-import { PET_BUBBLE_TTL_COMPLETED_MS, PET_BUBBLE_TTL_MS } from "./constants";
+import { PET_BUBBLE_TTL_COMPLETED_MS } from "./constants";
 import type {
   PetAgent,
   PetAgentStatus,
@@ -23,8 +23,6 @@ export const PHASE_PRIORITY: Record<PetPhase, number> = {
   completed: 5,
   idle: 1,
 };
-
-const WRITING_PREVIEW_LEN = 60;
 
 /** Structural subset of chatStore.TabSession — no store import needed. */
 export interface PetTabLike {
@@ -92,7 +90,37 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
   for (const [tabId, tab] of input.tabs) {
     const stream = input.streams.get(tabId);
     const active = input.runningSessions.has(tabId) || Boolean(stream?.isStreaming);
-    if (!active) continue;
+
+    // Completion/error REPORT: the session already left the active set (the
+    // 200ms aggregation cycle after exit), so it can never win the bubble
+    // candidate via the active branch below — the report would be invisible.
+    // Surface it here while the tab still carries the terminal status.
+    // NOTE: live phases (thinking/tool/writing/awaiting) intentionally do NOT
+    // produce bubbles anymore — they flicker by faster than anyone can read
+    // them. The pet reports completion only (see buildBubbleContent).
+    if (!active) {
+      const ph: PetPhase =
+        tab.sessionStatus === "error"
+          ? "error"
+          : tab.sessionStatus === "completed"
+            ? "completed"
+            : "idle";
+      if (ph !== "idle" && (!best || PHASE_PRIORITY[ph] > PHASE_PRIORITY[best.phase])) {
+        // Same agent attribution as the active branch — a codex session's
+        // report must show the codex dot, not the default backend's.
+        const rawBackend = tab.sessionMeta?.snapshotCliBackend;
+        const agent: PetAgent =
+          rawBackend === "claude" || rawBackend === "codex" ? rawBackend : input.defaultBackend;
+        best = {
+          phase: ph,
+          toolName: undefined,
+          statusMessage: tab.activityStatus?.statusMessage,
+          partialText: "",
+          agent,
+        };
+      }
+      continue;
+    }
 
     const phase: PetPhase = tab.activityStatus?.phase ?? "idle";
     const rawBackend = tab.sessionMeta?.snapshotCliBackend;
@@ -156,39 +184,15 @@ function buildBubbleContent(
   now: number,
 ): PetBubbleContent {
   if (!best) return null;
-  const ttlMs =
-    best.phase === "completed" ? PET_BUBBLE_TTL_COMPLETED_MS : PET_BUBBLE_TTL_MS;
+  // Only terminal phases produce a bubble — live-phase bubbles (thinking /
+  // tool / writing / awaiting) flashed by faster than they could be read and
+  // just added noise on top of the badge + pet animation. The pet reports
+  // the outcome, not the play-by-play.
+  if (best.phase !== "completed" && best.phase !== "error") return null;
 
-  let text: string;
-  switch (best.phase) {
-    case "awaiting":
-      text = t.awaiting(best.toolName ?? "");
-      break;
-    case "tool":
-      text = t.tool(best.toolName ?? "");
-      break;
-    case "writing": {
-      const preview = best.partialText.trim();
-      if (!preview) return null; // nothing worth previewing yet
-      text = t.writing(truncate(preview, WRITING_PREVIEW_LEN));
-      break;
-    }
-    case "thinking":
-      text = t.thinking();
-      break;
-    case "error":
-      text = t.error(best.statusMessage ?? "");
-      break;
-    case "completed":
-      text = t.completed();
-      break;
-    default:
-      return null;
-  }
+  const ttlMs = PET_BUBBLE_TTL_COMPLETED_MS;
+  const text =
+    best.phase === "error" ? t.error(best.statusMessage ?? "") : t.completed();
 
   return { ts: now, text, source: best.agent, kind: best.phase, ttlMs };
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max)}…` : s;
 }
