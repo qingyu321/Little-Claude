@@ -22,8 +22,8 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: '1.1.4',
     date: '2026-08-12',
     highlights: {
-      zh: ['聊天滚动追踪全面修复（思考/工具阶段不再中断跟随、底部无抖动）+ 轮次历史展开预览 + 安全与稳定性修复批次'],
-      en: ['Chat scroll tracking overhaul (follow survives thinking/tool phases, no bottom jitter) + turn-history preview + security & stability fixes'],
+      zh: ['聊天滚动追踪全面修复（思考/工具阶段不再中断跟随、底部无抖动）+ 轮次历史展开预览 + 工具执行期绿点保持 + 桌宠 token 合计与持久化汇报 + 联网搜索能力检测式兜底 + 安全与稳定性修复批次'],
+      en: ['Chat scroll tracking overhaul (follow survives thinking/tool phases, no bottom jitter) + turn-history preview + green dot stays lit during tool runs + pet token totals & persistent reports + capability-detected web-search fallback + security & stability fixes'],
     },
     categories: [
       {
@@ -31,9 +31,13 @@ export const CHANGELOG: ChangelogEntry[] = [
         items: {
           zh: [
             '轮次历史展开预览 — 点击右侧轮次序号向左展开面板，查看该轮次的完整用户提问（当前轮优先倒序展示），可滚动浏览全部历史，Esc / 点击外部关闭',
+            '桌宠 token 面板显示该后端全部任务的合计用量（输入/输出/缓存），多会话并行时一眼看到总消耗',
+            '任务完成/出错汇报在桌宠气泡中持久显示，直到新任务完成替换或手动隐藏 — 后台任务跑完不再错过结果',
           ],
           en: [
             'Turn-history preview — click a turn number on the right to expand a leftward panel showing the full user prompt of that turn (current turn first, reverse-chronological), scrollable, closes on Esc / outside click',
+            'Pet token panel now shows the summed usage across ALL tasks of that backend (input/output/cache) — total burn at a glance with sessions running in parallel',
+            'Completion/error reports stay in the pet bubble persistently until a newer report replaces them or the user hides the bubble — finished background tasks are never missed',
           ],
         },
       },
@@ -44,6 +48,13 @@ export const CHANGELOG: ChangelogEntry[] = [
             '修复对话跑动时无法追踪最新内容：提交后等待首 token 与工具调用阶段不再误判为「用户滚走」，自动跟随不再中断',
             '修复思考阶段上下抖动与「拉不到底」：滚动 pin 只在内容增长时执行，测量修正不再引发跳动',
             '「最新」按钮一键到底，滚动到底部时自动收尾',
+            '侧栏「活跃中」绿点在工具执行期间不再熄灭 — 模型以工具调用结尾的一轮也会保持绿点，直到该轮真正结束',
+            '滚动跟随不再被排队消息/自动重试/自动压缩打断 — 自动发起的新轮次不会把正在读历史的你拉回底部',
+            '滚动条拖动、触控板惯性、键盘滚动与输入区滚轮现在都能正确暂停自动跟随（此前只有鼠标滚轮生效）',
+            '切换会话标签恢复原阅读位置；打开/切回会话直接定位到最新消息，不再停在历史顶部',
+            '图片加载完成、消息卡片展开/收起后自动补滚到底部，不再出现底部内容被截断',
+            '桌宠「隐藏宠物」与设置开关双向同步；浮窗「设置」直接定位到桌宠设置页',
+            '联网搜索改为能力检测式兜底 — 主 API 支持搜索则直连，不支持时自动切换兜底端点，失败自动重试与状态自愈',
             '桌宠默认关闭双保险 — 窗口创建即强制隐藏 + 前端启动时显式隐藏，不再被历史设置意外唤起',
             '桌宠右键菜单不再被裁剪 — 菜单水平/垂直双向钳制 + 窗口宽度下限，宠物缩到最小也能完整显示全部菜单项',
             '桌宠气泡与徽章不再重叠 — 气泡改为左侧锚定并让出右上角徽章区，多会话运行时汇报文字不再被遮挡',
@@ -56,6 +67,13 @@ export const CHANGELOG: ChangelogEntry[] = [
             'Auto-scroll no longer breaks mid-conversation: the pre-first-token window and tool phases no longer misjudged as user scroll-away',
             "No more up/down jitter during thinking: pin only fires on content growth, measurement corrections don't bounce the view",
             '"Latest" button lands exactly at the bottom with a closing nudge',
+            'Sidebar "active" green dot stays lit while tools execute — a turn ending in tool_use keeps it on until the turn truly finishes',
+            'Auto-scroll follow no longer hijacked by queued messages / auto-retries / auto-compact — auto-started turns never yank a user reading history back to the bottom',
+            'Scrollbar drags, trackpad inertia, keyboard scrolling and input-area wheel now correctly pause auto-follow (previously wheel only)',
+            'Switching back to a session restores the exact reading position; opening/switching to a session lands on the newest message instead of the top of history',
+            'Image loads and card expand/collapse re-pin to the bottom — no more clipped bottom edge',
+            'Pet "hide" now syncs the settings toggle both ways; the pet "Settings" entry lands directly on the pet tab',
+            'Web search now uses capability-detected fallback — the main API serves search directly when it supports it, auto-switching to the fallback endpoint otherwise, with retry and self-healing',
             'Pet stays off by default — double belt: window created hidden + explicit frontend hide at startup, no surprise popups from stale settings',
             'Pet context menu never clipped — horizontal/vertical clamping + a window-width floor keep all items visible even at minimum pet scale',
             'Pet bubble and badge no longer overlap — bubble left-anchors and yields the top-right corner, reports stay readable with other sessions running',

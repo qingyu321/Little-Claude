@@ -15,6 +15,25 @@ function capToolResult(text: string): string {
   return text.slice(0, MAX_TOOL_RESULT_CHARS) + TOOL_RESULT_TRUNCATED_MARKER;
 }
 
+// B11: mirror of useStreamProcessor's capToolInput — reload must not inject
+// full Write/Edit payloads that the live path now truncates. Keep the
+// constants in sync.
+const MAX_TOOL_INPUT_FIELD_CHARS = 64 * 1024;
+const TOOL_INPUT_TRUNCATED_MARKER = '\n…（已截断）';
+
+function capToolInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object') return input;
+  let out: Record<string, unknown> | null = null;
+  for (const key of ['content', 'old_string', 'new_string', 'plan'] as const) {
+    const v = (input as Record<string, unknown>)[key];
+    if (typeof v === 'string' && v.length > MAX_TOOL_INPUT_FIELD_CHARS) {
+      if (!out) out = { ...(input as Record<string, unknown>) };
+      out[key] = v.slice(0, MAX_TOOL_INPUT_FIELD_CHARS) + TOOL_INPUT_TRUNCATED_MARKER;
+    }
+  }
+  return out ?? input;
+}
+
 export interface AgentData {
   id: string;
   parentId: string | null;
@@ -194,7 +213,7 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
                 type: 'tool_use',
                 content: '',
                 toolName: block.name,
-                toolInput: block.input,
+                toolInput: capToolInput(block.input),
                 timestamp: toMillis(msg.timestamp),
               };
             }

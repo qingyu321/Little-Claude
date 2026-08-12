@@ -55,7 +55,7 @@ let lastBubbleSeq = 0;
 function toPayload(computed: PetStatusComputed, scale: number, skin: string): PetStatusPayload {
   let message: PetBubbleMessage | null = null;
   if (computed.message) {
-    const key = `${computed.message.kind}${computed.message.source}${computed.message.text}`;
+    const key = `${computed.message.kind}${computed.message.source}${computed.message.text}${computed.message.tabId ?? ''}`;
     if (key === lastBubbleKey) {
       message = { seq: lastBubbleSeq, ...computed.message };
     } else {
@@ -133,11 +133,24 @@ export function usePetBridge() {
         case "focus-main":
           void focusMainWindow();
           break;
-        case "open-settings":
-          useSettingsStore.getState().toggleSettings();
+        case "open-settings": {
+          const st = useSettingsStore.getState();
+          if (cmd.tab) {
+            // Pet requested a specific settings tab (③-2): land on that tab.
+            // If the panel is already open, only switch tabs — never toggle-close it.
+            st.setSettingsOpenRequest({ tab: cmd.tab });
+            if (!st.settingsOpen) st.toggleSettings();
+          } else {
+            st.toggleSettings(); // no tab → original toggle semantics
+          }
           break;
+        }
         case "user-hide":
           petShown = false; // respect right-click hide; don't re-show on next push
+          // ③-1: persist the hide so the pet stays off across restarts too.
+          // The settingsStore subscribe → hidePetWindow() path is a one-way
+          // hide (no event back), so this can't loop.
+          useSettingsStore.getState().setPetEnabled(false);
           break;
         case "request-status":
           // Pet window just came up. Bypass dedup (our initial push may have been

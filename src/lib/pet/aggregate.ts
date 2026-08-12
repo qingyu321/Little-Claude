@@ -72,20 +72,15 @@ interface Candidate {
   statusMessage?: string;
   partialText: string;
   agent: PetAgent;
+  /** Owning tab — the main window keys bubble identity on it so two sessions
+   *  finishing back-to-back produce distinct reports instead of deduping. */
+  tabId: string;
 }
 
 export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
   const claude = emptyAgentStatus();
   const codex = emptyAgentStatus();
   let best: Candidate | null = null;
-  let bestTok: {
-    agent: PetAgent;
-    phase: PetPhase;
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheCreation: number;
-  } | null = null;
 
   for (const [tabId, tab] of input.tabs) {
     const stream = input.streams.get(tabId);
@@ -105,7 +100,11 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
           : tab.sessionStatus === "completed"
             ? "completed"
             : "idle";
-      if (ph !== "idle" && (!best || PHASE_PRIORITY[ph] > PHASE_PRIORITY[best.phase])) {
+      // `>=` (not `>`) on equal priority: with persistent reports the FIRST
+      // finished session must not own the bubble forever — a later-finished
+      // task replaces an older one at the same priority. tabs iterates in
+      // insertion order, so later completions naturally come later.
+      if (ph !== "idle" && (!best || PHASE_PRIORITY[ph] >= PHASE_PRIORITY[best.phase])) {
         // Same agent attribution as the active branch — a codex session's
         // report must show the codex dot, not the default backend's.
         const rawBackend = tab.sessionMeta?.snapshotCliBackend;
@@ -117,6 +116,7 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
           statusMessage: tab.activityStatus?.statusMessage,
           partialText: "",
           agent,
+          tabId,
         };
       }
       continue;
@@ -136,37 +136,29 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
     }
 
     // Bubble candidate: track the single highest-priority active tab overall.
-    if (phase !== "idle" && (!best || PHASE_PRIORITY[phase] > PHASE_PRIORITY[best.phase])) {
+    // `>=` on equal priority: with persistent reports a later-finished task
+    // must supersede an earlier one (see the terminal branch above).
+    if (phase !== "idle" && (!best || PHASE_PRIORITY[phase] >= PHASE_PRIORITY[best.phase])) {
       best = {
         phase,
         toolName: tab.activityStatus?.toolName,
         statusMessage: tab.activityStatus?.statusMessage,
         partialText: stream?.partialText ?? "",
         agent,
+        tabId,
       };
     }
 
-    // Token display: use the highest-priority active tab's per-turn usage.
-    // Ties keep the first-seen (deterministic since Map iterates in order).
-    if (phase !== "idle" && (!bestTok || PHASE_PRIORITY[phase] > PHASE_PRIORITY[bestTok.phase])) {
-      bestTok = {
-        agent,
-        phase,
-        input: tab.sessionMeta?.inputTokens ?? 0,
-        output: tab.sessionMeta?.outputTokens ?? 0,
-        cacheRead: tab.sessionMeta?.cacheReadTokens ?? 0,
-        cacheCreation: tab.sessionMeta?.cacheCreationTokens ?? 0,
-      };
+    // Token display: SUM every active tab's per-turn usage per agent — the
+    // pet shows the total tokens burned across ALL running tasks of that
+    // backend, not just the highest-priority tab's.
+    if (phase !== "idle") {
+      const acc = agent === "codex" ? codex : claude;
+      acc.input = (acc.input ?? 0) + (tab.sessionMeta?.inputTokens ?? 0);
+      acc.output = (acc.output ?? 0) + (tab.sessionMeta?.outputTokens ?? 0);
+      acc.cacheRead = (acc.cacheRead ?? 0) + (tab.sessionMeta?.cacheReadTokens ?? 0);
+      acc.cacheCreation = (acc.cacheCreation ?? 0) + (tab.sessionMeta?.cacheCreationTokens ?? 0);
     }
-  }
-
-  // Attach the highest-priority active tab's tokens to the matching agent.
-  if (bestTok) {
-    const acc = bestTok.agent === "codex" ? codex : claude;
-    acc.input = bestTok.input;
-    acc.output = bestTok.output;
-    acc.cacheRead = bestTok.cacheRead;
-    acc.cacheCreation = bestTok.cacheCreation;
   }
 
   return {
@@ -194,5 +186,5 @@ function buildBubbleContent(
   const text =
     best.phase === "error" ? t.error(best.statusMessage ?? "") : t.completed();
 
-  return { ts: now, text, source: best.agent, kind: best.phase, ttlMs };
+  return { ts: now, text, source: best.agent, kind: best.phase, ttlMs, tabId: best.tabId };
 }

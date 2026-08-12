@@ -14,6 +14,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'common.confirm': '确认',
     'common.retry': '重试',
     'confirm.exit': `确定要退出 ${APP_NAME} 吗？正在运行的任务将被终止。`,
+    'confirm.exitTitle': `退出 ${APP_NAME}？`,
+    'confirm.dontAskAgain': '下次不再询问',
 
     // Sidebar
     'sidebar.hide': '收起侧栏',
@@ -24,6 +26,16 @@ const messages: Record<Locale, Record<string, string>> = {
     'sidebar.lightMode': '浅色模式',
     'sidebar.darkMode': '深色模式',
     'sidebar.systemMode': '跟随系统',
+    'sidebar.profile': '个人资料',
+    'sidebar.deepseekEasterEgg': 'DeepSeek：已夺舍',
+    // Plugins
+    'plugins.title': 'Claude Code 插件',
+    'plugins.installScope': '安装范围',
+    'plugins.scopeUser': '用户',
+    'plugins.scopeProject': '项目',
+    'plugins.scopeLocal': '本地',
+    // Profile stats
+    'profile.statsFailed': '读取统计失败：{error}',
 
     // ChatPanel
     'chat.showSidebar': '展开侧栏',
@@ -58,7 +70,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'think.high': '深思考',
     'think.max': '最深思考',
     'think.providerIgnored': '当前供应商可能不支持 thinking 设置',
-    'input.shortcutHint': '⏎ 发送 · {mod}⏎ 换行',
+    'input.shortcutHint': '⏎ 发送 · {mod}⏎ 换行 · {mod}K 命令面板',
+    'input.pendingQueued': '{n} 条消息排队中，本轮结束后自动发送',
+    'input.pendingCancel': '取消排队',
     'input.noWorkingDir': '请先选择一个项目文件夹。',
 
     // MessageBubble
@@ -111,6 +125,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.renamePrompt': '输入新名称',
     'conv.deleteConfirm': '确定删除此任务吗？',
     'conv.deleteConfirmDetail': '此操作不可撤销。',
+    'conv.deleteRunningWarning': '该会话正在运行，删除将终止其进程',
     'conv.deleteAll': '删除全部任务',
     'conv.deleteAllConfirm': '确定删除「{project}」下的全部 {count} 个任务吗？',
     'conv.deleteAllConfirmDetail': '此操作不可撤销。',
@@ -150,6 +165,10 @@ const messages: Record<Locale, Record<string, string>> = {
     'search.filterBackend': '后端来源',
     'search.filterBackendAll': '全部',
     'search.inputHint': '输入至少 2 个字符开始搜索',
+    'search.filtered': '已筛选',
+    'search.nMatches': '{n} 条匹配',
+    'search.dateMonthDay': '{month}月{day}日',
+    'search.searchFailed': '搜索失败，请点击重试',
 
     // ExportMenu
     'export.title': '导出任务',
@@ -307,6 +326,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.tokenLimit': '📏 对话太长了，请新建一个任务继续。',
     'error.genericFallback': '出了点问题，请稍后重试。',
     'error.cliExitedSilently': 'CLI 意外退出且无输出，请检查 CLI 是否已正确安装（设置 → CLI），以及 API 服务商是否已配置。',
+    'error.sendFailed': '发送响应失败，请重试',
 
     // CommandPalette
     'cmd.newChat': '新任务',
@@ -329,6 +349,7 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // ModeSelector
     'mode.code': '标准自动',
+    'mode.title': '运行模式：标准自动 / 纯问答 / 计划先行 / 跳过权限',
     'mode.ask': '询问',
     'mode.plan': '计划',
     'mode.bypass': '全自动',
@@ -424,6 +445,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'msg.questionOtherPlaceholder': '输入自定义回答...',
     'msg.questionLoading': '正在加载...',
     'msg.planReview': `审查 ${APP_NAME} 的计划`,
+    'plan.approvedPlaceholder': '（计划已批准，开始执行）',
     'msg.planApprove': '批准计划并开始执行',
     'msg.planModify': `告诉 ${APP_NAME} 如何修改`,
     'msg.planApproved': '计划已批准',
@@ -440,6 +462,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'agents.empty': '发送消息后查看代理活动',
     'agents.active': '活跃',
     'agents.toggle': '代理活动',
+    'agents.label': 'Agent',
     'agents.spawning': '启动中...',
     'agents.thinking': '思考中...',
     'agents.writing': '输出中...',
@@ -479,12 +502,37 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.fontSizeHint': '{mod}+/- 快捷调整，{mod}+0 重置',
     'settings.fontFamily': '界面字体',
     'settings.fontFamilyHint': '如果某个字体未安装，系统会自动使用后备字体。',
+    'settings.backgroundSkin': '背景风格',
+    'settings.contextWindow': '上下文窗口',
+    'settings.contextWindowSummary': '当前声明：{tokens} tokens；自动 compact 阈值：{threshold} tokens。如果你的 CC Switch / DeepSeek 路由实际支持 1M，请选择「声明 1M」。',
+    'settings.autoCompactTiming': '自动 compact 时机',
+    'settings.autoCompactHint': '超过阈值且会话空闲时自动发送 `/compact`（工具执行中不会触发，绝不打断任务）；改完后对当前会话立即生效。',
+    'settings.ctxWindowDefault': '标准 200K',
+    'settings.ctxWindowDefaultHint': '自动 compact 阈值 167K（对齐 CLI）',
+    'settings.ctxWindowLarge1m': '声明 1M',
+    'settings.ctxWindowLarge1mHint': '自动 compact 阈值 967K（对齐 CLI）',
+    'settings.compactAuto': '自动（对齐 CLI）',
+    'settings.compactAutoHint': '窗口 − 20K 输出预留 − 13K 缓冲',
+    'settings.compactPct90': '90% 窗口',
+    'settings.compactPct90Hint': '更早压缩，更保守',
+    'settings.compactPct80': '80% 窗口',
+    'settings.compactPct80Hint': '旧版行为',
+    'settings.compactCustom': '自定义',
+    'settings.compactCustomHint': '手动输入 tokens 阈值',
+    'settings.compactPresetWarning': '警告点',
+    'settings.compactPresetCliAligned': 'CLI 对齐',
+    'settings.compactPresetLimit': '极限',
+    'settings.streamGranularity': '流式消息粒度',
+    'settings.partialOn': '开启',
+    'settings.partialOff': '关闭',
+    'settings.partialHint': '开启后逐 token 实时渲染（流畅度 ↓）；关闭后仅展示完整消息块（性能 ↑，低配推荐关闭）',
     'settings.monoFontFollowsInterface': '等宽区域跟随界面字体',
     'settings.advanced': '高级设置',
     'settings.tab.general': '通用',
     'settings.tab.provider': 'API 提供商',
     'settings.tab.cli': 'CLI 管理',
     'settings.tab.mcp': 'MCP 服务器',
+    'settings.tab.localModels': '本地模型',
 
     // --- Speech-to-Text settings ---
     'settings.tab.videoAnalysis': '视频分析',
@@ -552,6 +600,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'speech.notSupported': '当前系统不支持语音识别',
     'speech.noSpeech': '未检测到语音，请重试',
     'speech.error': '语音识别出错，请重试',
+    'speech.input': '语音输入',
 
     // --- Prerequisites (运行环境) ---
     'settings.tab.prerequisites': '运行环境',
@@ -823,6 +872,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'cmd.usageTitle': 'Token 用量',
     'cmd.usageCurrentTurn': '当前轮次',
     'cmd.usageTotalSession': '会话累计',
+    'ctx.label': '上下文',
+    'ctx.free': '可用',
+    'ctx.compact': '压缩',
+    'ctx.compactNow': '立即压缩上下文',
+    'ctx.compactIdle': '会话空闲时才能压缩',
+    'ctx.tooltip': '实际模型：{model}；上下文 {used} / {window}；可用 {available}；自动压缩于 {threshold}{breakdown}',
     'ctx.cacheMissed': '缓存未命中：上下文被整体重发（缓存失效）',
     'ctx.cacheHit': '缓存命中',
     'ctx.cacheWrite': '缓存写入',
@@ -988,6 +1043,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installing': '安装中...',
     'cli.installDone': '安装成功',
     'cli.installFail': '安装失败',
+    'cli.notFoundAfterInstall': '安装后仍未检测到 CLI',
     'cli.retry': '重试',
     'cli.reinstall': '重新安装',
     'cli.pathHint': '安装后需要重新打开终端才能生效',
@@ -1169,6 +1225,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'common.confirm': 'Confirm',
     'common.retry': 'Retry',
     'confirm.exit': `Are you sure you want to quit ${APP_NAME}? Running tasks will be terminated.`,
+    'confirm.exitTitle': `Quit ${APP_NAME}?`,
+    'confirm.dontAskAgain': "Don't ask again",
 
     // Sidebar
     'sidebar.hide': 'Hide sidebar',
@@ -1179,6 +1237,16 @@ const messages: Record<Locale, Record<string, string>> = {
     'sidebar.lightMode': 'Light Mode',
     'sidebar.darkMode': 'Dark Mode',
     'sidebar.systemMode': 'System',
+    'sidebar.profile': 'Profile',
+    'sidebar.deepseekEasterEgg': 'DeepSeek: Possessed',
+    // Plugins
+    'plugins.title': 'Claude Code Plugins',
+    'plugins.installScope': 'Install scope',
+    'plugins.scopeUser': 'User',
+    'plugins.scopeProject': 'Project',
+    'plugins.scopeLocal': 'Local',
+    // Profile stats
+    'profile.statsFailed': 'Failed to load stats: {error}',
 
     // ChatPanel
     'chat.showSidebar': 'Show sidebar',
@@ -1213,7 +1281,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'think.high': 'Think High',
     'think.max': 'Think Max',
     'think.providerIgnored': 'This provider may not support thinking settings',
-    'input.shortcutHint': '⏎ Send · {mod}⏎ New line',
+    'input.shortcutHint': '⏎ Send · {mod}⏎ New line · {mod}K Palette',
+    'input.pendingQueued': '{n} message(s) queued — will send after this turn',
+    'input.pendingCancel': 'Cancel queue',
     'input.noWorkingDir': 'No working directory selected. Please select a project folder first.',
 
     // MessageBubble
@@ -1266,6 +1336,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.renamePrompt': 'Enter new name',
     'conv.deleteConfirm': 'Delete this task?',
     'conv.deleteConfirmDetail': 'This action cannot be undone.',
+    'conv.deleteRunningWarning': 'This session is running — deleting it will terminate its process',
     'conv.deleteAll': 'Delete All Tasks',
     'conv.deleteAllConfirm': 'Delete all {count} tasks in "{project}"?',
     'conv.deleteAllConfirmDetail': 'This action cannot be undone.',
@@ -1305,6 +1376,10 @@ const messages: Record<Locale, Record<string, string>> = {
     'search.filterBackend': 'Backend',
     'search.filterBackendAll': 'All',
     'search.inputHint': 'Type at least 2 characters to search',
+    'search.filtered': 'Filtered',
+    'search.nMatches': '{n} matches',
+    'search.dateMonthDay': '{month}/{day}',
+    'search.searchFailed': 'Search failed, click to retry',
 
     // ExportMenu
     'export.title': 'Export task',
@@ -1462,6 +1537,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.tokenLimit': '📏 Conversation is too long. Please start a new task to continue.',
     'error.genericFallback': 'Something went wrong. Please try again later.',
     'error.cliExitedSilently': 'CLI process exited unexpectedly without output. Please check that Claude CLI is installed correctly (Settings → CLI) and that your API provider is configured.',
+    'error.sendFailed': 'Failed to send response. Please retry.',
 
     // CommandPalette
     'cmd.newChat': 'New Task',
@@ -1484,6 +1560,7 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // ModeSelector
     'mode.code': 'Auto',
+    'mode.title': 'Mode: Auto-execute / Ask-only / Plan-first / Bypass permissions',
     'mode.ask': 'Ask',
     'mode.plan': 'Plan',
     'mode.bypass': 'Full Auto',
@@ -1579,6 +1656,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'msg.questionOtherPlaceholder': 'Enter custom answer...',
     'msg.questionLoading': 'Loading...',
     'msg.planReview': `Review ${APP_NAME}'s plan`,
+    'plan.approvedPlaceholder': '(Plan approved, executing)',
     'msg.planApprove': 'Approve plan and start coding',
     'msg.planModify': `Tell ${APP_NAME} what to change`,
     'msg.planApproved': 'Plan approved',
@@ -1595,6 +1673,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'agents.empty': 'Send a message to see agent activity',
     'agents.active': 'active',
     'agents.toggle': 'Agent Activity',
+    'agents.label': 'Agent',
     'agents.spawning': 'Starting...',
     'agents.thinking': 'Thinking...',
     'agents.writing': 'Writing...',
@@ -1634,12 +1713,37 @@ const messages: Record<Locale, Record<string, string>> = {
     'settings.fontSizeHint': '{mod}+/- to adjust, {mod}+0 to reset',
     'settings.fontFamily': 'Interface Font',
     'settings.fontFamilyHint': 'If a font is not installed, the system fallback will be used.',
+    'settings.backgroundSkin': 'Background Skin',
+    'settings.contextWindow': 'Context Window',
+    'settings.contextWindowSummary': 'Declared: {tokens} tokens; auto-compact threshold: {threshold} tokens. If your CC Switch / DeepSeek routing actually supports 1M, pick "Declare 1M".',
+    'settings.autoCompactTiming': 'Auto-compact Timing',
+    'settings.autoCompactHint': 'When the threshold is exceeded and the session is idle, `/compact` is sent automatically (never during tool runs, never interrupting a task); changes take effect immediately for the current session.',
+    'settings.ctxWindowDefault': 'Standard 200K',
+    'settings.ctxWindowDefaultHint': 'Auto-compact at 167K (CLI-aligned)',
+    'settings.ctxWindowLarge1m': 'Declared 1M',
+    'settings.ctxWindowLarge1mHint': 'Auto-compact at 967K (CLI-aligned)',
+    'settings.compactAuto': 'Auto (CLI-aligned)',
+    'settings.compactAutoHint': 'Window − 20K output − 13K buffer',
+    'settings.compactPct90': '90% of window',
+    'settings.compactPct90Hint': 'Earlier compact, more conservative',
+    'settings.compactPct80': '80% of window',
+    'settings.compactPct80Hint': 'Legacy behavior',
+    'settings.compactCustom': 'Custom',
+    'settings.compactCustomHint': 'Enter a token threshold manually',
+    'settings.compactPresetWarning': 'Warning point',
+    'settings.compactPresetCliAligned': 'CLI-aligned',
+    'settings.compactPresetLimit': 'Max',
+    'settings.streamGranularity': 'Streaming Granularity',
+    'settings.partialOn': 'On',
+    'settings.partialOff': 'Off',
+    'settings.partialHint': 'On: renders tokens in real time (smoother feel ↓). Off: shows only complete message blocks (better performance ↑, recommended on low-end machines)',
     'settings.monoFontFollowsInterface': 'Mono-styled labels follow interface font',
     'settings.advanced': 'Advanced',
     'settings.tab.general': 'General',
     'settings.tab.provider': 'API Provider',
     'settings.tab.cli': 'CLI',
     'settings.tab.mcp': 'MCP Servers',
+    'settings.tab.localModels': 'Local Models',
 
     // --- Speech-to-Text settings ---
     'settings.tab.videoAnalysis': 'Video analysis',
@@ -1707,6 +1811,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'speech.notSupported': 'Speech recognition is not supported on this system',
     'speech.noSpeech': 'No speech detected, please try again',
     'speech.error': 'Speech recognition error, please try again',
+    'speech.input': 'Voice input',
 
     // --- Prerequisites (Runtime Environment) ---
     'settings.tab.prerequisites': 'Runtime',
@@ -1978,6 +2083,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'cmd.usageTitle': 'Token Usage',
     'cmd.usageCurrentTurn': 'Current Turn',
     'cmd.usageTotalSession': 'Session Total',
+    'ctx.label': 'Ctx',
+    'ctx.free': 'free',
+    'ctx.compact': 'Compact',
+    'ctx.compactNow': 'Compact context now',
+    'ctx.compactIdle': 'Compact is available after a live session is idle',
+    'ctx.tooltip': 'Actual model: {model}; context {used} / {window}; available {available}; auto compact at {threshold}{breakdown}',
     'ctx.cacheMissed': 'Cache missed — full context re-sent (cache invalidated)',
     'ctx.cacheHit': 'Cache hit',
     'ctx.cacheWrite': 'Cache write',
@@ -2143,6 +2254,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installing': 'Installing...',
     'cli.installDone': 'Installation complete',
     'cli.installFail': 'Installation failed',
+    'cli.notFoundAfterInstall': 'CLI not found after installation',
     'cli.retry': 'Retry',
     'cli.reinstall': 'Reinstall',
     'cli.pathHint': 'Restart your terminal after installation',

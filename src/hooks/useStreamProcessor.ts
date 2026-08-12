@@ -272,6 +272,29 @@ function capToolResult(text: string): string {
   return text.slice(0, MAX_TOOL_RESULT_CHARS) + TOOL_RESULT_TRUNCATED_MARKER;
 }
 
+// B11: tool_use inputs carry full file contents (Write content, Edit
+// old/new strings, ExitPlanMode plans). capToolResult covers the RESULTS;
+// the inputs were uncapped — an agent session writing large files would hold
+// megabytes per message in RAM for the whole session, re-injected on every
+// reload. Truncate the big text fields only; structural fields (paths,
+// commands, questions, todos) stay intact. The diff renderer already limits
+// displayed lines, so truncation doesn't change the interaction.
+const MAX_TOOL_INPUT_FIELD_CHARS = 64 * 1024; // 64 KiB per text field
+const TOOL_INPUT_TRUNCATED_MARKER = '\n…（已截断）';
+
+function capToolInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object') return input;
+  let out: Record<string, unknown> | null = null;
+  for (const key of ['content', 'old_string', 'new_string', 'plan'] as const) {
+    const v = (input as Record<string, unknown>)[key];
+    if (typeof v === 'string' && v.length > MAX_TOOL_INPUT_FIELD_CHARS) {
+      if (!out) out = { ...(input as Record<string, unknown>) };
+      out[key] = v.slice(0, MAX_TOOL_INPUT_FIELD_CHARS) + TOOL_INPUT_TRUNCATED_MARKER;
+    }
+  }
+  return out ?? input;
+}
+
 function _maybeRefreshFileTree(tabId: string, toolUseId?: string, toolName?: string) {
   // Fast path: tool_name available directly on the message
   if (toolName && FILE_MUTATING_TOOLS.has(toolName)) {
@@ -353,6 +376,9 @@ function resolveApiSpeed(msg: any): { outputTokens: number; durationMs: number }
  */
 function isCompactInFlight(tabId: string): boolean {
   const meta = useChatStore.getState().getTab(tabId)?.sessionMeta;
+  // A1: the continuation clears the card before the result — the in-flight
+  // marker keeps the summary request's speed out of the tok/s badge too.
+  if (meta?.compactTurnPending === true) return true;
   const pendingId = meta?.pendingCommandMsgId;
   if (!pendingId) return false;
   const cmdMsg = (useChatStore.getState().getTab(tabId)?.messages ?? [])
@@ -447,6 +473,10 @@ function persistTurnUsage(
 const COMPACT_CHECK_MS = 30_000;
 const COMPACT_STALL_MS = 60_000;
 const COMPACT_MAX_MS = 600_000;
+/** Regression fix: after a timeout the session stays 'running' on purpose
+ *  (the compact may still be silently working). If it never completes, this
+ *  grace period releases the session so the user can keep going. */
+const COMPACT_GRACE_MS = 90_000;
 
 export function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string, startedAt: number): void {
   setTimeout(() => {
@@ -469,9 +499,31 @@ export function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string,
       },
     });
     useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
-    if (useChatStore.getState().getTab(tabId)?.sessionStatus === 'running') {
-      useChatStore.getState().setSessionStatus(tabId, 'idle');
-    }
+    // B4: deliberately do NOT flip the session to 'idle' here. With thinking
+    // off, a large compact can run silently >60s (no stream events at all) —
+    // the CLI may still be working. Marking idle would let the user send
+    // messages that silently queue on the CLI and let a manual Compact click
+    // double-fire. compactTurnPending is also kept: if the compact IS still
+    // running, its eventual result is still recognized as a compact turn
+    // (excluded from stats, no re-trigger); if the process died instead, the
+    // process_exit handler cleans up.
+    // Regression fix: but a compact that NEVER completes would leave the
+    // session stuck 'running' forever — the pending-message FIFO only drains
+    // on a result, /commands are gated, the indicator spins. After one grace
+    // period with no progress, release the session so the user can continue
+    // (any late result still lands correctly; it just isn't a compact turn).
+    const stuckSince = useChatStore.getState().getTab(tabId)?.sessionMeta.lastProgressAt ?? startedAt;
+    setTimeout(() => {
+      const graceTab = useChatStore.getState().getTab(tabId);
+      const graceMeta = graceTab?.sessionMeta ?? {};
+      const stillStuck = graceTab?.sessionStatus === 'running'
+        && !graceMeta.pendingCommandMsgId
+        && (graceMeta.lastProgressAt ?? startedAt) <= stuckSince;
+      if (stillStuck) {
+        useChatStore.getState().setSessionStatus(tabId, 'idle');
+        useChatStore.getState().setSessionMeta(tabId, { compactTurnPending: undefined });
+      }
+    }, COMPACT_GRACE_MS);
   }, COMPACT_CHECK_MS);
 }
 
@@ -480,6 +532,37 @@ export function scheduleCompactTimeoutCheck(tabId: string, compactMsgId: string,
  * against the threshold, fires at most once per session (per-tab flag in
  * sessionMeta, no longer a ref shared across all sessions). Returns true if
  * compact was fired — caller must then skip the FIFO pending-message drain. */
+/** True if the current turn (messages after the most recent user message)
+ *  still has a pending tool execution, unanswered question, or pending
+ *  permission — i.e. the CLI is executing and NOT sitting idle at its prompt.
+ *
+ *  Shared by the auto-compact idle check and the running-status keep-alive:
+ *  a `result success` fires for EVERY assistant message, including turns that
+ *  ENDED in tool_use — the tool then executes (possibly for minutes) while
+ *  the CLI keeps listening on stdin. B2: only tool_use WITHIN the current
+ *  turn counts — an interrupted turn (Stop/ESC) leaves a tool_use without a
+ *  result in history forever; scanning all messages would flag the session
+ *  never-idle and silently disable auto-compact (and keep the running green
+ *  dot lit) for the rest of the session.
+ *  Regression fixes: AskUserQuestion is stored as type 'question' (not
+ *  tool_use) and the turn's result arrives BEFORE the user answers — an
+ *  unanswered question must count as busy too. And `=== undefined` (not
+ *  falsy) so a tool that legitimately returned an empty result ('') doesn't
+ *  stall one round. */
+export function hasPendingToolUseInTurn(messages: ChatMessage[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'user') break; // current turn starts here
+    if (m.type === 'tool_use' && m.toolResultContent === undefined) return true;
+    // A FAILED question answer is terminal — the CLI is not waiting on it
+    // anymore; counting it as pending would keep the session 'running'
+    // forever (green dot + queued input) with no way to resolve.
+    if ((m.type === 'question' && !m.resolved && m.interactionState !== 'failed')
+        || (m.type === 'permission' && m.interactionState === 'pending')) return true;
+  }
+  return false;
+}
+
 function tryFireAutoCompact(
   tabId: string,
   msg: { subtype?: string; usage?: StreamUsage },
@@ -488,19 +571,31 @@ function tryFireAutoCompact(
   const meta = useChatStore.getState().getTab(tabId)?.sessionMeta;
   const stdinId = meta?.stdinId;
   if (!stdinId || meta?.autoCompactFired) return false;
+  // Never race a manual command's processing card (its pending slot owns the
+  // stdin right now; a second write would clobber the card and break the
+  // tok/s badge exclusion). A1: compactTurnPending covers the window after the
+  // continuation cleared the card but before its result arrived.
+  if (meta?.pendingCommandMsgId || meta?.compactTurnPending) return false;
+
+  // Idle-only trigger: the CLI must be sitting at its input prompt before we
+  // write /compact (see hasPendingToolUseInTurn for the full rationale).
+  const messages = useChatStore.getState().getTab(tabId)?.messages ?? [];
+  if (hasPendingToolUseInTurn(messages)) return false;
 
   const model = meta?.spawnedModel || meta?.snapshotModel || useSettingsStore.getState().selectedModel;
   const mode = meta?.snapshotContextWindowMode ?? useSettingsStore.getState().contextWindowMode;
+  const settings = useSettingsStore.getState();
   const threshold = getAutoCompactThreshold(
     model,
     mode,
-    useSettingsStore.getState().autoCompactThresholdTokens,
+    settings.autoCompactThresholdTokens,
+    settings.autoCompactMode,
   );
   const contextTokens = fullInputContextTokens(msg.usage);
   if (contextTokens <= threshold) return false;
 
   const store = useChatStore.getState();
-  store.setSessionMeta(tabId, { autoCompactFired: true });
+  store.setSessionMeta(tabId, { autoCompactFired: true, compactTurnPending: true });
   debugLog('auto-compact', 'triggered:', { contextTokens, threshold });
   const compactMsgId = generateMessageId();
   store.addMessage(tabId, {
@@ -535,7 +630,13 @@ function tryFireAutoCompact(
         completedAt: Date.now(),
       },
     });
-    useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+    // B1: a failed send must not leave the per-session fired flag set — the
+    // session would then never auto-compact again until the next spawn.
+    useChatStore.getState().setSessionMeta(tabId, {
+      pendingCommandMsgId: undefined,
+      autoCompactFired: false,
+      compactTurnPending: undefined,
+    });
     const curStatus = useChatStore.getState().getTab(tabId)?.sessionStatus;
     if (curStatus === 'running') {
       useChatStore.getState().setSessionStatus(tabId, 'idle');
@@ -874,16 +975,24 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // completion at the assistant case — a slash command processing card
         // started on a background tab stayed "running" forever. Mark it
         // completed here, mirroring the foreground assistant case.
+        // A1: same compact-turn flagging as the foreground path — the
+        // continuation clears the card before the 'result' arrives.
         const bgPendingCmd = store.getTab(tabId)?.sessionMeta.pendingCommandMsgId;
         if (bgPendingCmd) {
+          const bgPendingCmdData = (store.getTab(tabId)?.messages ?? [])
+            .find((m) => m.id === bgPendingCmd)?.commandData;
+          if (bgPendingCmdData?.command === '/compact') {
+            store.setSessionMeta(tabId, { pendingCommandMsgId: undefined, compactTurnPending: true });
+          } else {
+            store.setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+          }
           store.updateMessage(tabId, bgPendingCmd, {
             commandCompleted: true,
             commandData: {
-              ...(store.getTab(tabId)?.messages ?? []).find((m) => m.id === bgPendingCmd)?.commandData,
+              ...bgPendingCmdData,
               completedAt: Date.now(),
             },
           });
-          store.setSessionMeta(tabId, { pendingCommandMsgId: undefined });
         }
         // Skip text blocks when AskUserQuestion is present — the
         // interactive question UI makes them redundant.
@@ -928,7 +1037,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             if (bgHasAskUserQuestion) continue;
             // C2: same system-text filter as the foreground path — background
             // tabs must not cache /compact continuation summaries either.
-            if (isSystemText(block.text || '')) continue;
+            if (isSystemText(block.text || '')) {
+              // A1: CLI-internal compaction detection (see foreground path).
+              if (/^This session is being continued/i.test((block.text || '').trimStart())
+                  // Regression fix: Task subagent streams share the process —
+                  // exclude them (see foreground path).
+                  && !msg.parent_tool_use_id
+                  && !store.getTab(tabId)?.sessionMeta.pendingCommandMsgId) {
+                store.setSessionMeta(tabId, { compactTurnPending: true });
+              }
+              continue;
+            }
             const textId = msg.uuid ? `${msg.uuid}_text_${blockIdx}` : generateMessageId();
             bgNewMessages.push({
               id: textId,
@@ -993,7 +1112,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 id: block.id || generateMessageId(),
                 role: 'assistant', type: 'tool_use',
                 content: '', toolName: block.name,
-                toolInput: block.input, timestamp: Date.now(),
+                toolInput: capToolInput(block.input), timestamp: Date.now(),
               });
               // Only create plan_review card in Plan mode.
               // Bypass auto-approves via Rust backend — no UI card needed.
@@ -1030,7 +1149,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 id: block.id || generateMessageId(),
                 role: 'assistant', type: 'tool_use',
                 content: '', toolName: block.name,
-                toolInput: block.input, timestamp: Date.now(),
+                toolInput: capToolInput(block.input), timestamp: Date.now(),
               });
             }
           }
@@ -1049,7 +1168,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               const resultText = Array.isArray(block.content)
                 ? block.content.map((b: any) => typeof b.text === 'string' ? b.text : typeof b.content === 'string' ? b.content : '').join('')
                 : typeof block.content === 'string' ? block.content : '';
-              if (block.tool_use_id && resultText) {
+              // No `&& resultText` gate — empty results must still resolve the
+              // tool_use or the pending-tool check keeps the session running.
+              if (block.tool_use_id) {
                 store.updateMessage(tabId, block.tool_use_id, { toolResultContent: capToolResult(resultText) });
               }
             }
@@ -1101,15 +1222,35 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         break;
       }
       case 'result': {
-        store.setSessionStatus(tabId, msg.subtype === 'success' ? 'completed' : 'error');
+        // Keep the sidebar's green dot lit while the turn's tools are still
+        // executing: a result success ending in tool_use means the CLI is busy
+        // running that tool (possibly for minutes) — same idle semantic as
+        // hasPendingToolUseInTurn. The dot then extinguishes on the result of
+        // a turn that actually finished (or on exit/error).
+        const bgHasPendingTool = hasPendingToolUseInTurn(store.getTab(tabId)?.messages ?? []);
+        if (msg.subtype !== 'success' || !bgHasPendingTool) {
+          store.setSessionStatus(tabId, msg.subtype === 'success' ? 'completed' : 'error');
+        }
         // Capture the compact-turn flag BEFORE the pending slot is cleared
         // below (same rule as the foreground path): the compact summary
         // request's usage is compression overhead, not dialogue — excluded
         // from the session's conversation token stats.
         const bgPendingCmd = store.getTab(tabId)?.sessionMeta.pendingCommandMsgId;
-        const bgWasCompact = !!bgPendingCmd
-          && (store.getTab(tabId)?.messages ?? [])
-            .find((m) => m.id === bgPendingCmd)?.commandData?.command === '/compact';
+        // A1: same as foreground — honor compactTurnPending (the continuation
+        // may already have cleared the card slot before this result).
+        const bgMetaCompactPending = store.getTab(tabId)?.sessionMeta.compactTurnPending === true;
+        const bgWasCompact = bgMetaCompactPending
+          || (!!bgPendingCmd
+            && (store.getTab(tabId)?.messages ?? [])
+              .find((m) => m.id === bgPendingCmd)?.commandData?.command === '/compact');
+        if (bgMetaCompactPending) {
+          store.setSessionMeta(tabId, { compactTurnPending: undefined });
+        }
+        if (msg.subtype !== 'success' && bgWasCompact) {
+          // B1: same as foreground — a failed compact turn must not leave the
+          // per-session fired flag set, or auto-compact dies until next spawn.
+          store.setSessionMeta(tabId, { autoCompactFired: false });
+        }
         // B10: complete a pending slash-command card on the background path —
         // same as the foreground result case, so /compact etc. don't hang.
         {
@@ -1195,7 +1336,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // B5: background tabs also auto-compact (previously foreground-only, so
         // a long session left running in a background tab could hit the context
         // limit with no warning). Same trigger logic as foreground.
-        const bgCompacted = tryFireAutoCompact(tabId, msg);
+        // A1: never re-trigger on a compact turn's own result (double compact).
+        const bgCompacted = !bgWasCompact && tryFireAutoCompact(tabId, msg);
         // FIFO drain for background tabs (#142/#70): same logic as foreground.
         if (!bgCompacted) {
           const bgDrainTab = store.getTab(tabId);
@@ -1203,7 +1345,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const bgFlushStdinId = bgDrainTab?.sessionMeta.stdinId;
           if (bgNextMsg && bgFlushStdinId) {
             store.setSessionStatus(tabId, 'running');
-            store.setSessionMeta(tabId, { turnStartTime: Date.now(), lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0 });
+            store.setSessionMeta(tabId, { turnStartTime: Date.now(), turnStartSource: 'auto', lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0 });
             store.setActivityStatus(tabId, { phase: 'thinking' });
             bridge.sendStdin(bgFlushStdinId, bgNextMsg).catch((err) => {
               console.error('[TC:bg] Failed to send pending message:', err);
@@ -1310,6 +1452,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           if (bgExitPendingCmd) {
             store.updateMessage(tabId, bgExitPendingCmd, { commandCompleted: true });
             store.setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+          }
+          // A1: no result will ever consume compactTurnPending after the
+          // process died — clear it so the next turn isn't misclassified.
+          // (Same regression fix as foreground: reset the fired flag when a
+          // compact was interrupted mid-run.)
+          if (store.getTab(tabId)?.sessionMeta.compactTurnPending) {
+            store.setSessionMeta(tabId, { compactTurnPending: undefined, autoCompactFired: false });
           }
         }
         // B6: same residual-partial cleanup for background tabs — an exited
@@ -1820,14 +1969,28 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Some commands (e.g. /compact) may not emit a 'result' event.
         const pendingCmd = useChatStore.getState().getTab(tabId)?.sessionMeta.pendingCommandMsgId;
         if (pendingCmd) {
+          const pendingCmdData = (useChatStore.getState().getTab(tabId)?.messages ?? [])
+            .find((m) => m.id === pendingCmd)?.commandData;
+          // A1: a /compact continuation arrives as an 'assistant' event BEFORE
+          // the 'result'. The card completes here and the pending slot clears —
+          // the result handler's wasCompactTurn check (which reads that slot)
+          // would then miss the turn and pollute token stats / re-fire
+          // auto-compact. Flag it so the result still recognizes the turn.
+          if (pendingCmdData?.command === '/compact') {
+            useChatStore.getState().setSessionMeta(tabId, {
+              pendingCommandMsgId: undefined,
+              compactTurnPending: true,
+            });
+          } else {
+            useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+          }
           useChatStore.getState().updateMessage(tabId, pendingCmd, {
             commandCompleted: true,
             commandData: {
-              ...(useChatStore.getState().getTab(tabId)?.messages ?? []).find((m) => m.id === pendingCmd)?.commandData,
+              ...pendingCmdData,
               completedAt: Date.now(),
             },
           });
-          useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
         }
 
         // If this message contains AskUserQuestion, skip text blocks —
@@ -1888,7 +2051,23 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             // session-loader's reload behavior (isSystemText). Without this, a
             // /compact continuation summary renders as a normal assistant
             // message in the live session but disappears after reload.
-            if (isSystemText(block.text || '')) continue;
+            if (isSystemText(block.text || '')) {
+              // A1: CLI-internal compaction (CLAUDE_CODE_AUTO_COMPACT_WINDOW
+              // injected at spawn) streams a continuation with NO pending card.
+              // Flag the turn so its result is excluded from token stats and
+              // never re-fires auto-compact. Matches only the explicit
+              // continuation marker — other isSystemText matches (tool
+              // definitions, reminders) are not compact turns.
+              if (/^This session is being continued/i.test((block.text || '').trimStart())
+                  // Regression fix: a Task subagent runs INSIDE the same CLI
+                  // process — its own internal compact must not flag the MAIN
+                  // session's turn (the flag is only consumed by main results).
+                  && !msg.parent_tool_use_id
+                  && !useChatStore.getState().getTab(tabId)?.sessionMeta.pendingCommandMsgId) {
+                useChatStore.getState().setSessionMeta(tabId, { compactTurnPending: true });
+              }
+              continue;
+            }
             setActivityStatus({ phase: 'writing' });
             agentActions.updatePhase(agentId, 'writing');
             // Use msg.uuid + block index as stable ID so re-delivered
@@ -1996,7 +2175,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 type: 'tool_use',
                 content: '',
                 toolName: block.name,
-                toolInput: block.input,
+                toolInput: capToolInput(block.input),
                 subAgentDepth: agentDepth,
                 timestamp: Date.now(),
               });
@@ -2043,7 +2222,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 type: 'tool_use',
                 content: '',
                 toolName: block.name,
-                toolInput: block.input,
+                toolInput: capToolInput(block.input),
                 subAgentDepth: agentDepth,
                 timestamp: Date.now(),
               });
@@ -2104,7 +2283,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                   ? block.content
                   : '';
               const tuId = block.tool_use_id;
-              if (tuId && resultText) {
+              // No `&& resultText` gate: a tool that legitimately returned an
+              // EMPTY result must still be marked resolved (toolResultContent
+              // = '' ≠ undefined), or the pending-tool idle check keeps the
+              // session 'running' forever and the input queue deadlocks.
+              if (tuId) {
                 const msgs = useChatStore.getState().getTab(tabId)?.messages ?? [];
                 const parent = msgs.find((m) => m.id === tuId);
                 if (parent) {
@@ -2124,7 +2307,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             : '';
           if (Array.isArray(userContent)) {
             for (const block of userContent) {
-              if (block.tool_use_id && resultText) {
+              // No `&& resultText` gate — empty results must still resolve the
+              // tool_use (see the sibling path above).
+              if (block.tool_use_id) {
                 const msgs = useChatStore.getState().getTab(tabId)?.messages ?? [];
                 const parent = msgs.find((m) => m.id === block.tool_use_id);
                 if (parent) {
@@ -2295,6 +2480,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 setSessionStatus('running');
                 setSessionMeta({
                   turnStartTime: retryTurnStartedAt,
+                  turnStartSource: 'auto',
                   lastProgressAt: retryTurnStartedAt,
                   inputTokens: 0,
                   outputTokens: 0,
@@ -2410,9 +2596,19 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // summary request. Its usage is compression overhead, not dialogue —
         // it must not pollute the session's conversation token stats (the card
         // itself already displays the cost summary).
-        const wasCompactTurn = !!pendingCmdMsgId
-          && (useChatStore.getState().getTab(tabId)?.messages ?? [])
-            .find((m) => m.id === pendingCmdMsgId)?.commandData?.command === '/compact';
+        // A1: the assistant continuation clears the pending slot BEFORE this
+        // result arrives — also honor compactTurnPending (set on send or on
+        // continuation detection), else the summary turn would be counted as a
+        // normal turn and re-trigger auto-compact (double compact).
+        const metaCompactTurnPending = useChatStore.getState().getTab(tabId)?.sessionMeta.compactTurnPending === true;
+        const wasCompactTurn = metaCompactTurnPending
+          || (!!pendingCmdMsgId
+            && (useChatStore.getState().getTab(tabId)?.messages ?? [])
+              .find((m) => m.id === pendingCmdMsgId)?.commandData?.command === '/compact');
+        if (metaCompactTurnPending) {
+          // Consume the in-flight marker now that its result has arrived.
+          useChatStore.getState().setSessionMeta(tabId, { compactTurnPending: undefined });
+        }
         if (pendingCmdMsgId) {
           const resultOutput = typeof msg.result === 'string' ? msg.result : '';
           useChatStore.getState().updateMessage(tabId, pendingCmdMsgId, {
@@ -2482,12 +2678,28 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
 
-        setSessionStatus(
-          msg.subtype === 'success' ? 'completed' : 'error'
+        // Keep the sidebar's green dot lit while the turn's tools are still
+        // executing: a result success ending in tool_use means the CLI is busy
+        // running that tool (possibly for minutes) — same idle semantic as
+        // hasPendingToolUseInTurn. The dot then extinguishes on the result of
+        // a turn that actually finished (or on exit/error).
+        const fgHasPendingTool = hasPendingToolUseInTurn(
+          useChatStore.getState().getTab(tabId)?.messages ?? [],
         );
+        if (msg.subtype !== 'success' || !fgHasPendingTool) {
+          setSessionStatus(
+            msg.subtype === 'success' ? 'completed' : 'error'
+          );
+        }
         // Sync error status to ActivityIndicator for real-time user feedback
         if (msg.subtype !== 'success') {
           setActivityStatus({ phase: 'error', statusMessage: t('chat.error') });
+          // B1: a failed compact turn must not leave the per-session fired
+          // flag set — the session would then never auto-compact again until
+          // the next spawn (a long session would keep growing unchecked).
+          if (wasCompactTurn) {
+            setSessionMeta({ autoCompactFired: false });
+          }
         }
         // Compact summary turns never touch the conversation token stats —
         // the /compact card already shows its cost; counting it here would
@@ -2603,7 +2815,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Fires at most once per session (per-tab flag) to avoid infinite loops.
         // B1/B3/B4 fixes live in tryFireAutoCompact (full-context comparison,
         // per-tab fired flag, activity-aware timeout).
-        if (tryFireAutoCompact(tabId, msg)) {
+        // A1: never re-trigger on a compact turn's own result — the summary
+        // request's input ≈ the pre-compact context, still over the threshold;
+        // firing here would double-compact after manual / CLI-internal compacts.
+        if (!wasCompactTurn && tryFireAutoCompact(tabId, msg)) {
           break; // Skip pending message flush — compact takes priority
         }
 
@@ -2620,6 +2835,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             setSessionStatus('running');
             setSessionMeta({
               turnStartTime: nextTurnStartedAt,
+              turnStartSource: 'auto',
               lastProgressAt: nextTurnStartedAt,
               inputTokens: 0,
               outputTokens: 0,
@@ -2714,6 +2930,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (exitPendingCmd) {
           useChatStore.getState().updateMessage(tabId, exitPendingCmd, { commandCompleted: true });
           useChatStore.getState().setSessionMeta(tabId, { pendingCommandMsgId: undefined });
+        }
+        // A1: a dead process means no result will ever consume compactTurnPending —
+        // clear it so the next turn's result isn't misclassified as a compact turn.
+        // Regression fix: also reset the fired flag when a compact was interrupted
+        // mid-run (Stop/kill/rewind) — the spawn-time reset covers fresh starts,
+        // not a process that died while a compact was in flight.
+        if (useChatStore.getState().getTab(tabId)?.sessionMeta.compactTurnPending) {
+          useChatStore.getState().setSessionMeta(tabId, {
+            compactTurnPending: undefined,
+            autoCompactFired: false,
+          });
         }
 
         // If the session was running and no assistant messages were received,

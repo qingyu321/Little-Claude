@@ -26,7 +26,7 @@ export interface PetAgentStatus {
   toolName?: string;
   /** Detail text (error message etc). */
   statusMessage?: string;
-  /** Token usage of the highest-priority active tab (per-turn). */
+  /** Token usage summed across ALL active sessions of this agent (per-turn). */
   input?: number;
   output?: number;
   cacheRead?: number;
@@ -43,6 +43,9 @@ export interface PetBubbleMessage {
   source: PetAgent | null;
   kind: PetPhase;
   ttlMs: number;
+  /** Owning tab — dedup identity: two different sessions finishing with the
+   *  same text/source/kind must still be distinct reports. */
+  tabId?: string;
 }
 
 /** Full state snapshot pushed from main window to pet window. */
@@ -64,7 +67,8 @@ export interface PetStatusPayload {
 /** Commands sent from pet window back to the main window. */
 export type PetCommand =
   | { type: "focus-main" }
-  | { type: "open-settings" }
+  /** tab: settings tab to open on (e.g. "pet") — optional, keeps old toggle behavior */
+  | { type: "open-settings"; tab?: string }
   /** User hid the pet via right-click menu — main window must respect it (don't re-show). */
   | { type: "user-hide" }
   /** Pet window mounted and its status listener is ready — main window re-pushes now. */

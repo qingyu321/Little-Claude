@@ -49,6 +49,8 @@ function saveStdinToTab(map: Record<string, string>) {
 interface SessionState {
   sessions: SessionListItem[];
   isLoading: boolean;
+  /** fetchSessions 失败时的原始错误信息（非 null 表示列表加载失败） */
+  fetchError: string | null;
   searchQuery: string;
   selectedSessionId: string | null;
   /** Previously selected session ID, for Ctrl+Tab quick switch */
@@ -105,6 +107,7 @@ interface SessionState {
 export const useSessionStore = create<SessionState>()((set, get) => ({
   sessions: [],
   isLoading: false,
+  fetchError: null,
   searchQuery: '',
   selectedSessionId: null,
   previousSessionId: null,
@@ -127,9 +130,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       const drafts = get().sessions.filter(
         (s) => s.path === '' && !diskSessions.some((d) => d.id === s.id),
       );
-      set({ sessions: [...drafts, ...diskSessions], isLoading: false });
-    } catch {
-      set({ isLoading: false });
+      set({ sessions: [...drafts, ...diskSessions], isLoading: false, fetchError: null });
+    } catch (err) {
+      // A6: 静默吞错会让用户看到误导性的空列表 —— 记录错误信息，
+      // 由 ConversationList 渲染错误行 + 重试按钮
+      set({ isLoading: false, fetchError: String(err) });
     }
   },
 

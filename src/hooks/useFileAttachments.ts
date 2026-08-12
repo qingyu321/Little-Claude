@@ -6,6 +6,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useFileStore } from '../stores/fileStore';
 import { showToast } from '../components/shared/Toast';
 import { t } from '../lib/i18n';
+import { friendlyError } from '../lib/error-format';
 
 // A9: attachments over this size are rejected with a toast — the CLI reads
 // these files over stdin-free IPC, and multi-hundred-MB copies thrash disk
@@ -170,6 +171,11 @@ export function useFileAttachments() {
           });
         } catch (err) {
           console.error('Failed to add file:', file.name, err);
+          // L5: 附件读取失败不能只写 console —— toast 告知用户
+          showToast(
+            `${file.name}: ${friendlyError(String(err))}`,
+            'error',
+          );
         }
       }
 

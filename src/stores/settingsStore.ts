@@ -33,13 +33,36 @@ export function mapSessionModeToPermissionMode(mode: SessionMode): CliPermission
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
 export type ContextWindowMode = 'default' | 'large1m';
 
-function defaultAutoCompactThreshold(mode: ContextWindowMode): number {
-  return mode === 'large1m' ? 800_000 : 160_000;
+/** How the auto-compact threshold is chosen (user-selectable, GeneralTab).
+ *  - 'auto'   → window − 20K output reservation − 13K buffer, exactly the
+ *    Claude CLI's own auto-compact point (token-budget docs). Scales with the
+ *    window: 1M → ~967K (96.7%), 200K → ~167K (83.5%). The old fixed-80% rule
+ *    compacted 1M sessions a full 17% earlier than the CLI itself.
+ *  - 'pct90' / 'pct80' → fixed fractions of the declared window.
+ *  - 'custom' → the user's autoCompactThresholdTokens value. */
+export type AutoCompactMode = 'auto' | 'pct90' | 'pct80' | 'custom';
+
+// CLI constants (token-budget docs): auto-compact fires at window − output
+// reservation − buffer; warning fires WARNING_LEAD_TOKENS before that.
+const OUTPUT_RESERVATION_TOKENS = 20_000;
+const AUTOCOMPACT_BUFFER_TOKENS = 13_000;
+const WARNING_LEAD_TOKENS = 20_000;
+
+function contextWindowSize(mode: ContextWindowMode): number {
+  return mode === 'large1m' ? 1_000_000 : 200_000;
 }
 
-function clampAutoCompactThreshold(tokens: number): number {
-  if (!Number.isFinite(tokens)) return 160_000;
-  return Math.max(10_000, Math.min(1_000_000, Math.round(tokens)));
+function defaultAutoCompactThreshold(mode: ContextWindowMode): number {
+  return contextWindowSize(mode) - OUTPUT_RESERVATION_TOKENS - AUTOCOMPACT_BUFFER_TOKENS;
+}
+
+function clampAutoCompactThreshold(tokens: number, window: number): number {
+  // L1: non-finite input falls back to the CLI-aligned default of the CURRENT
+  // window — a 1M window must not drop to the 200K default (over-eager compact).
+  if (!Number.isFinite(tokens)) return window - OUTPUT_RESERVATION_TOKENS - AUTOCOMPACT_BUFFER_TOKENS;
+  // B3: never exceed the active window — a custom threshold inherited from a
+  // larger window would silently disable app-level compaction.
+  return Math.max(10_000, Math.min(window - 1_000, Math.round(tokens)));
 }
 
 // 报告B10: avatar images are base64 data URLs (hundreds of KB). They used to
@@ -176,8 +199,12 @@ interface SettingsState {
   thinkingLevel: ThinkingLevel;
   /** Declares that the selected/provider model supports a 1M context window. */
   contextWindowMode: ContextWindowMode;
-  /** User-adjustable auto compact threshold in tokens. */
+  /** User-adjustable auto compact threshold in tokens (used when mode is 'custom'). */
   autoCompactThresholdTokens: number;
+  /** User's chosen auto-compact timing policy (defaults to CLI-aligned 'auto'). */
+  autoCompactMode: AutoCompactMode;
+  /** Whether closing the window asks for confirmation (default true) */
+  confirmOnClose: boolean;
   /** Whether a newer version is available (set by auto-check on startup) */
   updateAvailable: boolean;
   /** Whether a newer CLI version is available */
@@ -273,6 +300,9 @@ interface SettingsState {
   petScale: number;
   /** 桌面宠物 — 当前皮肤 id（"default" 或已导入宠物 id） */
   petSkin: string;
+  /** Transient request: open the settings panel on this tab (pet window "设置" button).
+   *  Consumed once by SettingsPanel on mount/open, then cleared. NEVER persisted. */
+  settingsOpenRequest: { tab: string } | null;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -305,6 +335,8 @@ interface SettingsState {
   setContextWindowMode: (mode: ContextWindowMode) => void;
   setCliBackend: (backend: 'claude' | 'codex') => void;
   setAutoCompactThresholdTokens: (tokens: number) => void;
+  setAutoCompactMode: (mode: AutoCompactMode) => void;
+  setConfirmOnClose: (confirm: boolean) => void;
   setPreviewSidebarVisible: (v: boolean) => void;
   setSkillsSidebarVisible: (v: boolean) => void;
   setInterviewSidebarVisible: (v: boolean) => void;
@@ -346,6 +378,7 @@ interface SettingsState {
   setPetEnabled: (enabled: boolean) => void;
   setPetScale: (scale: number) => void;
   setPetSkin: (skin: string) => void;
+  setSettingsOpenRequest: (req: { tab: string } | null) => void;
   setWallpaperQuality: (quality: WallpaperQuality) => void;
   setWallpaperOpacity: (opacity: number) => void;
 }
@@ -387,6 +420,8 @@ export const useSettingsStore = create<SettingsState>()(
       thinkingLevel: 'medium' as ThinkingLevel,
       contextWindowMode: 'default',
       autoCompactThresholdTokens: 160_000,
+      autoCompactMode: 'auto',
+      confirmOnClose: true,
       updateAvailable: false,
       updateVersion: '',
       cliUpdateAvailable: false,
@@ -413,6 +448,7 @@ export const useSettingsStore = create<SettingsState>()(
       petEnabled: false,
       petScale: 1,
       petSkin: 'default',
+      settingsOpenRequest: null,
       wallpaperName: '',
       wallpaperQuality: 'balanced' as WallpaperQuality,
       wallpaperOpacity: 0.18,
@@ -513,16 +549,23 @@ export const useSettingsStore = create<SettingsState>()(
       setOnboardingOpen: (open) =>
         set(() => ({ onboardingOpen: open })),
 
+      setConfirmOnClose: (confirm) =>
+        set(() => ({ confirmOnClose: confirm })),
+
       setThinkingLevel: (level) =>
         set(() => ({ thinkingLevel: level })),
 
       setContextWindowMode: (contextWindowMode) =>
         set((state) => {
+          // 'auto' mode derives the threshold from the window on every read —
+          // nothing to migrate. Only a stale 'custom' tokens value (still the
+          // window's old default) follows the new window's default.
           const oldDefault = defaultAutoCompactThreshold(state.contextWindowMode);
           const nextDefault = defaultAutoCompactThreshold(contextWindowMode);
           return {
             contextWindowMode,
-            ...(state.autoCompactThresholdTokens === oldDefault
+            ...(state.autoCompactMode === 'custom'
+              && state.autoCompactThresholdTokens === oldDefault
               ? { autoCompactThresholdTokens: nextDefault }
               : {}),
           };
@@ -578,7 +621,14 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ includePartialMessages })),
 
       setAutoCompactThresholdTokens: (autoCompactThresholdTokens) =>
-        set(() => ({ autoCompactThresholdTokens: clampAutoCompactThreshold(autoCompactThresholdTokens) })),
+        set((state) => ({
+          autoCompactThresholdTokens: clampAutoCompactThreshold(
+            autoCompactThresholdTokens,
+            contextWindowSize(state.contextWindowMode),
+          ),
+        })),
+
+      setAutoCompactMode: (autoCompactMode) => set(() => ({ autoCompactMode })),
 
       setUpdateAvailable: (available, version) =>
         set(() => ({
@@ -681,10 +731,12 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ petScale: scale })),
       setPetSkin: (skin) =>
         set(() => ({ petSkin: skin })),
+      setSettingsOpenRequest: (req) =>
+        set(() => ({ settingsOpenRequest: req })),
     }),
     {
       name: 'tokenicode-settings',
-      version: 25,
+      version: 27,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -785,8 +837,12 @@ export const useSettingsStore = create<SettingsState>()(
           persisted.contextWindowMode = 'default';
         }
         if (version < 11) {
+          // Historical default was the fixed-80% rule (160K / 800K). Written
+          // literally, NOT via defaultAutoCompactThreshold — that function now
+          // returns the CLI-aligned window−33K value, which would make v26's
+          // "did the user ever change it?" check misclassify this as custom.
           const mode = persisted.contextWindowMode === 'large1m' ? 'large1m' : 'default';
-          persisted.autoCompactThresholdTokens = defaultAutoCompactThreshold(mode);
+          persisted.autoCompactThresholdTokens = mode === 'large1m' ? 800_000 : 160_000;
         }
         if (version < 15) {
           persisted.speechEnabled = false;
@@ -831,6 +887,21 @@ export const useSettingsStore = create<SettingsState>()(
           // 新手教程：老用户（已完成 setup）升级后不弹；真新用户无持久化数据走默认 false
           persisted.onboardingCompleted = persisted.setupCompleted === true;
         }
+        if (version < 26) {
+          // Auto-compact threshold becomes user-selectable (auto / 90% / 80% /
+          // custom). Legacy data only ever held the fixed-80% value: the old
+          // default (160K / 800K) means "never touched" → upgrade to the
+          // CLI-aligned 'auto'; anything else was a deliberate choice → keep
+          // the tokens as 'custom'.
+          const mode = persisted.contextWindowMode === 'large1m' ? 'large1m' : 'default';
+          const legacyDefault = mode === 'large1m' ? 800_000 : 160_000;
+          const tokens = persisted.autoCompactThresholdTokens as number | undefined;
+          if (tokens === undefined || tokens === legacyDefault) {
+            persisted.autoCompactMode = 'auto';
+          } else {
+            persisted.autoCompactMode = 'custom';
+          }
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -852,6 +923,8 @@ export const useSettingsStore = create<SettingsState>()(
         thinkingLevel: state.thinkingLevel,
         contextWindowMode: state.contextWindowMode,
         autoCompactThresholdTokens: state.autoCompactThresholdTokens,
+        autoCompactMode: state.autoCompactMode,
+        confirmOnClose: state.confirmOnClose,
         updateAvailable: state.updateAvailable,
         updateVersion: state.updateVersion,
         lastSeenVersion: state.lastSeenVersion,
@@ -936,11 +1009,46 @@ export function getContextWindowForModel(model?: string, mode?: ContextWindowMod
   return isLargeContextMode(model, mode) ? 1_000_000 : 200_000;
 }
 
-export function getAutoCompactThreshold(model?: string, mode?: ContextWindowMode, overrideTokens?: number): number {
-  if (typeof overrideTokens === 'number') {
-    return clampAutoCompactThreshold(overrideTokens);
+export function getAutoCompactThreshold(
+  model?: string,
+  mode?: ContextWindowMode,
+  overrideTokens?: number,
+  autoCompactMode: AutoCompactMode = 'auto',
+): number {
+  const window = getContextWindowForModel(model, mode);
+  switch (autoCompactMode) {
+    case 'custom':
+      if (typeof overrideTokens === 'number') {
+        // B3: clamp into the CURRENT window on every read — a custom value set
+        // under a 1M window (e.g. 500K) must never outlive a switch back to
+        // 200K, where it would exceed the window and silence auto-compact.
+        return clampAutoCompactThreshold(overrideTokens, window);
+      }
+      break; // no custom value — fall through to the CLI-aligned default
+    case 'pct90':
+      return Math.round(window * 0.9);
+    case 'pct80':
+      return Math.round(window * 0.8);
+    case 'auto':
+    default:
+      return window - OUTPUT_RESERVATION_TOKENS - AUTOCOMPACT_BUFFER_TOKENS;
   }
-  return getContextWindowForModel(model, mode) >= 1_000_000 ? 800_000 : 160_000;
+  return window - OUTPUT_RESERVATION_TOKENS - AUTOCOMPACT_BUFFER_TOKENS;
+}
+
+/** Context warning point: fires WARNING_LEAD_TOKENS before auto-compact
+ *  (CLI's WARNING_THRESHOLD_BUFFER_TOKENS semantics). 1M → ~947K, 200K → ~147K. */
+export function getContextWarningThreshold(
+  model?: string,
+  mode?: ContextWindowMode,
+  overrideTokens?: number,
+  autoCompactMode: AutoCompactMode = 'auto',
+): number {
+  const threshold = getAutoCompactThreshold(model, mode, overrideTokens, autoCompactMode);
+  // L2: a 50K floor would invert the ordering for very small custom thresholds
+  // (warning point later than compact point). Never let the warning trail the
+  // compact point — the floor only applies when it still leads by 1K+.
+  return Math.max(threshold - WARNING_LEAD_TOKENS, Math.min(threshold - 1_000, 50_000));
 }
 
 // --- Runtime mode switching via SDK control protocol ---

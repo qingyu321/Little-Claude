@@ -108,6 +108,12 @@ export interface SessionMeta {
   /** Auto-compact already fired for this session (B3 fix: per-tab flag; used to be
    *  a single ref shared across all sessions of the one InputBar instance). */
   autoCompactFired?: boolean;
+  /** A /compact turn is in flight: set when a compact request is sent (auto,
+   *  manual, or detected CLI-internal) and consumed by the turn's result. The
+   *  compact continuation arrives as an 'assistant' event and clears the
+   *  pendingCommandMsgId card slot BEFORE the 'result' — without this flag the
+   *  result handler would treat the summary request as a normal turn (A1). */
+  compactTurnPending?: boolean;
   /** Cumulative input tokens across ALL turns in this session/task */
   totalInputTokens?: number;
   /** Cumulative output tokens across ALL turns in this session/task */
@@ -118,6 +124,11 @@ export interface SessionMeta {
   totalCacheCreationTokens?: number;
   /** Timestamp (Date.now()) when the current turn started — used for elapsed timer */
   turnStartTime?: number;
+  /** Who started the current turn: 'user' (InputBar submit) or 'auto' (FIFO
+   *  drain, provider-switch retry). The ChatPanel scroll-follow effect uses
+   *  this to avoid yanking the view back to the bottom when an automatic turn
+   *  starts while the user is reading history. */
+  turnStartSource?: 'user' | 'auto';
   /** Timestamp of last stream activity — used for stall detection instead of total elapsed */
   lastProgressAt?: number;
   /** JSON fingerprint of the active provider config used when spawning the CLI process.
@@ -201,6 +212,16 @@ export interface TabSession {
   pendingUserMessages: string[];
 }
 
+/** Scroll position of a chat tab at switch-away time — restored when the tab
+ *  is shown again so multi-session switching never loses the user's place.
+ *  `distanceFromBottom` tells the restorer whether the user was pinned to the
+ *  newest output (small distance → re-pin to bottom, new content may have
+ *  grown meanwhile) or reading history (large distance → restore scrollTop). */
+export interface ScrollAnchor {
+  scrollTop: number;
+  distanceFromBottom: number;
+}
+
 // --- Store State & Actions ---
 
 /** Lightweight streaming state separated from the heavy tabs Map.
@@ -221,6 +242,11 @@ interface ChatState {
   /** High-frequency streaming state, updated independently from tabs.
    *  Prevents O(n) Map copies on every text_delta event. */
   streams: Map<string, StreamState>;
+  /** Per-tab scroll anchors captured at switch-away (kept out of tabs so the
+   *  ChatPanel's onScroll handler can write it at scroll frequency without
+   *  copying the heavy tab state). */
+  scrollAnchors: Record<string, ScrollAnchor>;
+  setScrollAnchor: (tabId: string, anchor: ScrollAnchor) => void;
 
   // --- Tab-level operations (all take tabId) ---
   addMessage: (tabId: string, message: ChatMessage) => void;
@@ -371,6 +397,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   tabs: new Map(),
   sessionCache: new Map(),   // alias — always kept in sync with tabs
   streams: new Map(),        // light-weight streaming state, updated without copying tabs
+  scrollAnchors: {},
+  setScrollAnchor: (tabId, anchor) =>
+    set((state) => ({ scrollAnchors: { ...state.scrollAnchors, [tabId]: anchor } })),
 
   highlightMessageIndex: null,
   setHighlightMessageIndex: (index) => set({ highlightMessageIndex: index }),
@@ -448,6 +477,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   updatePartialMessage: (tabId, text) =>
     set((state) => {
+      // Regression fix: a deleted tab's late-arriving flush (in-flight rAF
+      // after removeTab) must not recreate its streams entry.
+      if (!state.tabs.has(tabId)) return {};
       // Update streams — lightweight, no tabs Map copy
       const newStreams = new Map(state.streams);
       const s = newStreams.get(tabId);
@@ -456,17 +488,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         partialThinking: s?.partialThinking ?? '',
         isStreaming: true,
       });
-      // Only update tabs for activityStatus (lightweight, no messages array copy)
-      const newTabs = new Map(state.tabs);
-      const tab = newTabs.get(tabId);
+      // B12: only copy the tabs Map when the activity phase actually changes.
+      // Every flush used to copy it and notify ALL subscribers even though the
+      // tab object was identical — at 60Hz flush × every chatStore subscriber
+      // that was pure waste (useActiveTab's selector already relies on the tab
+      // reference staying stable to skip re-renders).
+      const tab = state.tabs.get(tabId);
       if (tab && tab.activityStatus.phase !== 'writing') {
+        const newTabs = new Map(state.tabs);
         newTabs.set(tabId, { ...tab, activityStatus: { phase: 'writing' as ActivityPhase } });
+        return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
       }
-      return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
+      return { streams: newStreams };
     }),
 
   updatePartialThinking: (tabId, text) =>
     set((state) => {
+      // Regression fix: same deleted-tab guard as updatePartialMessage.
+      if (!state.tabs.has(tabId)) return {};
       const newStreams = new Map(state.streams);
       const s = newStreams.get(tabId);
       newStreams.set(tabId, {
@@ -474,12 +513,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         partialThinking: (s?.partialThinking ?? '') + text,
         isStreaming: true,
       });
-      const newTabs = new Map(state.tabs);
-      const tab = newTabs.get(tabId);
+      // B12: same tabs-copy skip as updatePartialMessage — no-op phase changes
+      // must not notify every subscriber.
+      const tab = state.tabs.get(tabId);
       if (tab && tab.activityStatus.phase !== 'thinking') {
+        const newTabs = new Map(state.tabs);
         newTabs.set(tabId, { ...tab, activityStatus: { phase: 'thinking' as ActivityPhase } });
+        return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
       }
-      return { streams: newStreams, tabs: newTabs, sessionCache: newTabs };
+      return { streams: newStreams };
     }),
 
   getStreamState: (tabId) => {
@@ -543,7 +585,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const result = updateTab(state.tabs, tabId, () => createTab(tabId));
       const newStreams = new Map(state.streams);
       newStreams.delete(tabId);
-      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
+      // /clear reuses the same tabId — a stale anchor would restore an old
+      // scroll position (and detach follow) on the freshly cleared session.
+      const newAnchors = { ...state.scrollAnchors };
+      delete newAnchors[tabId];
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams, scrollAnchors: newAnchors };
     });
   },
 
@@ -701,6 +747,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // LRU eviction — keep at most MAX_CACHE tabs
     // Never evict tabs that are actively streaming — their disk JSONL may have
     // been compacted, so the tab is the only source of full history (#32 fix)
+    const evicted: string[] = [];
     if (newTabs.size > MAX_CACHE) {
       const keysIter = newTabs.keys();
       while (newTabs.size > MAX_CACHE) {
@@ -712,16 +759,41 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         // streaming flag lives in the streams Map (StreamState.isStreaming).
         if (get().streams.get(oldest)?.isStreaming || entry?.sessionStatus === 'running') continue; // protect active
         newTabs.delete(oldest);
+        evicted.push(oldest);
       }
       // If all candidates are streaming, allow cache to exceed MAX_CACHE
     }
-    set({ tabs: newTabs, sessionCache: newTabs });
+    // Regression fix: evicted tabs' stream entries (partialText up to hundreds
+    // of KB) must not linger — removeTab deletes streams; the LRU path didn't.
+    let newStreams = get().streams;
+    let newAnchors = get().scrollAnchors;
+    if (evicted.length > 0) {
+      newStreams = new Map(newStreams);
+      for (const k of evicted) {
+        newStreams.delete(k);
+        // Scroll anchors of evicted tabs must not resurrect a stale view if
+        // the same tabId ever comes back.
+        if (newAnchors[k]) {
+          const a = { ...newAnchors };
+          delete a[k];
+          newAnchors = a;
+        }
+      }
+    }
+    set({ tabs: newTabs, sessionCache: newTabs, streams: newStreams, scrollAnchors: newAnchors });
   },
 
   removeTab: (tabId) => {
     const newTabs = new Map(get().tabs);
     newTabs.delete(tabId);
-    set({ tabs: newTabs, sessionCache: newTabs });
+    // B12: also drop the streams entry — a deleted session's partialText
+    // (potentially a large string) used to linger in memory forever.
+    const newStreams = new Map(get().streams);
+    newStreams.delete(tabId);
+    // Same for the scroll anchor — a deleted session must not restore a view.
+    const newAnchors = { ...get().scrollAnchors };
+    delete newAnchors[tabId];
+    set({ tabs: newTabs, sessionCache: newTabs, streams: newStreams, scrollAnchors: newAnchors });
     _purgeTabCache(tabId);
   },
 

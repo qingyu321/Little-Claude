@@ -188,7 +188,7 @@ describe("computePetStatus", () => {
     expect(out.claude.cacheCreation).toBe(0);
   });
 
-  it("token usage follows the highest-priority active tab per agent", () => {
+  it("token usage is the SUM across all active tabs of the agent", () => {
     const tabs = new Map([
       [
         "c1",
@@ -214,13 +214,65 @@ describe("computePetStatus", () => {
           },
         }),
       ],
+      [
+        "x1",
+        tab({
+          activityStatus: { phase: "writing" },
+          sessionMeta: {
+            snapshotCliBackend: "codex",
+            inputTokens: 3000,
+            outputTokens: 120,
+          },
+        }),
+      ],
+    ]);
+    const running = new Set(["c1", "c2", "x1"]);
+    const out = computePetStatus(input({ tabs, runningSessions: running }));
+    // claude: c1 + c2 summed (per-turn tokens of every active session).
+    expect(out.claude.input).toBe(5100);
+    expect(out.claude.output).toBe(910);
+    expect(out.claude.cacheRead).toBe(200);
+    expect(out.claude.cacheCreation).toBe(50);
+    // codex: x1's own sum — agents are aggregated independently.
+    expect(out.codex.input).toBe(3000);
+    expect(out.codex.output).toBe(120);
+    expect(out.codex.cacheRead).toBe(0);
+    expect(out.codex.cacheCreation).toBe(0);
+  });
+
+  it("a later-finished session supersedes an earlier same-priority report", () => {
+    // Persistent reports: without replacement, the FIRST completed session
+    // would own the bubble forever and every later completion would be
+    // swallowed (the old TTL used to free the slot after 8s).
+    const tabs = new Map([
+      ["t1", tab({ sessionStatus: "completed", activityStatus: { phase: "completed" } })],
+      ["t2", tab({ sessionStatus: "completed", activityStatus: { phase: "completed" } })],
+    ]);
+    const out = computePetStatus(input({ tabs }));
+    // t2 (later in iteration order) wins at equal priority — and carries its
+    // own tabId so the main window keys it as a DISTINCT report.
+    expect(out.message).toMatchObject({ source: "claude", kind: "completed", tabId: "t2" });
+  });
+
+  it("idle tabs contribute no tokens to the sum", () => {
+    const tabs = new Map([
+      [
+        "c1",
+        tab({
+          activityStatus: { phase: "thinking" },
+          sessionMeta: { inputTokens: 500 },
+        }),
+      ],
+      [
+        "c2",
+        tab({
+          activityStatus: { phase: "idle" },
+          sessionMeta: { inputTokens: 999 },
+        }),
+      ],
     ]);
     const running = new Set(["c1", "c2"]);
     const out = computePetStatus(input({ tabs, runningSessions: running }));
-    // tool (priority 8) > thinking (7) → c2's tokens win.
-    expect(out.claude.input).toBe(5000);
-    expect(out.claude.output).toBe(900);
-    expect(out.claude.cacheRead).toBe(200);
-    expect(out.claude.cacheCreation).toBe(50);
+    expect(out.claude.input).toBe(500);
   });
 });
