@@ -62,6 +62,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             '导出供应商配置时明文 API 密钥确认改为原生对话框（原确认形同虚设）',
             '修复含括号/逗号的文件名无法用默认应用打开；修复 alpha/beta 预发布版本永远不提示更新',
             '桌宠轮次面板改为纵向布局不再被遮挡；行为气泡只保留完成/错误汇报',
+            '修复重新打开会话后上下文进度条（Ctx bar）一直显示 0% — 打开会话时从历史记录恢复真实 token 统计，进度百分比立即正确显示',
           ],
           en: [
             'Auto-scroll no longer breaks mid-conversation: the pre-first-token window and tool phases no longer misjudged as user scroll-away',
@@ -81,6 +82,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             'Plaintext API-key export warning now uses the native dialog (window.confirm was a no-op)',
             'Fixed files with parentheses/commas failing to open; fixed alpha/beta prerelease never notifying updates',
             'Pet token panel switched to a stacked layout (no clipping); bubbles now report completion/errors only',
+            'Fixed the context meter (Ctx bar) showing 0% after reopening a session — token stats are now recovered from session history, so the percentage is correct immediately',
           ],
         },
       },
