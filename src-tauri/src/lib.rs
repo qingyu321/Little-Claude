@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -194,8 +194,32 @@ fn is_usable_git_bash(bash: &str) -> bool {
 ///   2. System Git-for-Windows installs (Program Files, common drives)
 ///   3. `where bash` resolution
 ///   4. App-local PortableGit (auto-installed by Little Claude)
+///
+/// Cached for the process lifetime: the fallback path spawns `cmd /C where
+/// bash` and the candidates stat many locations — and this is called on every
+/// session start (via build_enriched_path) plus build_enriched_path's own
+/// callers. Git installs happen only through install_git_bash_inner, which
+/// calls invalidate_resolver_caches().
+#[cfg(target_os = "windows")]
+static GIT_BASH_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<Option<(String, &'static str)>>>,
+> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 pub(crate) fn resolve_git_bash() -> Option<(String, &'static str)> {
+    let cell = GIT_BASH_CACHE
+        .get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(result) = &*guard {
+        return result.clone();
+    }
+    let result = resolve_git_bash_uncached();
+    *guard = Some(result.clone());
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_git_bash_uncached() -> Option<(String, &'static str)> {
     // 1. Explicit env var  --?user/provider knows best
     if let Ok(path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
         if is_usable_git_bash(&path) {
@@ -623,7 +647,43 @@ fn truncate_large_content(value: &mut Value, max_bytes: usize) {
 }
 
 /// Build an enriched PATH that includes common binary locations
+///
+/// Cached for the process lifetime (see invalidate_resolver_caches): the
+/// assembly stats dozens of candidate directories and calls resolve_git_bash,
+/// and it runs on every session start / check_claude_cli / title generation.
+static ENRICHED_PATH_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn build_enriched_path() -> String {
+    let cell = ENRICHED_PATH_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = &*guard {
+        return cached.clone();
+    }
+    let result = build_enriched_path_uncached();
+    *guard = Some(result.clone());
+    result
+}
+
+/// Invalidate the process-lifetime resolver caches (CLI tier scan, git bash
+/// discovery, enriched PATH). Call after install/update/delete of CLI, Node,
+/// or Git — the caches must reflect the new filesystem state.
+pub(crate) fn invalidate_resolver_caches() {
+    commands::cli_resolver::invalidate_cli_cache();
+    #[cfg(target_os = "windows")]
+    if let Some(m) = GIT_BASH_CACHE.get() {
+        if let Ok(mut guard) = m.lock() {
+            *guard = None;
+        }
+    }
+    if let Some(m) = ENRICHED_PATH_CACHE.get() {
+        if let Ok(mut guard) = m.lock() {
+            *guard = None;
+        }
+    }
+}
+
+fn build_enriched_path_uncached() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let mut paths = vec![];
 
@@ -1103,9 +1163,21 @@ pub(crate) fn extract_node_archive(
                 let path = entry.path().map_err(|e| format!("path error: {}", e))?;
 
                 // Strip the top-level directory (e.g., "node-v22.22.0-darwin-arm64/bin/node" -> "bin/node")
+                // and drop traversal/root components — a crafted entry like
+                // "node-v22.22.0-platform/../../evil.exe" must never escape
+                // install_dir (zip-slip; data is SHA-256-verified today, but
+                // keep this defense consistent with web_update.rs).
                 let stripped: std::path::PathBuf = path
                     .components()
                     .skip(1) // skip "node-v22.22.0-platform/"
+                    .filter(|c| {
+                        !matches!(
+                            c,
+                            std::path::Component::ParentDir
+                                | std::path::Component::CurDir
+                                | std::path::Component::RootDir
+                        )
+                    })
                     .collect();
 
                 if stripped.as_os_str().is_empty() {
@@ -1135,12 +1207,38 @@ pub(crate) fn extract_node_archive(
 
                 let name = file.name().to_string();
                 // Strip top-level directory (e.g., "node-v22.22.0-win-x64/node.exe" -> "node.exe")
-                let stripped: String = name.splitn(2, '/').nth(1).unwrap_or("").to_string();
+                // and drop ".", ".." and empty segments — a crafted entry like
+                // "node-v22.22.0-win-x64/../../evil.exe" must never escape
+                // install_dir (zip-slip; see the tar branch above).
+                // Split on BOTH '/' and '\\': Windows zip entries may use
+                // backslashes ("..\\evil.exe") which Path::join resolves as
+                // separators even though they never appear in the filter.
+                // The top-level split must use the same dual separator —
+                // a backslash-separated top dir ("node-v22\\node.exe") would
+                // otherwise yield an empty strip and silently extract nothing.
+                let stripped: String = name
+                    .splitn(2, |c| c == '/' || c == '\\')
+                    .nth(1)
+                    .unwrap_or("")
+                    .split(|c| c == '/' || c == '\\')
+                    .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+                    .collect::<Vec<_>>()
+                    .join("/");
                 if stripped.is_empty() {
                     continue;
                 }
+                // Windows: a leading drive-letter segment ("C:/evil.exe") makes
+                // Path::join treat the target as absolute and write outside
+                // install_dir — reject any colon-bearing segment outright.
+                if stripped.split('/').any(|seg| seg.contains(':')) {
+                    return Err(format!("zip entry name not allowed: {}", name));
+                }
 
                 let target = install_dir.join(&stripped);
+                // Belt-and-braces: the joined target must stay inside install_dir.
+                if !target.starts_with(&install_dir) {
+                    return Err(format!("zip entry escapes install dir: {}", name));
+                }
                 if file.is_dir() {
                     let _ = std::fs::create_dir_all(&target);
                 } else {
@@ -1344,7 +1442,13 @@ async fn start_codex_session(
     // Spawn stdout reader with handshake state machine
     let app_clone = app.clone();
     let sid_clone = stdin_id.clone();
-    let stdin_handles = stdin_mgr.clone_handles();
+    // M3: the reader task writes via StdinManager::send (per-session lock +
+    // 10s timeout), not by holding the global handle map — a wedged codex
+    // process must not stall every other session's sends.
+    // Note: `State<T>` itself implements Clone, so `stdin_mgr.clone()` would
+    // copy the borrow-lifetime State wrapper (E0521 in the 'static task) —
+    // deref to the underlying Arc-backed StdinManager instead.
+    let stdin_mgr_clone = (*stdin_mgr).clone();
     let backend_ref = backends::resolve_backend(Some("codex"));
     let process_mgr_clone = state.inner().codex_thread_ids.clone();
     let pm_clone = state.inner().clone(); // shallow clone (Arc) — F3 post-loop orphan kill
@@ -1463,28 +1567,14 @@ async fn start_codex_session(
                         // Send initialized notification (no id)
                         let initialized_msg =
                             crate::backends::codex::CodexBackend::build_initialized_message();
-                        {
-                            let mut map = stdin_handles.lock().await;
-                            if let Some(stdin) = map.get_mut(&sid_clone) {
-                                let payload = format!("{}\n", initialized_msg);
-                                let _ = stdin.write_all(payload.as_bytes()).await;
-                                let _ = stdin.flush().await;
-                            }
-                        }
+                        let _ = stdin_mgr_clone.send(&sid_clone, &initialized_msg).await;
 
                         // Send thread/resume (unified thread lifecycle)
                         let thread_msg =
                             crate::backends::codex::CodexBackend::build_thread_start_message(
                                 resume_id.as_deref(),
                             );
-                        {
-                            let mut map = stdin_handles.lock().await;
-                            if let Some(stdin) = map.get_mut(&sid_clone) {
-                                let payload = format!("{}\n", thread_msg);
-                                let _ = stdin.write_all(payload.as_bytes()).await;
-                                let _ = stdin.flush().await;
-                            }
-                        }
+                        let _ = stdin_mgr_clone.send(&sid_clone, &thread_msg).await;
 
                         let action = if resume_id.is_some() { "resume" } else { "new" };
                         let method_label = if resume_id.is_some() { "thread/resume" } else { "thread/start" };
@@ -1523,14 +1613,7 @@ async fn start_codex_session(
 
                         let fallback_msg =
                             crate::backends::codex::CodexBackend::build_thread_start_message(None);
-                        {
-                            let mut map = stdin_handles.lock().await;
-                            if let Some(stdin) = map.get_mut(&sid_clone) {
-                                let payload = format!("{}\n", fallback_msg);
-                                let _ = stdin.write_all(payload.as_bytes()).await;
-                                let _ = stdin.flush().await;
-                            }
-                        }
+                        let _ = stdin_mgr_clone.send(&sid_clone, &fallback_msg).await;
                         eprintln!(
                             "[LITTLECLAUDE:codex] Handshake: sent thread/start (fallback after resume failure)"
                         );
@@ -1575,14 +1658,7 @@ async fn start_codex_session(
                                 &initial_prompt,
                                 thread_id.as_deref(),
                             );
-                            {
-                                let mut map = stdin_handles.lock().await;
-                                if let Some(stdin) = map.get_mut(&sid_clone) {
-                                    let payload = format!("{}\n", turn_msg);
-                                    let _ = stdin.write_all(payload.as_bytes()).await;
-                                    let _ = stdin.flush().await;
-                                }
-                            }
+                            let _ = stdin_mgr_clone.send(&sid_clone, &turn_msg).await;
                             eprintln!(
                                 "[LITTLECLAUDE:codex] Handshake: sent turn/start with prompt"
                             );
@@ -1655,7 +1731,7 @@ async fn start_codex_session(
         // list_active_processes then reported dead sessions as orphans and
         // re-killed PIDs the OS may have reused (Unix PID-reuse kill).
         // remove() kills the child; a no-op for an already-exited process.
-        let _ = stdin_handles.lock().await.remove(&sid_clone);
+        stdin_mgr_clone.remove(&sid_clone).await;
         pm_clone.remove_codex_thread_id(&sid_clone).await;
         pm_clone.remove(&sid_clone).await;
 
@@ -1818,12 +1894,18 @@ fn create_app_windows(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Er
         .skip_taskbar(true)
         .shadow(false)
         .visible(false)
-        .focus()
         .maximizable(false)
         .minimizable(false)
         .closable(false)
         .additional_browser_args(browser_args)
         .build()?;
+    // Double-belt: transparent + always-on-top + skip-taskbar windows have a
+    // history of ignoring the initial visible(false) on WebView2 (a brief
+    // flash or, on some builds, staying visible). The pet must NOT appear
+    // unless the user enables it — the frontend calls show() explicitly.
+    if let Some(pet_win) = app.get_webview_window("pet") {
+        let _ = pet_win.hide();
+    }
     Ok(())
 }
 

@@ -94,6 +94,10 @@ pub async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, S
         "--pathspec-from-file",
         "--order-file",
         "--ext-diff",
+        // `git diff --no-index <a> <b>` prints the contents of ANY two existing
+        // files (unified diff) and works outside a git repo — this bypassed the
+        // system-dir blacklist and the 10MiB cap, i.e. arbitrary file reads.
+        "--no-index",
     ];
     for arg in &args[1..] {
         let lower = arg.to_lowercase();

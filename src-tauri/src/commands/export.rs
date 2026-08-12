@@ -165,12 +165,15 @@ pub async fn export_session_markdown(
     output_path: String,
     conversation_only: bool,
 ) -> Result<(), String> {
-    use std::io::{BufRead, Write};
     // H1: validate both paths before any fs access — the source must be a
     // session file under the canonical ~/.claude/projects/ tree, the target
     // a plain text file in an existing, non-sensitive directory.
     let source = resolve_session_source(&path)?;
     let target = resolve_output_target(&output_path)?;
+    // M8: the body is pure synchronous file IO (GB-scale sessions can take
+    // seconds) — run it on the blocking pool, never a tokio worker.
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+    use std::io::{BufRead, Write};
     let file = std::fs::File::open(&source).map_err(|e| format!("Failed to open session: {}", e))?;
     let reader = std::io::BufReader::new(file);
 
@@ -257,14 +260,19 @@ pub async fn export_session_markdown(
     // Flush buffered output (also surfaces late write errors)
     writer.flush().map_err(|e| format!("Failed to write: {}", e))?;
     Ok(())
+    })
+    .await
+    .map_err(|e| format!("Export task panicked: {}", e))?
 }
 
 #[tauri::command]
 pub async fn export_session_json(path: String, output_path: String) -> Result<(), String> {
-    use std::io::{BufRead, Write};
     // H1: validate both paths before any fs access (see export_session_markdown).
     let source = resolve_session_source(&path)?;
     let target = resolve_output_target(&output_path)?;
+    // M8: synchronous file IO on the blocking pool (see export_session_markdown).
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+    use std::io::{BufRead, Write};
     let file = std::fs::File::open(&source).map_err(|e| format!("Failed to open session: {}", e))?;
     let reader = std::io::BufReader::new(file);
 
@@ -295,6 +303,9 @@ pub async fn export_session_json(path: String, output_path: String) -> Result<()
     writer.write_all(b"]").map_err(|e| format!("Failed to write: {}", e))?;
     writer.flush().map_err(|e| format!("Failed to write: {}", e))?;
     Ok(())
+    })
+    .await
+    .map_err(|e| format!("Export task panicked: {}", e))?
 }
 
 /// List recent projects by scanning ~/.claude/projects/ directory names

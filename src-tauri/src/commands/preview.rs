@@ -16,12 +16,14 @@ fn normalize_preview_url(input: &str) -> Result<String, String> {
         return Err("Preview URL is empty".to_string());
     }
     let lower = trimmed.to_lowercase();
-    if lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("file:")
-        || lower.starts_with("data:")
-        || lower.starts_with("about:")
-    {
+    // Only http(s) may be previewed — mirrors the frontend's own allowlist
+    // (previewStore.normalizeUrl). file:/data:/about: are rejected here too so
+    // the backend can't be used to load local files or attacker-controlled
+    // content into the sandboxed iframe, bypassing the frontend check.
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+    if lower == "about:blank" {
         return Ok(trimmed.to_string());
     }
     if lower.starts_with("localhost")

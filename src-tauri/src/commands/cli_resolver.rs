@@ -75,6 +75,7 @@ pub struct CleanupSkipped {
 
 // ─── Internal types ────────────────────────────────────────
 
+#[derive(Debug, Clone)]
 struct TieredDir {
     path: String,
     source: CliSource,
@@ -326,7 +327,39 @@ fn cmd_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> String {
 
 // ─── Tier collection ───────────────────────────────────────
 
+/// Process-lifetime cache for the tier scan. The scan spawns
+/// `cmd /C where` / `cmd /C npm root -g` subprocesses and stats dozens of
+/// directories — ~0.5-1.5s on Windows — and runs on EVERY session start,
+/// rewind, title generation and check_claude_cli. CLI locations only change
+/// through this app's own install/update/delete flows, all of which call
+/// invalidate_cli_cache(); re-scanning on every call was blocking tokio
+/// workers and stalling concurrent sessions' stream reads.
+static TIER_DIRS_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<Vec<TieredDir>>>> =
+    std::sync::OnceLock::new();
+
+/// Invalidate the tier-scan cache — call after install/update/delete/cleanup.
+pub fn invalidate_cli_cache() {
+    if let Some(m) = TIER_DIRS_CACHE.get() {
+        if let Ok(mut guard) = m.lock() {
+            *guard = None;
+        }
+    }
+}
+
 fn collect_tiered_dirs() -> Vec<TieredDir> {
+    let cell = TIER_DIRS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(dirs) = &*guard {
+        return dirs.clone();
+    }
+    let dirs = collect_tiered_dirs_inner();
+    *guard = Some(dirs.clone());
+    dirs
+}
+
+/// Uncached scan — kept as a separate function so the pure logic stays
+/// testable (tests call the cached entry point, which seeds from this).
+fn collect_tiered_dirs_inner() -> Vec<TieredDir> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
     let mut push = |path: String, source: CliSource| {
@@ -771,10 +804,14 @@ pub fn cleanup(targets: &[String]) -> CleanupResult {
         app_local_prefixes.push(npm_dir.to_string_lossy().to_string());
     }
 
+    // Component-level prefix match via Path::starts_with — a raw string
+    // prefix match would also accept "npm-global-evil" or "npm-global2"
+    // (sibling directories with the same prefix).
     let is_app_local = |path: &str| -> bool {
+        let p = Path::new(path);
         app_local_prefixes
             .iter()
-            .any(|prefix| path.starts_with(prefix.as_str()))
+            .any(|prefix| p.starts_with(Path::new(prefix)))
     };
 
     for target in targets {
@@ -1083,6 +1120,12 @@ pub fn delete_cli(path: &str) -> Result<String, String> {
         .canonicalize()
         .unwrap_or_else(|_| parent.to_path_buf());
     let allowed = collect_tiered_dirs().iter().any(|td| {
+        // Never auto-delete from Tier 4 (Dynamic) — those are arbitrary
+        // PATH directories (scoop shims, user-installed tools, ...); a
+        // XSS'd webview could otherwise delete any file in PATH.
+        if td.source == CliSource::Dynamic {
+            return false;
+        }
         let root = Path::new(&td.path);
         let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         parent_c.starts_with(&root_c)
@@ -1095,6 +1138,9 @@ pub fn delete_cli(path: &str) -> Result<String, String> {
     }
 
     std::fs::remove_file(p).map_err(|e| format!("Delete failed: {}", e))?;
+    // The tier-scan cache still lists the deleted binary's directory —
+    // drop it so resolve() doesn't keep returning a now-missing path.
+    invalidate_cli_cache();
 
     // If pinned CLI was deleted, unpin it
     if let Some(pinned) = get_pinned_cli() {

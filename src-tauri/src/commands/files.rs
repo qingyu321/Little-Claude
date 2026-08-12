@@ -220,7 +220,16 @@ fn reject_unsafe_path(path: &str) -> Result<(), String> {
 /// Case-insensitive prefix match on '/'-normalized paths, so Windows drives
 /// and case-sensitive macOS/Linux roots are both covered.
 fn is_system_dir(path: &Path) -> bool {
-    let norm = path.to_string_lossy().replace('\\', "/").to_uppercase();
+    // Strip the Windows verbatim prefix (`\\?\C:\...` / `\\.\C:\...`) that
+    // fs::canonicalize returns — prefix matching against it would miss every
+    // blacklist entry (`//?/C:/WINDOWS` vs `C:/WINDOWS`), letting reads like
+    // `\\?\C:\Program Files\...\config.json` slip through.
+    let s = path.to_string_lossy();
+    let s = match s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\\.\")) {
+        Some(rest) => std::borrow::Cow::Owned(rest.to_string()),
+        None => s,
+    };
+    let norm = s.replace('\\', "/").to_uppercase();
     const ROOTS: &[&str] = &[
         // Windows
         "C:/WINDOWS",
@@ -536,6 +545,11 @@ fn is_noisy_path(root: &str, path: &Path) -> bool {
     })
 }
 
+/// Max concurrent recursive watchers — each recursive watcher holds one
+/// ReadDirectoryChangesW handle per subdirectory on Windows, so cap the
+/// count to stop a runaway caller from exhausting handles/memory.
+const MAX_WATCHERS: usize = 8;
+
 #[tauri::command]
 pub async fn watch_directory(
     app: AppHandle,
@@ -544,9 +558,15 @@ pub async fn watch_directory(
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(&path)
         .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
+    if is_system_dir(&canonical) {
+        return Err("拒绝监视系统目录".to_string());
+    }
     let watch_key = canonical.to_string_lossy().to_string();
 
     let mut watchers = state.watchers.lock().await;
+    if watchers.len() >= MAX_WATCHERS && !watchers.contains_key(&watch_key) {
+        return Err(format!("监视器数量已达上限 ({} 个)", MAX_WATCHERS));
+    }
     if watchers.contains_key(&watch_key) {
         // 报告B5: the existing entry may be a dead watcher — when the watched
         // directory is deleted, notify stops delivering events and does NOT

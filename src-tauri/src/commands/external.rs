@@ -56,6 +56,16 @@ pub async fn open_with_default_app(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // cmd /C start re-parses the rest of the line as shell text, and
+        // args without spaces are NOT auto-quoted — so a file name containing
+        // cmd metacharacters (& | ^ < > %) would execute as a command.
+        // Reject such paths outright instead of trying to quote them.
+        // Note: ( ) , ; are NOT cmd metacharacters in this context — they
+        // appear in plenty of real file names (报告(最终版).docx) and must
+        // stay openable.
+        if path.chars().any(|c| "&|^<>%".contains(c)) {
+            return Err("File name contains characters not allowed by cmd".to_string());
+        }
         Command::new("cmd")
             .args(["/C", "start", "", &path])
             .creation_flags(0x08000000)

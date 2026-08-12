@@ -135,6 +135,9 @@ pub async fn run_claude_plugin_command(
 /// Check whether the Claude CLI is installed and return its path and version.
 #[tauri::command]
 pub async fn check_claude_cli() -> Result<CliStatus, String> {
+    // 用户主动「检测」语义 = 实时：手动安装 Git/Node（错误信息引导的外部
+    // 安装）没有安装事件可触发缓存失效，检测入口必须绕过缓存直接扫盘。
+    crate::invalidate_resolver_caches();
     eprintln!("[check_claude_cli] START");
     let binary = find_claude_binary();
     eprintln!("[check_claude_cli] find_claude_binary => {:?}", binary);
@@ -1979,6 +1982,9 @@ pub async fn install_claude_cli(app: AppHandle, scope_id: Option<String>) -> Res
                     )
                 }
             })?;
+            // Newly installed PortableGit must be visible to the cached
+            // git-bash discovery and enriched PATH immediately.
+            crate::invalidate_resolver_caches();
         }
 
         // If CLI is already installed (only git-bash was missing), skip download phases
@@ -2164,6 +2170,11 @@ fn finalize_cli_install_paths(app: &AppHandle) {
         }
         let _ = app;
     }
+
+    // The tier scan / git bash / enriched PATH caches were built from the
+    // pre-install filesystem state — drop them so the next resolve sees the
+    // freshly installed binaries.
+    crate::invalidate_resolver_caches();
 
     let _ = app.emit(
         "setup:download:progress",
@@ -2401,6 +2412,9 @@ async fn install_node_env_inner(
     china: bool,
     scope: &CancelScope,
 ) -> Result<(), String> {
+    // 入口统一失效 resolver 缓存（同 install_git_bash_inner）：独立入口
+    // install_node_env 装完 node 后 PATH 注入必须立即看到新 bin。
+    crate::invalidate_resolver_caches();
     let (archive_name, ext) = get_node_archive_info()?;
     let filename = format!("{}.{}", archive_name, ext);
 
@@ -2533,6 +2547,10 @@ async fn install_node_env_inner(
         "Node.js {} installed to {:?}",
         NODE_LTS_VERSION, install_dir
     );
+    // 成功路径再次失效：入口失效只覆盖「下载前」，下载窗口（30s+）内并发
+    // resolver（会话启动/标题生成/检测）会用安装前的旧 PATH 重新填充缓存，
+    // 没有这次失效的话装完仍读旧值（独立入口无 finalize 兜底）。
+    crate::invalidate_resolver_caches();
     Ok(())
 }
 
@@ -2566,6 +2584,10 @@ pub(crate) async fn install_git_bash_inner(
     china: bool,
     scope: &CancelScope,
 ) -> Result<(), String> {
+    // 入口统一失效 resolver 缓存：本函数被 prereq 独立入口直接调用
+    // （无 finalize_cli_install_paths 兜底），漏掉时「装完 PortableGit 仍
+    // 检测不到」直到重启。幂等无害——主流程调用点的 1984 行失效冗余保留。
+    crate::invalidate_resolver_caches();
     let install_dir = git_download_dir()?;
 
     // If an incomplete installation exists (no bash.exe), clean it up
@@ -2743,6 +2765,9 @@ pub(crate) async fn install_git_bash_inner(
     );
 
     eprintln!("PortableGit installed to {:?}", install_dir);
+    // 成功路径再次失效：同 install_node_env_inner——下载窗口内并发 resolver
+    // 会把「无 bash」的旧状态写回缓存，装完必须再失效一次才可见。
+    crate::invalidate_resolver_caches();
     Ok(())
 }
 

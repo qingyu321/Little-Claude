@@ -754,11 +754,14 @@ async fn forward_passthrough(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
+    // Log the key length only, never key material — the first 8 chars of a
+    // long-lived API key are still usable by an attacker who reads
+    // %TEMP%\littleclaude-proxy.log.
     proxy_log(&format!(
-        "FWD {} rewrite={} key={}.. model={} tools={}",
+        "FWD {} rewrite={} key=<{} chars> model={} tools={}",
         target,
         rewrite,
-        api_key.chars().take(8).collect::<String>(),
+        api_key.len(),
         payload.get("model").and_then(|m| m.as_str()).unwrap_or(""),
         payload
             .get("tools")

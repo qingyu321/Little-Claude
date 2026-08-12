@@ -299,6 +299,9 @@ async fn check_ollama_item() -> PrerequisiteItem {
 
 #[tauri::command]
 pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
+    // 检测 = 用户主动动作，绕过 resolver 缓存实时扫盘（手动安装的
+    // Git/Node 无安装事件可失效缓存；检测面板每点一次都该看到最新状态）。
+    crate::invalidate_resolver_caches();
     eprintln!("[prereq] check_prerequisites START (parallel)");
 
     let result = tokio::time::timeout(

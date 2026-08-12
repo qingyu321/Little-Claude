@@ -27,7 +27,10 @@ pub(crate) struct UpdateProgress {
 #[serde(rename_all = "camelCase")]
 struct PackageManifest {
     version: String,
+    /// 发布脚本写入的字段；热更新本身不消费（UI 的"引擎有更新"提示走
+    /// latest.json 的 rustChanged），保留以兼容清单格式。
     #[serde(default)]
+    #[allow(dead_code)]
     rust_changed: bool,
 }
 

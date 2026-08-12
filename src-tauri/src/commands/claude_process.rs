@@ -177,9 +177,14 @@ impl ProcessManager {
 }
 
 /// Manages stdin handles for sending user responses to Claude processes
+///
+/// M3: handles are wrapped in a per-session `Arc<Mutex<ChildStdin>>` so a
+/// stuck CLI (full pipe, dead process) blocks ONLY its own session's writes
+/// for the 10s timeout — with a single global lock, one wedged session
+/// stalled every other session's sends / permission responses.
 #[derive(Debug, Default, Clone)]
 pub struct StdinManager {
-    handles: Arc<Mutex<HashMap<String, ChildStdin>>>,
+    handles: Arc<Mutex<HashMap<String, Arc<Mutex<ChildStdin>>>>>,
 }
 
 impl StdinManager {
@@ -191,55 +196,54 @@ impl StdinManager {
 
     pub async fn insert(&self, id: String, stdin: ChildStdin) {
         let mut map = self.handles.lock().await;
-        map.insert(id, stdin);
+        map.insert(id, Arc::new(Mutex::new(stdin)));
     }
 
     pub async fn send(&self, id: &str, message: &str) -> Result<(), String> {
-        let mut map = self.handles.lock().await;
-        if let Some(stdin) = map.get_mut(id) {
-            // Atomic write: message + newline in one call to prevent interleaving (P1-2 fix)
-            let payload = format!("{}\n", message);
-            // Bound the lock hold: if a dead CLI leaves its stdin pipe open and
-            // full, the write would block forever and stall every session's
-            // sends (the lock is global). Timeout releases the lock with an
-            // error; callers surface it to the user.
-            let res = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                async {
-                    stdin
-                        .write_all(payload.as_bytes())
-                        .await
-                        .map_err(|e| format!("Failed to write to stdin: {}", e))?;
-                    stdin
-                        .flush()
-                        .await
-                        .map_err(|e| format!("Failed to flush stdin: {}", e))?;
-                    Ok::<(), String>(())
-                },
-            )
-            .await;
-            match res {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(format!(
-                    "Timed out writing to stdin for session: {}",
-                    id
-                )),
-            }
-        } else {
-            Err(format!("No stdin handle for session: {}", id))
+        // Short critical section: clone the per-session Arc and release the
+        // map lock BEFORE writing, so a slow write never blocks other
+        // sessions' sends.
+        let stdin_arc = {
+            let map = self.handles.lock().await;
+            map.get(id).cloned()
+        };
+        let Some(stdin_arc) = stdin_arc else {
+            return Err(format!("No stdin handle for session: {}", id));
+        };
+        // Atomic write: message + newline in one call to prevent interleaving (P1-2 fix)
+        let payload = format!("{}\n", message);
+        // Bound the per-session lock hold: if a dead CLI leaves its stdin
+        // pipe open and full, the write would block forever — timeout
+        // releases the per-session lock with an error; callers surface it.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                let mut stdin = stdin_arc.lock().await;
+                stdin
+                    .write_all(payload.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+                Ok::<(), String>(())
+            },
+        )
+        .await;
+        match res {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(format!(
+                "Timed out writing to stdin for session: {}",
+                id
+            )),
         }
     }
 
     pub async fn remove(&self, id: &str) {
         let mut map = self.handles.lock().await;
         map.remove(id);
-    }
-
-    /// Clone the inner handles Arc for use in spawned tasks that need to write
-    /// to stdin without holding a full `StdinManager` reference.
-    pub fn clone_handles(&self) -> Arc<Mutex<HashMap<String, ChildStdin>>> {
-        self.handles.clone()
     }
 }
 

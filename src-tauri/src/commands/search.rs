@@ -8,7 +8,9 @@ pub async fn search_sessions(query: String, role_filter: Option<String>) -> Resu
     if query.len() < 2 {
         return Ok(vec![]);
     }
-
+    // M8: the body scans every tracked session JSONL synchronously (can take
+    // hundreds of ms on large histories) — run it on the blocking pool.
+    tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
     let home = dirs::home_dir().ok_or("Cannot find home dir")?;
     let claude_dir = home.join(".claude").join("projects");
 
@@ -97,6 +99,9 @@ pub async fn search_sessions(query: String, role_filter: Option<String>) -> Resu
 
     results.truncate(50);
     Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Search task panicked: {}", e))?
 }
 
 pub struct SessionSearchResult {

@@ -473,8 +473,15 @@ pub async fn start_claude_session(
         "1".to_string(),
     );
 
-    // For long-context third-party routes, override Claude Code's internal compact window.
-    // Some provider model names do not expose a 1M marker, so the frontend can declare it.
+    // Inject the CLI's compact window ONLY for declared-1M models. The
+    // frontend declares 200K for every non-1M model (getContextWindowForModel
+    // has just two tiers), but 200K is a guess for unknown windows — a
+    // 128K/64K gateway model (qwen/glm/DeepSeek etc.) forced to a 200K
+    // declaration compacts at ~160K and hits the API's context-length error
+    // with no compact opportunity (and the UI's 160K hint never fires either).
+    // Non-1M models keep the CLI's own conservative ~80K inference (~70K
+    // compact), which never breaks a session — deepseek-v4-flash users can
+    // still opt into the full 1M window via the large1m contextWindowMode.
     let declared_context_window = params.context_window.unwrap_or_else(|| {
         params
             .model
@@ -494,11 +501,10 @@ pub async fn start_claude_session(
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
             declared_context_window.to_string(),
         );
-        // CLAUDE_CODE_MAX_CONTEXT_TOKENS is the only window override that bypasses
-        // the CLI's >200K cap on AUTO_COMPACT_WINDOW (issue anthropics/claude-code#57964).
-        // Without it, unknown third-party models (e.g. deepseek-v4-flash via gateway)
-        // are assumed to have an ~80K window and the CLI compacts at ~70K even though
-        // the API window is 1M. This makes the declared window actually take effect.
+        // CLAUDE_CODE_MAX_CONTEXT_TOKENS is the only window override that
+        // bypasses the CLI's >200K cap on AUTO_COMPACT_WINDOW
+        // (anthropics/claude-code#57964); without it, declared-1M third-party
+        // models are still treated as ~80K and compact at ~70K.
         resolved_env.insert(
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
             declared_context_window.to_string(),

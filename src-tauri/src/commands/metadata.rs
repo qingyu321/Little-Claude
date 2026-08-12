@@ -92,10 +92,22 @@ pub async fn generate_session_title(
     // generation needs no project context — an empty temp cwd leaves nothing
     // sensitive for a tool call to touch, and `--max-turns 1` plus the prompt
     // ("only the title text") keep it to a single response.
+    // Random, per-call temp dir: a PID-based name is predictable, so another
+    // local process could pre-create it and plant a malicious CLAUDE.md or
+    // skill that the one-shot CLI (run with --dangerously-skip-permissions)
+    // would auto-load as prompt-injected context. The guard removes the dir
+    // on every exit path (success and error).
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let mut title_cwd = std::env::temp_dir();
-    title_cwd.push(format!("little-claude-title-gen-{}", std::process::id()));
+    title_cwd.push(format!("little-claude-title-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&title_cwd)
         .map_err(|e| format!("Failed to create temp dir for title gen: {}", e))?;
+    let _title_cwd_guard = TempDirGuard(title_cwd.clone());
 
     // Spawn a one-shot CLI process: -p for single prompt, --output-format json for structured output
     let mut args = vec![
