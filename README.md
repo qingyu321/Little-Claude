@@ -155,7 +155,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包：
 
-- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`LittleClaude-v1.1.4-Portable.exe`
+- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`Little Claude v1.1.4.exe`
 
 ## 快速开始
 
