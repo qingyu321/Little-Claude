@@ -150,7 +150,13 @@ pub async fn download_web_update(
     }
     std::fs::create_dir_all(&staging)
         .map_err(|e| format!("创建 staging 失败: {}", e))?;
-    extract_zip(&tmp, &staging)?;
+    if let Err(e) = extract_zip(&tmp, &staging) {
+        // L9: 解压失败路径同样清理临时 zip 与 staging，避免残留
+        // little-claude-web-update-{version}.zip。
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     let _ = app.emit(
         "update:progress",
         UpdateProgress {
@@ -163,16 +169,36 @@ pub async fn download_web_update(
 
     // 4) 完整性校验（index.html + manifest 版本匹配）——不完整绝不切换指针
     if !staging.join("index.html").is_file() {
+        // L9: 失败路径同样清理 staging 与临时 zip，避免残留
+        // little-claude-web-update-{version}.zip。
         let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_file(&tmp);
         return Err("资源包缺少 index.html，已中止".to_string());
     }
     let manifest: PackageManifest = {
-        let text = std::fs::read_to_string(staging.join("manifest.json"))
-            .map_err(|_| "资源包缺少 manifest.json，已中止".to_string())?;
-        serde_json::from_str(&text).map_err(|e| format!("manifest.json 解析失败: {}", e))?
+        let text = match std::fs::read_to_string(staging.join("manifest.json")) {
+            Ok(t) => t,
+            Err(_) => {
+                // L9: 失败路径清理 staging 与临时 zip
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_file(&tmp);
+                return Err("资源包缺少 manifest.json，已中止".to_string());
+            }
+        };
+        match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("manifest.json 解析失败: {}", e));
+            }
+        }
     };
     if manifest.version != version {
+        // L9: 失败路径同样清理 staging 与临时 zip，避免残留
+        // little-claude-web-update-{version}.zip。
         let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_file(&tmp);
         return Err(format!(
             "manifest 版本 {} 与目标版本 {} 不一致，已中止",
             manifest.version, version
@@ -254,6 +280,17 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("创建目录失败 {}: {}", parent.display(), e))?;
+        }
+        // M4: entry.size() 来自 zip 中央目录（不可信源）——巨值会让
+        // with_capacity 预分配数 GB 直接 abort。zip 虽已过 SHA256 校验，
+        // 仍对单条目设 1 GiB 上限（前端资源包远小于此）。
+        const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
+        if entry.size() > MAX_ENTRY_BYTES {
+            return Err(format!(
+                "资源包条目 {} 过大 ({} bytes, 上限 1 GiB)",
+                name.display(),
+                entry.size()
+            ));
         }
         let mut buf = Vec::with_capacity(entry.size() as usize);
         entry

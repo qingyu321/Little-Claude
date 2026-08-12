@@ -141,10 +141,6 @@ pub async fn start_claude_session(
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    // Clean up any existing process with the same session_id
-    stdin_mgr.remove(&session_id).await;
-    state.remove(&session_id).await;
-
     // ─── CLI Backend routing ────────────────────────────────────────────
     let mut cli_backend = params.cli_backend.as_deref().unwrap_or("claude").to_string();
 
@@ -168,7 +164,16 @@ pub async fn start_claude_session(
     }
 
     if cli_backend == "codex" {
-        return crate::start_codex_session(app, state, stdin_mgr, params, session_id).await;
+        // H2: 先递增代际再杀旧进程——旧 stdout reader 在 EOF 后据此识别自己已
+        // 过期（不再清理新会话的句柄、不 emit 伪 process_exit）。若先杀后递增，
+        // 旧 reader 可能在递增前抢先通过校验完成清理。
+        // codex 分支无 %VAR% 检查，直接在此 bump+kill；claude 路径的 bump+kill
+        // 推迟到 %VAR% 检查通过之后（低 7：检查拒绝时旧进程不被杀）。
+        let generation = crate::bump_session_generation(&session_id);
+        stdin_mgr.remove(&session_id).await;
+        state.remove(&session_id).await;
+        return crate::start_codex_session(app, state, stdin_mgr, params, session_id, generation)
+            .await;
     }
     // ─── Claude path (existing logic) ───────────────────────────────────
 
@@ -197,6 +202,15 @@ pub async fn start_claude_session(
     // Resume an existing CLI session if requested
     eprintln!("[LITTLECLAUDE] resume_session_id={:?}", params.resume_session_id);
     if let Some(ref resume_id) = params.resume_session_id {
+        // H3: UUID 格式校验（与 truncate_session_history/rewind_files 一致）。
+        // resume_session_id 直接拼进命令行，cmd /C 包装下会被重新解析——
+        // 非 UUID 串（含空格/&/| 等）可注入额外参数。
+        fn is_uuid_like(s: &str) -> bool {
+            s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        }
+        if !is_uuid_like(resume_id) {
+            return Err(format!("Invalid resume_session_id format: {}", resume_id));
+        }
         args.push("--resume".to_string());
         args.push(resume_id.clone());
     }
@@ -324,10 +338,14 @@ pub async fn start_claude_session(
     }
 
     // DEBUG: print resolved provider env to console for troubleshooting
+    // M2: base_url 可能内嵌 userinfo 凭据（https://user:pass@host）——打印前脱敏。
+    let base_url_display = resolved_env
+        .get("ANTHROPIC_BASE_URL")
+        .map(|u| mask_url_userinfo(u));
     eprintln!(
         "[LITTLECLAUDE:provider] provider_id={:?}, ANTHROPIC_BASE_URL={:?}, ANTHROPIC_API_KEY={}, keys_removed={:?}",
         params.provider_id,
-        resolved_env.get("ANTHROPIC_BASE_URL"),
+        base_url_display,
         if resolved_env.contains_key("ANTHROPIC_API_KEY") { "(set)" } else { "(not set)" },
         inherited_keys_to_remove,
     );
@@ -574,7 +592,7 @@ pub async fn start_claude_session(
         });
         if !has_proxy {
             // resolve_proxy_url checks: process env > system proxy > login shell > port probing
-            if let Some(url) = resolve_proxy_url() {
+            if let Some(url) = resolve_proxy_url().await {
                 inject_proxy_env_vars(&mut resolved_env, &url);
             }
         }
@@ -582,12 +600,40 @@ pub async fn start_claude_session(
 
     // On Windows, .cmd/.bat files must be launched via cmd /C
     #[cfg(target_os = "windows")]
+    {
+        // H3: cmd /C 会展开命令行里的 %VAR%（已定义环境变量）——实测 %% 与
+        // ^% 在引号内均无法转义。--settings JSON 若含与真实环境变量同名的
+        // %NAME% 序列（含 %NAME:~a,b% 子串语法），JSON 会被 cmd 展开破坏
+        // （配置篡改/注入）。检测到即拒绝启动；正常 URL 的 %20、%E5 等
+        // 未定义变量名不受影响，放行。
+        if crate::claude_needs_cmd_wrapper(&claude_bin) {
+            if let Some(pos) = args.iter().position(|a| a == "--settings") {
+                if let Some(json) = args.get(pos + 1) {
+                    if !settings_json_cmd_safe(json) {
+                        return Err(
+                            "--settings JSON 含 cmd 可展开的 %VAR% 序列（% 会被环境变量替换破坏配置）。请在 provider 配置/URL 中移除 %VAR% 形式的字符".to_string()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // H2: 先递增代际再杀旧进程——旧 stdout reader 在 EOF 后据此识别自己已
+    // 过期（不再清理新会话的句柄、不 emit 伪 process_exit）。若先杀后递增，
+    // 旧 reader 可能在递增前抢先通过校验完成清理。
+    // 低 7: 此处位于 %VAR% 检查之后——检查拒绝时直接返回，旧进程不被杀、
+    // 代际不递增，用户原来的会话继续正常运行。
+    let generation = crate::bump_session_generation(&session_id);
+    stdin_mgr.remove(&session_id).await;
+    state.remove(&session_id).await;
+
+    // On Windows, .cmd/.bat files must be launched via cmd /C
+    #[cfg(target_os = "windows")]
     let mut child = {
         // Helper: build and spawn a Command for the given binary
         let spawn_win = |bin: &str| {
-            let needs_cmd = bin.ends_with(".cmd")
-                || bin.ends_with(".bat")
-                || (!bin.contains('\\') && !bin.contains('/') && !bin.contains('.'));
+            let needs_cmd = crate::claude_needs_cmd_wrapper(bin);
             let mut cmd = if needs_cmd {
                 let mut c = Command::new("cmd");
                 c.arg("/C").arg(bin);
@@ -754,7 +800,13 @@ pub async fn start_claude_session(
     eprintln!("[LITTLECLAUDE] PATH: {}", &enriched_path);
     eprintln!("[LITTLECLAUDE] resolved_env ({} keys):", resolved_env.len());
     for (k, v) in &resolved_env {
-        let is_sensitive = k.contains("API_KEY") || k.contains("TOKEN") || k.contains("SECRET");
+        // M2: 大小写不敏感匹配（自定义 env 名如 MY_VISION_KEY、apiKey 此前
+        // 明文打印）——统一 to_ascii_uppercase 后匹配，关键字集补齐
+        // PASSWORD/KEY/PAT。
+        let upper = k.to_ascii_uppercase();
+        let is_sensitive = ["API_KEY", "TOKEN", "SECRET", "PASSWORD", "KEY", "PAT"]
+            .iter()
+            .any(|kw| upper.contains(kw));
         let display_val: &str = if is_sensitive { "***" } else { v.as_str() };
         eprintln!("  {k}={display_val}");
     }
@@ -796,6 +848,8 @@ pub async fn start_claude_session(
     let pm_clone: ProcessManager = (*state).clone(); // 浅克隆（内部全是 Arc）—— 供 EOF 后取退出码
     let stdin_clone = stdin_mgr.inner().clone();
     let is_bypass = permission_mode == "bypassPermissions";
+    // H2: 本 reader 属于哪一代会话——EOF 后据此判断自己是否已被新会话替代。
+    let my_generation = generation;
     tokio::spawn(async move {
         let stream_event = format!("claude:stream:{}", sid_clone);
         // Use a large buffer (1MB) to efficiently read large NDJSON lines from Claude CLI.
@@ -1038,6 +1092,12 @@ pub async fn start_claude_session(
             let mut emit_ok = false;
             const MAX_EMIT_ATTEMPTS: u32 = 12;
             for attempt in 1..=MAX_EMIT_ATTEMPTS {
+                // H2: kill-rebuild 后旧 reader 会在重试循环内（最长 ~14s）继续
+                // 往同名通道发旧进程事件——每轮 emit 前校验代际，过期立即返回
+                // （循环外的 EOF 门控挡不住循环内的 emit）。
+                if !crate::is_session_generation_current(&sid_clone, my_generation) {
+                    return;
+                }
                 match emit_to_frontend(&app_clone, &stream_event, json_to_emit.clone()) {
                     Ok(()) => {
                         emit_ok = true;
@@ -1061,6 +1121,13 @@ pub async fn start_claude_session(
                 break;
             }
         }
+        // H2: 同一 session_id 被重新 start 后，旧进程被杀 → 本 reader 也会走到
+        // 这里。代际已递增说明本 reader 属于旧代际：若继续 remove/emit，会清掉
+        // 新会话的句柄并给新会话发伪 process_exit——直接返回，交给新 reader。
+        if !crate::is_session_generation_current(&sid_clone, my_generation) {
+            return;
+        }
+
         // stdout EOF —— 进程随即退出，等待真实退出码（超时视为无码）
         let exit_code = pm_clone
             .wait_status(&sid_clone, std::time::Duration::from_secs(2))
@@ -1123,7 +1190,13 @@ pub async fn start_claude_session(
                 "content": params.prompt
             }
         });
-        stdin_mgr.send(&sid, &first_msg.to_string()).await?;
+        if let Err(e) = stdin_mgr.send(&sid, &first_msg.to_string()).await {
+            // L8: 发送失败时进程/句柄已注册——清理（remove 会 kill 进程，
+            // reader 随后 EOF 并 emit 真实退出事件），避免残留条目与幽灵进程。
+            stdin_mgr.remove(&sid).await;
+            state.remove(&sid).await;
+            return Err(e);
+        }
     }
 
     Ok(SessionInfo {
@@ -1486,6 +1559,11 @@ pub(crate) fn load_tracked_sessions() -> std::collections::HashSet<String> {
 /// Register a CLI session ID as managed by Little Claude
 #[tauri::command]
 pub async fn track_session(session_id: String) -> Result<(), String> {
+    // L6: session_id 含换行/回车时会向 tracked_sessions.txt 注入行——拒绝。
+    // 同时排除其他空白字符，避免空白行污染跟踪文件。
+    if session_id.chars().any(|c| c.is_whitespace()) {
+        return Err("Invalid session_id: contains whitespace".to_string());
+    }
     // Defense-in-depth: never persist desk-generated temporary IDs
     if session_id.starts_with("desk_") {
         return Ok(());
@@ -2034,6 +2112,38 @@ pub(crate) fn decode_project_name(encoded: &str) -> String {
     format!("{}{}", root, decoded_segments.join(sep))
 }
 
+/// H3: cmd /C 启动路径下检查 --settings JSON 是否含可被 cmd 展开的 %VAR%。
+/// cmd 只展开「与真实环境变量同名」的 %NAME%（含 %NAME:~a,b% 子串语法）；
+/// 未定义名（如 URL 编码 %20、%E5）原样通过。因此逐个 %…% 对检查基名是否
+/// 在本进程环境中存在——存在即会在命令行展开破坏 JSON，返回 false。
+#[cfg(target_os = "windows")]
+fn settings_json_cmd_safe(json: &str) -> bool {
+    let bytes = json.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // 找配对的 %；未配对（结尾孤 %) 的 % 不被 cmd 展开，安全。
+            let Some(rel) = bytes[i + 1..].iter().position(|&b| b == b'%') else {
+                break;
+            };
+            let name = &json[i + 1..i + 1 + rel];
+            if !name.is_empty() {
+                // %NAME:~a,b% 子串语法：基名取冒号前部分
+                let base = name.split(':').next().unwrap_or(name);
+                if base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && std::env::var(base).is_ok()
+                {
+                    return false;
+                }
+            }
+            i += 1 + rel + 1;
+            continue;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Redact sensitive values inside `--settings` args for stderr logging.
 /// The real args contain the API key inside the settings JSON; the env dump
 /// below already masks key-like vars, so this keeps the args line in parity.
@@ -2068,11 +2178,12 @@ fn redact_settings_json(json_str: &str) -> String {
                 .and_then(|e| e.as_object_mut())
             {
                 for (k, val) in env.iter_mut() {
+                    // M2: 关键字集与 resolved_env 日志脱敏保持一致
+                    // （API_KEY/TOKEN/SECRET/PASSWORD/KEY/PAT）。
                     let up = k.to_ascii_uppercase();
-                    if up.contains("API_KEY")
-                        || up.contains("TOKEN")
-                        || up.contains("SECRET")
-                        || up.contains("PASSWORD")
+                    if ["API_KEY", "TOKEN", "SECRET", "PASSWORD", "KEY", "PAT"]
+                        .iter()
+                        .any(|kw| up.contains(kw))
                     {
                         *val = serde_json::Value::String("***".to_string());
                     }
@@ -2082,6 +2193,18 @@ fn redact_settings_json(json_str: &str) -> String {
         }
         Err(_) => "***".to_string(),
     }
+}
+
+/// M2: URL 可能内嵌 userinfo 凭据（https://user:pass@host）——日志打印前
+/// 把 userinfo 部分脱敏为 ***@***。
+fn mask_url_userinfo(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        if let Some(at) = url[scheme_end + 3..].find('@') {
+            let at = scheme_end + 3 + at;
+            return format!("{}***@***{}", &url[..scheme_end + 3], &url[at + 1..]);
+        }
+    }
+    url.to_string()
 }
 
 #[tauri::command]
@@ -2096,11 +2219,13 @@ pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
     let root_c = projects_root
         .canonicalize()
         .map_err(|e| format!("Cannot resolve projects dir: {}", e))?;
-    let parent_c = p
-        .parent()
-        .and_then(|par| par.canonicalize().ok())
-        .ok_or_else(|| format!("Invalid session path: {}", path))?;
-    if !parent_c.starts_with(&root_c) {
+    // L4: 只校验父目录会让符号链接把文件本体指到 projects 树之外——对文件
+    // 本体 canonicalize 后校验（对齐 delete_session 的做法）。文件必须存在，
+    // canonicalize 失败（不存在/无权限）直接报错。
+    let file_c = p
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve session path: {}", e))?;
+    if !file_c.starts_with(&root_c) {
         return Err(format!(
             "Refusing to load session outside ~/.claude/projects: {}",
             path

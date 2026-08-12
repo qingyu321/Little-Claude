@@ -63,7 +63,9 @@ pub async fn open_with_default_app(path: String) -> Result<(), String> {
         // Note: ( ) , ; are NOT cmd metacharacters in this context — they
         // appear in plenty of real file names (报告(最终版).docx) and must
         // stay openable.
-        if path.chars().any(|c| "&|^<>%".contains(c)) {
+        // L2: `"` 会提前终止 cmd 的引号作用域（路径含空格时 `start ""` 的
+        // 引号配对被打乱），\n/\r 可注入第二行命令——一并拒绝。
+        if path.chars().any(|c| "&|^<>%\"\n\r".contains(c)) {
             return Err("File name contains characters not allowed by cmd".to_string());
         }
         Command::new("cmd")

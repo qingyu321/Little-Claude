@@ -2433,6 +2433,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
+ "toml 0.8.2",
  "trash",
  "uuid",
  "which",

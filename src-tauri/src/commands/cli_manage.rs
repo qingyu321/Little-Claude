@@ -1138,7 +1138,26 @@ fn npm_global_installed_version() -> Option<String> {
 /// can never install a stale version; falls back to @latest when unknown.
 fn cli_pkg_spec(target: &Option<String>) -> String {
     match target {
-        Some(v) => format!("@anthropic-ai/claude-code@{v}"),
+        Some(v) => {
+            // L10: /latest 端点返回的原始文本直接拼进 npm 参数——白名单校验
+            // （`^[0-9][0-9.]*[-a-z0-9.]*$`：数字开头、仅含数字/点/字母/连字符）。
+            // 预发布版本（如 2.1.220-rc.1）含字母与连字符，须放行；换行/空格/
+            // 分号等可注入 npm 参数的字符一律拒绝，退回 @latest。
+            let trimmed = v.trim();
+            let valid = !trimmed.is_empty()
+                && trimmed.starts_with(|c: char| c.is_ascii_digit())
+                && trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+            if !valid {
+                eprintln!(
+                    "[cli_pkg_spec] rejecting malformed version string {:?}, falling back to @latest",
+                    v
+                );
+                return "@anthropic-ai/claude-code@latest".to_string();
+            }
+            format!("@anthropic-ai/claude-code@{}", trimmed)
+        }
         None => "@anthropic-ai/claude-code@latest".to_string(),
     }
 }
@@ -1187,7 +1206,16 @@ async fn await_command_with_cancel(
                         stderr: Vec::new(),
                     }),
                     Ok(Err(e)) => Err(format!("Failed to wait for command: {}", e)),
-                    Err(_) => Err(format!("Command timed out after {}s", timeout_secs)),
+                    Err(_) => {
+                        // L3: 超时路径同样连杀进程树（与取消路径一致）——
+                        // cmd /C npm 派生的 node 孙进程不受 kill_on_drop 控制，
+                        // 只杀直接子进程会让 npm 在后台继续装完。
+                        kill_process_tree(pid);
+                        // 等进程树退出，调用方的 cleanup_created_dir 才能删目录
+                        // （Windows 上文件句柄未释放时 remove_dir_all 会失败）。
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        Err(format!("Command timed out after {}s", timeout_secs))
+                    }
                 };
             }
         }
@@ -1633,11 +1661,37 @@ async fn try_native_cli_update(china: bool, scope: &CancelScope) -> Result<Strin
         }
 
         // 5. Verify SHA-256 checksum
-        if !expected_checksum.is_empty() {
+        // M3: checksum 缺失与不匹配同等处理——manifest 未含 checksum 时直接
+        // 接受安装等于无条件信任镜像，改为拒绝并重试下一源。校验改用
+        // BufReader 流式喂 Sha256，不再 std::fs::read 一次性读入 ~230MB。
+        {
             use sha2::{Digest, Sha256};
-            let data =
-                std::fs::read(&tmp_path).map_err(|e| format!("Cannot read tmp file: {e}"))?;
-            let actual = format!("{:x}", Sha256::digest(&data));
+            use std::io::Read;
+            let mut hasher = Sha256::new();
+            {
+                let file = std::fs::File::open(&tmp_path)
+                    .map_err(|e| format!("Cannot open tmp file for checksum: {e}"))?;
+                let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = reader
+                        .read(&mut buf)
+                        .map_err(|e| format!("Checksum read error: {e}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+            }
+            let actual = format!("{:x}", hasher.finalize());
+            if expected_checksum.is_empty() {
+                eprintln!(
+                    "[native_update] checksum unavailable in manifest for {} -- refusing source",
+                    base
+                );
+                let _ = std::fs::remove_file(&tmp_path);
+                continue;
+            }
             if actual != expected_checksum {
                 eprintln!(
                     "[native_update] checksum mismatch: expected {} -- got {} --",
@@ -2794,6 +2848,15 @@ async fn download_with_progress(
     }
 
     let total = resp.content_length().unwrap_or(0);
+    // M4: Content-Length 来自不可信下载源——巨值会让 with_capacity 预分配
+    // 数 GB 内存直接 abort（Node/Git 归档远小于 1 GiB，超限必是恶意/损坏源）。
+    const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "Download too large: {} bytes (limit {} bytes) from {}",
+            total, MAX_DOWNLOAD_BYTES, url
+        ));
+    }
     let mut downloaded: u64 = 0;
     let mut bytes = Vec::with_capacity(total as usize);
     let mut stream = resp.bytes_stream();
@@ -2805,6 +2868,14 @@ async fn download_with_progress(
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         bytes.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
+        // 低 13: 无 Content-Length 的响应此前不受限、无界累积——按累计字节
+        // 同样限流（超过 1 GiB 报错），防恶意源无限灌入内存。
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Download too large: {} bytes (limit {} bytes) from {}",
+                downloaded, MAX_DOWNLOAD_BYTES, url
+            ));
+        }
 
         let percent = if total > 0 {
             (downloaded * 80 / total) as u8

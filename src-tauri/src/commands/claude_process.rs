@@ -233,11 +233,31 @@ impl StdinManager {
         .await;
         match res {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(format!(
-                "Timed out writing to stdin for session: {}",
+            Ok(Err(e)) => {
+                self.mark_broken(id).await;
+                Err(e)
+            }
+            Err(_) => {
+                self.mark_broken(id).await;
+                Err(format!(
+                    "Timed out writing to stdin for session: {}",
+                    id
+                ))
+            }
+        }
+    }
+
+    /// L1: 超时/写入失败时 write_all 可能只写了一半——剩余字节丢失后，下一帧
+    /// 会拼在残行后面产生 NDJSON 残行（CLI 解析错乱）。把该会话的 stdin 连接
+    /// 标记为损坏并从映射中丢弃：后续 send 返回明确的 "No stdin handle" 错误，
+    /// 不再向半坏的管道写数据。会话本身由 stdout reader 的 EOF 清理兜底。
+    async fn mark_broken(&self, id: &str) {
+        let mut map = self.handles.lock().await;
+        if map.remove(id).is_some() {
+            eprintln!(
+                "[LITTLECLAUDE:WARN] stdin for session {} marked broken and dropped (partial write risk)",
                 id
-            )),
+            );
         }
     }
 

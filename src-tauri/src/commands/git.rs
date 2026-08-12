@@ -142,5 +142,14 @@ pub async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, S
         return Err(format!("git {} failed: {}", subcmd, stderr));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    // L7: stdout 无大小上限——巨型输出（如仓库内超大文件 diff）会撑爆内存。
+    // 按 4MB 截断（截断发生在 UTF-8 安全边界，由 from_utf8_lossy 兜底）。
+    const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
+    let stdout_capped: Vec<u8> = output
+        .stdout
+        .iter()
+        .take(MAX_STDOUT_BYTES)
+        .cloned()
+        .collect();
+    Ok(String::from_utf8_lossy(&stdout_capped).to_string())
 }

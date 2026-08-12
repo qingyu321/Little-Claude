@@ -391,9 +391,31 @@ pub(crate) fn login_shell_proxy_env() -> &'static HashMap<String, String> {
 }
 
 /// Read macOS system proxy settings from `scutil --proxy`.
-/// Re-reads every call so proxy changes are picked up immediately.
+/// M8: scutil 是同步子进程调用，会阻塞 tokio worker——加 30s TTL 缓存。
+/// 系统代理在会话启动间变更的概率极低，30s 内复用缓存可接受。
 #[cfg(target_os = "macos")]
 fn system_proxy_url() -> Option<String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>,
+    > = std::sync::OnceLock::new();
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    {
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, val)) = &*guard {
+            if at.elapsed() < std::time::Duration::from_secs(30) {
+                return val.clone();
+            }
+        }
+    }
+    let fresh = system_proxy_url_uncached();
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+#[cfg(target_os = "macos")]
+fn system_proxy_url_uncached() -> Option<String> {
     let output = std::process::Command::new("scutil")
         .arg("--proxy")
         .stdin(std::process::Stdio::null())
@@ -442,7 +464,9 @@ fn system_proxy_url() -> Option<String> {
 /// Probe common local proxy ports and return the first reachable one.
 /// Re-probes every call (fast: ~100ms worst case) so proxy tools started after
 /// Little Claude is still detected. Covers Clash, Surge, common SOCKS.
-fn probe_local_proxy() -> Option<String> {
+/// M8: 原实现用同步 connect_timeout，在 tokio worker 上阻塞 80ms × 4 端口
+/// （会话启动与 HTTP client 构建都会走到这里）——改为异步 connect + 超时。
+async fn probe_local_proxy() -> Option<String> {
     let ports: &[(u16, &str)] = &[
         (7890, "http"),   // Clash default
         (7897, "http"),   // Clash Verge default
@@ -451,8 +475,13 @@ fn probe_local_proxy() -> Option<String> {
     ];
     for &(port, scheme) in ports {
         let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(80)).is_ok()
-        {
+        let reachable = tokio::time::timeout(
+            std::time::Duration::from_millis(80),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .map_or(false, |r| r.is_ok());
+        if reachable {
             let url = format!("{}://127.0.0.1:{}", scheme, port);
             eprintln!("auto-detected local proxy: {}", url);
             return Some(url);
@@ -463,7 +492,7 @@ fn probe_local_proxy() -> Option<String> {
 
 /// Resolve the best proxy URL from environment variables, system proxy, and login shell.
 /// Returns Some(url) if a proxy is configured, None otherwise.
-fn resolve_proxy_url() -> Option<String> {
+async fn resolve_proxy_url() -> Option<String> {
     // 1. Check current process env vars (set by VPN/Clash when running)
     let from_env = std::env::var("https_proxy")
         .ok()
@@ -506,7 +535,7 @@ fn resolve_proxy_url() -> Option<String> {
         }
     }
     // 4. Probe common local proxy ports (Clash 7890, Surge 6152, SOCKS 1080)
-    if let Some(url) = probe_local_proxy() {
+    if let Some(url) = probe_local_proxy().await {
         return Some(url);
     }
     None
@@ -558,7 +587,7 @@ pub(crate) async fn build_smart_http_client(
     // proxy change still yields a fresh client. Only the no-proxy client is
     // cached: when a proxy is configured we re-probe reachability each call to
     // honor VPN on/off (the "smart proxy" behavior).
-    let proxy_key = resolve_proxy_url().unwrap_or_default();
+    let proxy_key = resolve_proxy_url().await.unwrap_or_default();
     let cache_key = format!(
         "{}|{}|{}",
         connect_timeout.as_millis(),
@@ -584,7 +613,7 @@ pub(crate) async fn build_smart_http_client(
         .timeout(request_timeout)
         .no_proxy(); // Disable automatic env proxy reading  --?we manage it ourselves
 
-    if let Some(proxy_url) = resolve_proxy_url() {
+    if let Some(proxy_url) = resolve_proxy_url().await {
         if is_proxy_reachable(&proxy_url).await {
             if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
                 eprintln!("Smart proxy: using proxy {}", proxy_url);
@@ -1118,6 +1147,19 @@ fn is_blocked_child_env_var(name: &str) -> bool {
         "NODE_OPTIONS",
         "NODE_PATH",
         "CLASSPATH",
+        // M1: 补齐高影响变量——PATH 防覆盖 enriched_path（CLI/git 解析劫持）、
+        // BASH_ENV/ENV（bash 启动脚本劫持）、GIT_CONFIG_GLOBAL/GIT_EXEC_PATH
+        // （git 配置/执行劫持）、SHELL（子 shell 劫持）、PYTHONHOME（python
+        // 环境重定向）、SSL_CERT_FILE/NODE_EXTRA_CA_CERTS（TLS 证书劫持）。
+        "PATH",
+        "BASH_ENV",
+        "ENV",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_EXEC_PATH",
+        "SHELL",
+        "PYTHONHOME",
+        "SSL_CERT_FILE",
+        "NODE_EXTRA_CA_CERTS",
     ];
     let upper = name.to_ascii_uppercase();
     BLOCKED.contains(&upper.as_str())
@@ -1280,12 +1322,78 @@ pub(crate) fn normalize_deepseek_model_name(model: &str) -> String {
 }
 
 
+// ── H2: 会话代际（generation）──
+// 同一 session_id 重新 start 时旧进程被杀，其 stdout reader 任务随后读到 EOF；
+// 若此时 map 条目已被新会话替换，旧 reader 的清理（remove）会误杀新进程，
+// 退出事件会被当成新会话的伪 process_exit 发给前端。为每个 session_id 维护
+// 单调递增的代际号：reader 捕获自己的代际，在清理/emit 前校验仍是当前代际，
+// 不是则直接返回（把生命周期完全交给新会话自己的 reader）。
+// 条目不删除：删除后重新 start 会从 1 重新计数，可能与新 reader 的代际碰撞。
+// 低 4: 条目数超限时（512 条，约 ~50KB）清理最旧插入的一半，防无界增长。
+// 清理按「插入顺序最旧」而非任意条目，避免误删仍活跃会话的代际。
+static SESSION_GENERATIONS: std::sync::OnceLock<std::sync::Mutex<GenerationRegistry>> =
+    std::sync::OnceLock::new();
+
+/// H2 代际注册表：map 供 O(1) 查询，order 记录插入顺序供超限清理。
+struct GenerationRegistry {
+    map: HashMap<String, u64>,
+    order: std::collections::VecDeque<String>,
+}
+
+/// 代际条目上限；超过后清理最旧的一半（最久未插入的会话大概率已结束）。
+const MAX_GENERATION_ENTRIES: usize = 512;
+
+/// 全局单调递增的代际号源：即使条目被清理后重新 start，新代际号也永不
+/// 与任何旧 reader 持有过的号碰撞（原始设计靠「条目不删除 + 每会话自增」
+/// 防碰撞，清理会破坏该不变量——全局计数在清理下仍保持单调）。
+static GLOBAL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn session_generations() -> &'static std::sync::Mutex<GenerationRegistry> {
+    SESSION_GENERATIONS.get_or_init(|| {
+        std::sync::Mutex::new(GenerationRegistry {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    })
+}
+
+/// 会话启动时递增代际号并返回新值；旧 reader 持有的代际号随之失效。
+/// 必须在杀掉旧进程之前调用，避免旧 reader 在 EOF 后抢先通过校验。
+pub(crate) fn bump_session_generation(session_id: &str) -> u64 {
+    let mut reg = session_generations().lock().unwrap_or_else(|e| e.into_inner());
+    // 低 4: 仅在插入新条目前超限时清理（已有条目不触发），从队头移除最旧的
+    // 一半——被清理的会话若已结束，其 reader 早已退出，无副作用。
+    if !reg.map.contains_key(session_id) && reg.map.len() >= MAX_GENERATION_ENTRIES {
+        for _ in 0..(MAX_GENERATION_ENTRIES / 2) {
+            if let Some(oldest) = reg.order.pop_front() {
+                reg.map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+    // 全局唯一代际号：条目被清理后重新 start 也不会与旧 reader 的号碰撞
+    let gen = GLOBAL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    reg.map.insert(session_id.to_string(), gen);
+    if !reg.order.iter().any(|s| s.as_str() == session_id) {
+        reg.order.push_back(session_id.to_string());
+    }
+    gen
+}
+
+/// 校验 `generation` 是否仍是 `session_id` 的当前代际（false = 已过期，直接返回）。
+pub(crate) fn is_session_generation_current(session_id: &str, generation: u64) -> bool {
+    let reg = session_generations().lock().unwrap_or_else(|e| e.into_inner());
+    reg.map.get(session_id).copied() == Some(generation)
+}
+
 async fn start_codex_session(
     app: AppHandle,
     state: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     params: StartSessionParams,
     stdin_id: String,
+    generation: u64,
 ) -> Result<SessionInfo, String> {
     let backend = backends::resolve_backend(Some("codex"));
 
@@ -1432,7 +1540,13 @@ async fn start_codex_session(
 
     // Send initial message (initialize  --?id=1)
     if let Some(init_msg) = backend.build_initial_message(&params) {
-        stdin_mgr.send(&stdin_id, &init_msg).await?;
+        if let Err(e) = stdin_mgr.send(&stdin_id, &init_msg).await {
+            // L8: 首条消息发送失败时进程/句柄已注册——清理（remove 会 kill 进程，
+            // reader 随后 EOF 并 emit 真实退出事件），避免残留条目与幽灵进程。
+            stdin_mgr.remove(&stdin_id).await;
+            state.remove(&stdin_id).await;
+            return Err(e);
+        }
     }
 
     // Extract fields needed in the reader task (before moving params)
@@ -1460,6 +1574,8 @@ async fn start_codex_session(
         let mut line_count: u64 = 0;
         let mut read_err_count: u32 = 0;
         let mut clean_eof = false;
+        // H2: 本 reader 属于哪一代会话——EOF 后据此判断自己是否已被新会话替代。
+        let my_generation = generation;
 
         // ─── Handshake state machine ───────────────────────────────────
         // Phase 0: waiting for initialize response (id=1)
@@ -1492,6 +1608,12 @@ async fn start_codex_session(
         }
 
         loop {
+            // H2: kill-rebuild 后旧 reader 的循环仍在读旧进程输出并 emit 到
+            // 同名通道——每轮先校验代际，过期立即返回，通道完全交给新会话
+            // （循环外的 1797 处 EOF 门控挡不住循环内的 emit）。
+            if !is_session_generation_current(&sid_clone, my_generation) {
+                return;
+            }
             let line = match lines.next_line().await {
                 Ok(Some(line)) => {
                     read_err_count = 0;
@@ -1709,6 +1831,13 @@ async fn start_codex_session(
                     }
                 }
             }
+        }
+
+        // H2: 同一 session_id 被重新 start 后，旧进程被杀 → 本 reader 也会走到
+        // 这里。代际已递增说明本 reader 属于旧代际：若继续 remove/emit，会清掉
+        // 新会话的句柄并给新会话发伪 process_exit——直接返回，交给新 reader。
+        if !is_session_generation_current(&sid_clone, my_generation) {
+            return;
         }
 
         // F3 (codex): the old code emitted process_exit without ever checking

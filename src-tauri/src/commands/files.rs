@@ -248,6 +248,10 @@ fn is_system_dir(path: &Path) -> bool {
         "/PROC",
         "/SYS",
         "/LIBRARY",
+        // macOS 的 /etc、/var、/tmp 都是指向 /private/* 的符号链接——canonicalize
+        // 后路径归一化成 /PRIVATE/...，缺此前缀时黑名单被整个绕过
+        // （/private/etc/passwd 等直接读写成功）。
+        "/PRIVATE",
     ];
     ROOTS.iter().any(|root| norm == *root || norm.starts_with(&format!("{}/", root)))
 }
@@ -695,8 +699,18 @@ pub async fn save_temp_file(
             let gitignore = std::path::PathBuf::from(dir)
                 .join(".tokenicode")
                 .join(".gitignore");
-            if !gitignore.exists() {
-                let _ = std::fs::write(&gitignore, "*\n");
+            // M7: 不无条件覆盖用户已有的 .gitignore——已含 `*` 行则跳过；
+            // 已有文件但无 `*` 行则追加（保留用户原有规则）；无文件才新建。
+            let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+            if !existing.lines().any(|l| l.trim() == "*") {
+                let _ = std::fs::write(
+                    &gitignore,
+                    if existing.trim().is_empty() {
+                        "*\n".to_string()
+                    } else {
+                        format!("{}\n*\n", existing.trim_end())
+                    },
+                );
             }
             p
         } else {
@@ -706,6 +720,9 @@ pub async fn save_temp_file(
         std::env::temp_dir().join("tokenicode")
     };
     std::fs::create_dir_all(&tmp).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    // M7: 临时文件永不清理会无限累积——每次写入前清扫 mtime 超过 14 天的旧文件。
+    cleanup_stale_temp_files(&tmp);
 
     // Split name into stem + extension, append timestamp + counter for uniqueness
     let path_buf = std::path::PathBuf::from(&name);
@@ -731,6 +748,26 @@ pub async fn save_temp_file(
     let path = tmp.join(&unique_name);
     std::fs::write(&path, &data).map_err(|e| format!("Failed to write temp file: {}", e))?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// 清扫临时目录中 mtime 超过 14 天的旧文件（save_temp_file 的附属目录）。
+/// 低 9: 从 7 天延长到 14 天——聊天里的图片/文件附件可能仍被旧会话引用，
+/// 7 天窗口在活跃会话切换后可能误删仍引用的附件。
+fn cleanup_stale_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(14 * 24 * 3600)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let stale = meta.modified().map(|m| m < cutoff).unwrap_or(false);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -765,6 +802,11 @@ mod tests {
         assert!(safe_resolve("C:\\Windows\\System32\\config\\SAM").is_err());
         assert!(safe_resolve("C:\\Program Files\\App\\x").is_err());
         assert!(safe_resolve("C:\\Program Files (x86)\\App\\x").is_err());
+        // H1: macOS 的 /etc、/var、/tmp 是 /private/* 的符号链接——直接访问
+        // /private/* 路径（canonicalize 后的真实路径）也必须被拒绝。
+        assert!(safe_resolve("/private/etc/passwd").is_err());
+        assert!(safe_resolve("/private/var/log/system.log").is_err());
+        assert!(safe_resolve("/private/tmp/x").is_err());
     }
 
     #[test]
@@ -802,6 +844,27 @@ mod tests {
         let link = root.join("evil_link");
         std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
         assert!(safe_resolve(link.to_str().unwrap()).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_into_private_dir() {
+        // H1: macOS 上 /etc、/var、/tmp 均指向 /private/*——符号链接指向
+        // /private 家族路径时，canonicalize 后必须被 "/PRIVATE" 前缀拦住。
+        // 仅当目标真实存在（macOS）时断言拒绝；Linux 无 /private 目录，
+        // 悬空链接走最近存在祖先分支，不构成漏洞路径，跳过。
+        let root = temp_root("symlink-private");
+        for target in ["/private/etc/passwd", "/private/var/log"] {
+            if !std::path::Path::new(target).exists() {
+                continue;
+            }
+            let link = root.join(format!("link_{}", target.replace('/', "_")));
+            if std::os::unix::fs::symlink(target, &link).is_err() {
+                continue; // 无权限创建链接的平台跳过（如非管理员）
+            }
+            assert!(safe_resolve(link.to_str().unwrap()).is_err());
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -820,6 +820,76 @@ async fn install_video_analysis_python_deps(
     ))
 }
 
+/// M6: model.bin 大小下限（约为 faster-whisper 实际大小的 ~90%，按档位
+/// 保守取值，留 ~10% 余量防镜像差异误判）。下限过低会让半下载文件通过
+/// 校验且永不重下——截断到阈值之上的文件在推理时才报错。
+/// tiny ~75MB→68MB、base ~145MB→130MB、small ~488MB→440MB、
+/// medium ~1.4GB→1.2GB、large ~3GB→2.7GB。
+fn whisper_model_min_bytes(model_size: &str) -> u64 {
+    match model_size {
+        "tiny" => 68 * 1024 * 1024,
+        "base" => 130 * 1024 * 1024,
+        "small" => 440 * 1024 * 1024,
+        "medium" => 1200 * 1024 * 1024,
+        "large-v2" | "large-v3" | "large-v3-turbo" => 2700 * 1024 * 1024,
+        _ => 100 * 1024 * 1024,
+    }
+}
+
+/// M6: 校验 whisper 模型文件——model.bin 达到档位大小下限；config.json
+/// 可解析为 JSON 且声明 model_type=whisper。半下载/被投毒文件直接拒绝。
+fn verify_whisper_model_files(model_dir: &Path, model_size: &str) -> Result<(), String> {
+    let model_bin = model_dir.join("model.bin");
+    let len = model_bin
+        .metadata()
+        .map(|m| m.len())
+        .map_err(|e| format!("Failed to stat model.bin: {}", e))?;
+    let min = whisper_model_min_bytes(model_size);
+    if len < min {
+        return Err(format!(
+            "语音模型 model.bin 大小异常 ({} bytes < {} bytes)——下载可能被中断或被镜像投毒，请重试",
+            len, min
+        ));
+    }
+    let cfg_path = model_dir.join("config.json");
+    let cfg_valid = std::fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map_or(false, |v| {
+            v.get("model_type").and_then(|t| t.as_str()) == Some("whisper")
+        });
+    if !cfg_valid {
+        return Err(
+            "语音模型 config.json 缺失或非法（应声明 model_type=whisper）——下载可能被中断，请重试"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// M6: 校验下载的 ffmpeg zip——大小下限（BtbN win64-gpl ~80-100MB、
+/// Gyan essentials ~50MB+，20MB 下限足以拦截被劫持的小文件）+ zip 结构
+/// 合法且含 ffmpeg/ffprobe 条目（防损坏文件解压到一半）。
+fn verify_ffmpeg_zip(path: &Path) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Failed to stat ffmpeg zip: {}", e))?;
+    if meta.len() < 20 * 1024 * 1024 {
+        return Err(format!(
+            "ffmpeg zip 大小异常 ({} bytes < 20MB)——下载可能被中断或被镜像投毒，请重试",
+            meta.len()
+        ));
+    }
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("Failed to open ffmpeg zip: {}", e))?;
+    let archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("ffmpeg zip 不是有效的 zip 文件: {}", e))?;
+    let names: Vec<String> = archive.file_names().map(String::from).collect();
+    let has = |needle: &str| names.iter().any(|n| n.ends_with(needle) || n == needle);
+    if !(has("ffmpeg.exe") || has("ffmpeg")) || !(has("ffprobe.exe") || has("ffprobe")) {
+        return Err("ffmpeg zip 缺少 ffmpeg/ffprobe 条目——zip 不完整，请重试".to_string());
+    }
+    Ok(())
+}
+
 async fn download_whisper_model(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -833,7 +903,23 @@ async fn download_whisper_model(
     let total_files = VIDEO_ANALYSIS_WHISPER_FILES.len() as u8;
     for (i, file_name) in VIDEO_ANALYSIS_WHISPER_FILES.iter().enumerate() {
         let dest = model_dir.join(file_name);
-        if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        // M6: 跳过条件与 verify_whisper_model_files 同口径——model.bin 须达到
+        // 档位下限、config.json 须合法，否则半下载文件会被跳过 → 校验失败
+        // 死循环。其余小文件保持「非空即存在」。
+        let already_ok = match *file_name {
+            "model.bin" => dest
+                .metadata()
+                .map(|m| m.len() >= whisper_model_min_bytes(model_size))
+                .unwrap_or(false),
+            "config.json" => std::fs::read_to_string(&dest)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map_or(false, |v| {
+                    v.get("model_type").and_then(|t| t.as_str()) == Some("whisper")
+                }),
+            _ => dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false),
+        };
+        if already_ok {
             continue;
         }
 
@@ -1230,6 +1316,24 @@ pub async fn open_video_analysis_skill_dir() -> Result<String, String> {
 /// 1) ffmpeg/ffprobe zip  2) faster-whisper model  3) pip deps via Tsinghua/Aliyun
 #[tauri::command]
 pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRuntimeStatus, String> {
+    // L5: 安装中标志——防止并发重复下载（ffmpeg ~100MB + whisper 模型 ~460MB，
+    // 并发下载既浪费带宽又互相覆盖文件）。
+    static INSTALLING: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
+        std::sync::OnceLock::new();
+    let flag = INSTALLING.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("video-analysis 运行环境正在安装中，请稍候再试".to_string());
+    }
+    let result = download_video_analysis_runtime_inner(&app).await;
+    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    result
+}
+
+/// L5: 实际安装流程——由外层命令函数包一层，失败路径统一清理
+/// tokenicode-va-runtime-{pid} 临时目录，不再残留半下载文件。
+async fn download_video_analysis_runtime_inner(
+    app: &AppHandle,
+) -> Result<SkillRuntimeStatus, String> {
     let skill_dir = video_analysis_skill_dir()?;
     if !skill_dir.join("SKILL.md").is_file() {
         return Err(
@@ -1239,7 +1343,7 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
 
     let primary_url = video_analysis_primary_download_url();
     emit_skill_runtime_progress(
-        &app,
+        app,
         VIDEO_ANALYSIS_SKILL_NAME,
         "starting",
         &primary_url,
@@ -1264,6 +1368,9 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
+    // 安装主体：内部任何 `?` 失败统一经下方 match 清理 tmp_dir
+    let body = async {
+
     // ---- 1) ffmpeg (0%  --?35%) ----
     let bin_dir = skill_dir.join("bin");
     #[cfg(target_os = "windows")]
@@ -1274,7 +1381,7 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
     if !ffmpeg_ready {
         let zip_path = tmp_dir.join("ffmpeg.zip");
         let used = download_first_ok_to_file(
-            &app,
+            app,
             VIDEO_ANALYSIS_SKILL_NAME,
             &client,
             VIDEO_ANALYSIS_FFMPEG_URLS,
@@ -1285,8 +1392,11 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
             "ffmpeg",
         )
         .await?;
+        // M6: ffmpeg 下载没有官方 .sha256 源——至少校验大小下限 + zip 结构
+        // 合法（防镜像返回损坏/被劫持的小文件），通过后再解压。
+        verify_ffmpeg_zip(&zip_path)?;
         emit_skill_runtime_progress(
-            &app,
+            app,
             VIDEO_ANALYSIS_SKILL_NAME,
             "extracting",
             &used,
@@ -1298,7 +1408,7 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
         extract_ffmpeg_zip(&zip_path, &bin_dir)?;
         let _ = std::fs::remove_file(&zip_path);
         emit_skill_runtime_progress(
-            &app,
+            app,
             VIDEO_ANALYSIS_SKILL_NAME,
             "ffmpeg",
             &used,
@@ -1309,7 +1419,7 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
         );
     } else {
         emit_skill_runtime_progress(
-            &app,
+            app,
             VIDEO_ANALYSIS_SKILL_NAME,
             "ffmpeg",
             &primary_url,
@@ -1323,24 +1433,12 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
     // ---- 2) faster-whisper model (35%  --?70%) ----
     let model_size = configured_asr_model_size();
     let model_dir = skill_dir.join("models").join(whisper_model_dir_name(&model_size));
-    let model_bin = model_dir.join("model.bin");
-    if !(model_bin.is_file()
-        && model_bin.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false))
-    {
-        download_whisper_model(&app, &client, &model_dir, &model_size).await?;
+    // M6: 安装守卫与 download_whisper_model 内的跳过条件同口径——直接复用
+    // verify_whisper_model_files（model.bin 达到档位下限 + config.json 合法），
+    // 半下载文件不会绕过校验分支（只查 model.bin 大小的旧守卫会放行截断文件）。
+    if verify_whisper_model_files(&model_dir, &model_size).is_ok() {
         emit_skill_runtime_progress(
-            &app,
-            VIDEO_ANALYSIS_SKILL_NAME,
-            "model",
-            VIDEO_ANALYSIS_HF_MIRROR,
-            70,
-            "语音模型安装完成",
-            0,
-            0,
-        );
-    } else {
-        emit_skill_runtime_progress(
-            &app,
+            app,
             VIDEO_ANALYSIS_SKILL_NAME,
             "model",
             VIDEO_ANALYSIS_HF_MIRROR,
@@ -1349,12 +1447,27 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
             0,
             0,
         );
+    } else {
+        download_whisper_model(app, &client, &model_dir, &model_size).await?;
+        // M6: model.bin 大小下限 + config.json 合法性校验（防供应链投毒/
+        // 半下载损坏）——校验失败时重下不会陷入「跳过→校验失败」死循环。
+        verify_whisper_model_files(&model_dir, &model_size)?;
+        emit_skill_runtime_progress(
+            app,
+            VIDEO_ANALYSIS_SKILL_NAME,
+            "model",
+            VIDEO_ANALYSIS_HF_MIRROR,
+            70,
+            "语音模型安装完成",
+            0,
+            0,
+        );
     }
 
     // ---- 3) Python deps via China pip mirrors (70%  --?98%) ----
-    install_video_analysis_python_deps(&app, &skill_dir).await?;
+    install_video_analysis_python_deps(app, &skill_dir).await?;
     emit_skill_runtime_progress(
-        &app,
+        app,
         VIDEO_ANALYSIS_SKILL_NAME,
         "python",
         VIDEO_ANALYSIS_PIP_MIRROR_PRIMARY,
@@ -1387,7 +1500,7 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     emit_skill_runtime_progress(
-        &app,
+        app,
         VIDEO_ANALYSIS_SKILL_NAME,
         "complete",
         &primary_url,
@@ -1398,4 +1511,13 @@ pub async fn download_video_analysis_runtime(app: AppHandle) -> Result<SkillRunt
     );
 
     get_video_analysis_runtime_status().await
+    };
+    match body.await {
+        Ok(status) => Ok(status),
+        Err(e) => {
+            // L5: 失败路径清理临时目录（ffmpeg.zip / 半下载模型残留）
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            Err(e)
+        }
+    }
 }
