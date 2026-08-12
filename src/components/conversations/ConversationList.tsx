@@ -9,6 +9,7 @@ import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
+import { cleanupStreamListener } from '../../lib/stream-cleanup';
 import { parseSessionMessages } from '../../lib/session-loader';
 import { SessionGroup } from './SessionGroup';
 import { SessionItem } from './SessionItem';
@@ -392,6 +393,29 @@ export function ConversationList() {
   // --- Delete handlers ---
   const executeDelete = useCallback(async (sessionId: string, sessionPath: string) => {
     try {
+      // H5: kill a still-running CLI process before deleting — otherwise the
+      // orphaned process keeps running (and the AI keeps writing files /
+      // running commands) with no tab left to route its stream to, silently.
+      if (useSessionStore.getState().isSessionRunning(sessionId)) {
+        const stdinId = useChatStore.getState().getTab(sessionId)?.sessionMeta.stdinId;
+        if (stdinId) {
+          // Await the kill before deleting the session file — on Windows the
+          // CLI process may still hold the JSONL open (no FILE_SHARE_DELETE),
+          // and removing it mid-kill throws a sharing violation. kill_session
+          // internally awaits process termination.
+          await bridge.killSession(stdinId).catch(() => {});
+          cleanupStreamListener(stdinId);
+          useSessionStore.getState().unregisterStdinTab(stdinId);
+        }
+        useSessionStore.getState().setSessionRunning(sessionId, false);
+        // H5 (background tab): the listener was removed above, so the killed
+        // process's exit event will never arrive to settle the tab — without
+        // this the tab stays 'running' forever with a dead stdinId and a
+        // queued pending list nobody drains.
+        useChatStore.getState().setSessionStatus(sessionId, 'idle');
+        useChatStore.getState().setSessionMeta(sessionId, { stdinId: undefined });
+        useChatStore.getState().clearPendingMessages(sessionId);
+      }
       if (sessionPath) {
         await bridge.deleteSession(sessionId, sessionPath);
       } else {

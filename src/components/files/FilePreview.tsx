@@ -405,7 +405,7 @@ export function FilePreview() {
             />
             <div className="flex items-center justify-center py-2 border-t border-border-subtle">
               <button
-                onClick={() => bridge.openWithDefaultApp(selectedFile)}
+                onClick={() => { bridge.openWithDefaultApp(selectedFile).catch((e) => console.warn('[files] open external failed:', e)); }}
                 className="px-3 py-1 rounded-lg text-[11px] font-medium
                   text-text-muted hover:text-text-primary hover:bg-bg-tertiary
                   transition-smooth"
@@ -440,7 +440,7 @@ export function FilePreview() {
               <div className="text-xs text-text-muted">{t('files.binaryFile')}</div>
               {selectedFile && (
                 <button
-                  onClick={() => bridge.openWithDefaultApp(selectedFile)}
+                  onClick={() => { bridge.openWithDefaultApp(selectedFile).catch((e) => console.warn('[files] open external failed:', e)); }}
                   className="px-3 py-1.5 text-xs rounded-lg bg-bg-secondary
                     text-text-muted hover:bg-bg-tertiary hover:text-text-primary
                     transition-smooth cursor-pointer inline-flex items-center gap-1.5"

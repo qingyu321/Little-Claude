@@ -368,6 +368,12 @@ function App() {
             }
             useSettingsStore.getState().setWorkingDirectory(resolved);
           }
+        } else {
+          // M5: never-opened tab — no cache to restore. Clear the LIVE agent
+          // tree left over from the previous tab, or AgentPanel would keep
+          // showing the previous conversation's agents (the click path clears
+          // via handleLoadSession; the Ctrl+Tab path had no equivalent).
+          useAgentStore.getState().clearAgents();
         }
       }
     };

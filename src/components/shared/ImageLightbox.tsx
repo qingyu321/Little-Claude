@@ -92,7 +92,7 @@ export function ImageLightbox() {
         <button
           onClick={(e) => {
             e.stopPropagation();
-            bridge.openWithDefaultApp(filePath);
+            bridge.openWithDefaultApp(filePath).catch((e) => console.warn('[lightbox] open external failed:', e));
           }}
           className="absolute top-4 left-4 px-3 py-1.5 rounded-lg
             bg-white/10 hover:bg-white/20 text-white text-xs font-medium

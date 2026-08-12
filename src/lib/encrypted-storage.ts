@@ -22,6 +22,17 @@ function isEncrypted(val: unknown): val is string {
 }
 
 /**
+ * Single source of truth for (plaintext field, encrypted companion field)
+ * pairs. Both decryptStoredApiKeys AND the settingsStore hydration post-hook
+ * must iterate the same list — keeping two hardcoded copies made the
+ * videoAnalysis key "encrypted but never decrypted" on restart.
+ */
+export const ENCRYPTED_KEY_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
+  ['videoAnalysisApiKey', '_enc_videoAnalysisApiKey'],
+];
+
+/**
  * Decrypt all encrypted API key fields in the given state object.
  * Returns a partial state with decrypted plaintext values.
  */
@@ -29,13 +40,8 @@ export async function decryptStoredApiKeys(
   state: Record<string, unknown>,
 ): Promise<Record<string, string>> {
   const updates: Record<string, string> = {};
-  // Check each plaintext API key field — if its companion _enc_ field exists
-  // with an encrypted value, decrypt it.
-  const pairs: [string, string][] = [
-    ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
-  ];
 
-  for (const [plainField, encField] of pairs) {
+  for (const [plainField, encField] of ENCRYPTED_KEY_PAIRS) {
     const encVal = state[encField];
     if (isEncrypted(encVal)) {
       try {

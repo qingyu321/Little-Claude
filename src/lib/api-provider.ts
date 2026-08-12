@@ -1,12 +1,11 @@
 import { useProviderStore } from '../stores/providerStore';
-import { useSettingsStore, type ModelId } from '../stores/settingsStore';
+import { useSettingsStore } from '../stores/settingsStore';
 import {
   normalizeProviderModelName,
 } from './model-utils';
 
 const TIER_MAP: Record<string, 'opus' | 'sonnet' | 'haiku'> = {
   'claude-opus-4-6': 'opus',
-  'claude-opus-4-6-1m': 'opus',
   'claude-sonnet-4-6': 'sonnet',
   'claude-haiku-4-5-20251001': 'haiku',
 };
@@ -75,16 +74,13 @@ export function resolveModelOrError(selectedModel: string): ModelResolution {
  * Resolve the UI-selected model ID to the provider's actual model name.
  * When a provider is active, looks up the model mapping for the selected tier.
  * Returns the original model ID if no mapping is configured (silent fallback).
+ * (The CLI_MODEL_MAP that appended '[1m]' to 'claude-opus-4-6-1m' was removed
+ * with that dead model ID — the [1m] suffix is now supplied directly through
+ * provider modelMappings.)
  */
-/** Map internal model IDs to CLI-expected format */
-const CLI_MODEL_MAP: Partial<Record<ModelId, string>> = {
-  'claude-opus-4-6-1m': 'claude-opus-4-6[1m]',
-};
-
 export function resolveModelForProvider(selectedModel: string): string {
   const r = resolveModelOrError(selectedModel);
-  const model = r.ok ? r.model : selectedModel;
-  return CLI_MODEL_MAP[model as ModelId] ?? model;
+  return r.ok ? r.model : selectedModel;
 }
 
 export function supportsDeepSeekThinking(model: string): boolean {

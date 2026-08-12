@@ -24,6 +24,11 @@ function obfuscatePlugin(): import('vite').Plugin {
       for (const key in bundle) {
         const chunk = bundle[key];
         if (chunk.type === 'chunk') {
+          // Skip vendor chunks: they are public third-party code (no secrecy
+          // value), and control-flow flattening + base64 string arrays on the
+          // biggest chunks measurably slows startup parsing and the render
+          // hot path for every user. Obfuscate business code only.
+          if (chunk.name.startsWith('vendor-')) continue;
           const result = JavaScriptObfuscator.obfuscate(chunk.code, {
             compact: true,
             controlFlowFlattening: true,

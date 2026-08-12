@@ -200,6 +200,22 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
     const p = useProviderStore.getState().providers.find((pr) => pr.id === providerId);
     if (!p) return;
     try {
+      // M11: the export contains the PLAINTEXT API key — confirm before
+      // writing it to disk (the file may end up in a synced folder or
+      // pasted into a chat).
+      // NOTE: window.confirm is async-bridged in Tauri and returns a
+      // Promise<boolean> — `!window.confirm(...)` would be true for ANY
+      // promise and never block. Must use plugin-dialog's await confirm.
+      if (p.apiKey) {
+        const { confirm: askConfirm } = await import('@tauri-apps/plugin-dialog');
+        const ok = await askConfirm(t('provider.exportKeyWarning'), {
+          title: t('provider.exportTitle'),
+          kind: 'warning',
+          okLabel: t('common.confirm'),
+          cancelLabel: t('common.cancel'),
+        });
+        if (!ok) return;
+      }
       const json = exportProvider(p);
       const { save: saveDialog } = await import('@tauri-apps/plugin-dialog');
       const filePath = await saveDialog({

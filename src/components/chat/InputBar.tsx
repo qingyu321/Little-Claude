@@ -757,7 +757,8 @@ export function InputBar() {
   }, [executeImmediateCommand]);
 
   // --- Submit ---
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(
+    async (submitText?: string, opts?: { preserveDraft?: boolean }) => {
     // Capture tabId at the start of submission
     let tabId = useSessionStore.getState().selectedSessionId;
     if (!tabId) {
@@ -771,7 +772,10 @@ export function InputBar() {
 
     // Read input from store directly (not closure) so that async callers
     // like handlePlanApprove (setInput + rAF) always see the latest value.
-    const rawInput = getActiveTabState().inputDraft || textareaRef.current?.getText() || '';
+    // submitText overrides the editor content (H6: auto-send of messages
+    // queued while a disk-loaded session was still loading).
+    const rawInput =
+      submitText ?? (getActiveTabState().inputDraft || textareaRef.current?.getText() || '');
     let text = rawInput.trim();
 
     // Plan approval shortcut: empty Enter triggers approve & execute flow
@@ -870,7 +874,9 @@ export function InputBar() {
       text = `${text}\n\n${t('input.attachedFiles')}\n${filePaths}`;
     }
 
-    setInputSync('');
+    // H6: a flush-triggered send (disk-load completion) must NOT clear what
+    // the user is currently typing — preserveDraft keeps the input untouched.
+    if (!opts?.preserveDraft) setInputSync('');
 
     // Silent restart: skip user message bubble (Code mode ExitPlanMode auto-recovery)
     if (silentRestartRef.current) {
@@ -896,11 +902,15 @@ export function InputBar() {
     // writes during streaming are unreliable — CLI may silently drop them.
     // Now we always queue during running state; messages are flushed FIFO when the
     // current turn completes (result event in useStreamProcessor).
+    // H6: queue during the disk-load window too (status 'running' with no
+    // stdinId yet) — previously such a submission spawned a SECOND process
+    // while loadSession was still appending history, inverting message order
+    // and overwriting the fresh 'running' status. The effect below flushes the
+    // first queued message once the load finishes.
     const currentTabState = getActiveTabState();
-    const existingStdinId = currentTabState.sessionMeta.stdinId;
     const currentStatus = currentTabState.sessionStatus;
 
-    if (existingStdinId && currentStatus === 'running') {
+    if (currentStatus === 'running') {
       useChatStore.getState().addPendingMessage(tabId, text);
       return;
     }
@@ -1283,6 +1293,37 @@ export function InputBar() {
           snapshotCliBackend: liveCliBackend,
           spawnedModel: liveResolvedModel,
         });
+        // M6: draft-promote race — when the first stream event's real CLI
+        // session_id beats this IPC response, chatStore moves the draft tab
+        // under the CLI id while we were awaiting, so the write above hit a
+        // now-missing draft key and was silently dropped. Re-apply the meta
+        // under the tab's current key (stdinId must survive or every
+        // follow-up message re-spawns a fresh CLI process). Guarded by an
+        // empty-stdinId check so we never clobber a newer session's meta.
+        // The target key comes from the stdinToTab reverse lookup, NOT from
+        // selectedSessionId — promoteDraft already repointed it to the CLI
+        // id; if the user switched to another idle tab in the meantime,
+        // selectedSessionId would be that tab and we'd write A's session
+        // meta into B (cross-session contamination).
+        if (tabId !== session.session_id && !useChatStore.getState().getTab(tabId)) {
+          const promotedKey = useSessionStore.getState().getTabForStdin(preGeneratedId);
+          const currentTab = promotedKey ? useChatStore.getState().getTab(promotedKey) : undefined;
+          if (promotedKey && currentTab && !currentTab.sessionMeta.stdinId) {
+            setSessionMeta(promotedKey, {
+              sessionId: session.session_id,
+              stdinId: preGeneratedId,
+              sessionOrigin: liveCliBackend,
+              envFingerprint: envFingerprint(),
+              snapshotMode: liveSessionMode,
+              snapshotModel: selectedModel,
+              snapshotThinking: liveThinkingSetting,
+              snapshotContextWindowMode: liveContextWindowMode,
+              snapshotProviderId: liveProviderId,
+              snapshotCliBackend: liveCliBackend,
+              spawnedModel: liveResolvedModel,
+            });
+          }
+        }
         // Note: stdinId → tabId mapping already registered before listener setup (TK-329)
 
         // Track the session and refresh conversation list
@@ -1309,11 +1350,53 @@ export function InputBar() {
         content: `Error: ${err}`,
         timestamp: Date.now(),
       });
+      // Spawn failure — restore queued messages to the draft (same semantics
+      // as the exit-path Bug B recovery) instead of stranding them in the
+      // pending queue, where nothing will ever drain them.
+      const remainingPending = useChatStore.getState().getTab(tabId)?.pendingUserMessages ?? [];
+      if (remainingPending.length > 0) {
+        const draft = useChatStore.getState().getTab(tabId)?.inputDraft ?? '';
+        const pendingText = remainingPending.join('\n\n');
+        useChatStore.getState().setInputDraft(
+          tabId,
+          draft ? `${draft}\n\n${pendingText}` : pendingText,
+        );
+        useChatStore.getState().clearPendingMessages(tabId);
+      }
     }
   }, [hasActiveSession, workingDirectory, selectedModel, sessionMode, files, clearFiles]);
 
   // Keep ref in sync so executeImmediateCommand can call latest handleSubmit
   handleSubmitRef.current = handleSubmit;
+
+  // H6: flush the first pending message once a disk-load finishes. During
+  // handleLoadSession the tab is 'running' with no stdinId, so submissions
+  // queue instead of spawning a second process; the normal FIFO drain only
+  // runs on result events (which a plain load never emits) — so when the
+  // status leaves 'running' with no live stdin, send the first queued
+  // message ourselves. Subsequent queued messages are drained by the usual
+  // result-event mechanism once this send starts streaming.
+  // Guard on `=== 'completed'` specifically — the ONLY 'completed' state with
+  // a non-empty pending list is the load-completion path:
+  //   · load done           → 'completed', pending>0  → flush ✓
+  //   · user Stop           → 'completed', but Stop clears pending first
+  //   · stream result done  → 'completed', but stdinId is still live
+  //   · process exit        → 'idle' — NOT flushed (Bug B restores pending
+  //     to the input draft; auto-sending there would bypass the user's
+  //     decision to re-send or not)
+  //   · load error          → 'error' — stays manual
+  const pendingCount = useActiveTab((t) => t.pendingUserMessages.length);
+  const hasLiveStdin = useActiveTab((t) => !!t.sessionMeta.stdinId);
+  useEffect(() => {
+    if (sessionStatus === 'completed' && !hasLiveStdin && pendingCount > 0) {
+      const tid = useSessionStore.getState().selectedSessionId;
+      const next = tid ? useChatStore.getState().shiftPendingMessage(tid) : undefined;
+      if (next) {
+        // preserveDraft: this send must not clear what the user is typing.
+        void handleSubmit(next, { preserveDraft: true });
+      }
+    }
+  }, [sessionStatus, hasLiveStdin, pendingCount, handleSubmit]);
 
   // handleStreamMessage and handleBackgroundStreamMessage are provided by
   // useStreamProcessor hook (see src/hooks/useStreamProcessor.ts).
@@ -1685,6 +1768,18 @@ export function InputBar() {
                   useChatStore.getState().setSessionMeta(stopTabId, { stdinId: undefined });
                   useChatStore.getState().setSessionStatus(stopTabId, 'completed');
                   useChatStore.getState().setActivityStatus(stopTabId, { phase: 'completed' });
+                  // H6: Stop abandons the queued messages — clear the queue
+                  // so the flush effect can't auto-send them, and put them
+                  // back into the input draft for the user to re-send or
+                  // discard at will.
+                  const queued = useChatStore.getState().flushPendingMessages(stopTabId);
+                  if (queued.length > 0) {
+                    const draft = useChatStore.getState().getTab(stopTabId)?.inputDraft ?? '';
+                    useChatStore.getState().setInputDraft(
+                      stopTabId,
+                      [draft, ...queued].filter(Boolean).join('\n\n'),
+                    );
+                  }
                 }
                 if (sid) {
                   await bridge.killSession(sid).catch(() => {});
@@ -1709,7 +1804,7 @@ export function InputBar() {
             </button>
           )}
           <button
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             disabled={isAwaiting || (!input.trim() && !activePrefix)}
             className={`flex-shrink-0 self-end w-8 h-8 rounded-[10px]
               flex items-center justify-center transition-smooth

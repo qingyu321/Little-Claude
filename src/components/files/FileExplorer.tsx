@@ -143,7 +143,7 @@ function ContextMenu({ menu, onClose, callbacks }: {
     {
       label: t('files.openDefault'),
       icon: <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M12 9v4H4V5h4" /><path d="M8 8l6-6M10 2h4v4" /></svg>,
-      action: () => { bridge.openWithDefaultApp(menu.path); onClose(); },
+      action: () => { bridge.openWithDefaultApp(menu.path).catch((e) => console.warn('[files] open default failed:', e)); onClose(); },
     },
     ...(isMac() ? [
       {

@@ -64,7 +64,33 @@ export function isNewer(latest: string, current: string): boolean {
   // 核心版本相同 → 比较预发布段
   if (!c.pre && l.pre) return false; // 最新是预发布而本地已正式 → 不视为更新
   if (c.pre && !l.pre) return true; // 本地预发布 → 正式版可更新
-  return l.pre > c.pre;
+  // Semver identifier comparison: numeric segments compare numerically
+  // ('alpha.10' > 'alpha.9'), alphanumeric segments lexically, numeric <
+  // alphanumeric, and more identifiers > fewer (equal prefix). The previous
+  // `Number()` mapping turned letters into NaN — NaN !== NaN short-circuits
+  // every comparison, so 'alpha.10' vs 'alpha.9' (and even 'alpha.2' vs
+  // 'alpha.10') always judged "not newer".
+  const pa = l.pre.split('.');
+  const pb = c.pre.split('.');
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const a = pa[i] ?? '';
+    const b = pb[i] ?? '';
+    if (a === '') return false; // 少段 pre < 多段 pre（'alpha' < 'alpha.1'）
+    if (b === '') return true;
+    const na = Number(a);
+    const nb = Number(b);
+    const aNum = !Number.isNaN(na);
+    const bNum = !Number.isNaN(nb);
+    if (aNum && bNum) {
+      if (na !== nb) return na > nb;
+    } else if (aNum !== bNum) {
+      return !aNum; // 数字段优先级低于字母段（semver）
+    } else if (a !== b) {
+      return a > b; // 字母段按字典序
+    }
+  }
+  return false;
 }
 
 /** 从 Rust 同步真实生效的资源版本（权威：Rust 决定加载哪个目录）。 */

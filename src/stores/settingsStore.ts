@@ -5,7 +5,7 @@ import {
   DEEPSEEK_V4_PRO,
   normalizeDeepSeekModelName,
 } from '../lib/model-utils';
-import { decryptStoredApiKeys, encryptApiKey } from '../lib/encrypted-storage';
+import { decryptStoredApiKeys, encryptApiKey, ENCRYPTED_KEY_PAIRS } from '../lib/encrypted-storage';
 
 // --- Types ---
 
@@ -14,7 +14,7 @@ export type ColorTheme = 'black' | 'blue' | 'orange' | 'green';
 export type BackgroundTheme = 'garden' | 'sakura' | 'lake' | 'dusk' | 'ink' | 'vscode' | 'minimal' | 'deepseek';
 export type WallpaperQuality = 'fast' | 'balanced' | 'quality';
 export type SecondaryPanelTab = 'files' | 'preview' | 'skills' | 'plugins' | 'interview';
-export type ModelId = 'claude-opus-4-6' | 'claude-opus-4-6-1m' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
+export type ModelId = 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 export type SessionMode = 'code' | 'ask' | 'plan' | 'bypass';
 export type FontFamily = 'system' | 'microsoft' | 'sourceHan' | 'lxgw' | 'mono';
 /** CLI permission mode for the SDK control protocol */
@@ -129,6 +129,9 @@ function migrateModelSelection(model: unknown): ModelId | undefined {
   // no longer maps Claude tier names to DeepSeek)
   if (model === 'claude-opus-4-6') return 'claude-opus-4-6';
   if (model === 'claude-sonnet-4-6') return 'claude-sonnet-4-6';
+  // 'claude-opus-4-6-1m' was removed as a selectable model (the "声明 1M"
+  // switch + [1m] suffix replaced it) — keep the migration so persisted
+  // selections from older installs still resolve.
   if (model === 'claude-opus-4-6-1m') return 'claude-opus-4-6';
   if (model === 'claude-haiku-4-5-20251001' || model === 'claude-haiku-4-5') return 'claude-sonnet-4-6';
 
@@ -640,7 +643,13 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ videoAnalysisModel: model.trim() })),
       setVideoAnalysisAsrModel: (model) =>
         set(() => ({ videoAnalysisAsrModel: model })),
-      setVideoAnalysisMultimodal: (cfg) =>
+      setVideoAnalysisMultimodal: (cfg) => {
+        // S3: route the key through the encrypting setter so the multimodal
+        // form's key is persisted encrypted too (previously set in plaintext
+        // and never survived a restart).
+        if (cfg.apiKey !== undefined && cfg.apiKey !== useSettingsStore.getState().videoAnalysisApiKey) {
+          useSettingsStore.getState().setVideoAnalysisApiKey(cfg.apiKey);
+        }
         set((state) => ({
           videoAnalysisBaseUrl:
             cfg.baseUrl !== undefined ? cfg.baseUrl.trim() : state.videoAnalysisBaseUrl,
@@ -650,7 +659,8 @@ export const useSettingsStore = create<SettingsState>()(
             cfg.apiKeyEnv !== undefined ? cfg.apiKeyEnv.trim() : state.videoAnalysisApiKeyEnv,
           videoAnalysisModel:
             cfg.model !== undefined ? cfg.model.trim() : state.videoAnalysisModel,
-        })),
+        }));
+      },
       setSpeechEnabled: (enabled) =>
         set(() => ({ speechEnabled: enabled })),
       setSpeechLanguage: (lang) =>
@@ -704,9 +714,10 @@ export const useSettingsStore = create<SettingsState>()(
               // would overwrite it. Skip fields whose _enc_* moved.
               const after = useSettingsStore.getState() as unknown as Record<string, unknown>;
               const safe: Record<string, string> = {};
-              for (const [plain, enc] of [
-                ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
-              ] as const) {
+              // Iterate the shared pair list (encrypted-storage.ts) so new
+              // encrypted keys are applied here automatically — the previous
+              // hardcoded copy silently dropped videoAnalysisApiKey.
+              for (const [plain, enc] of ENCRYPTED_KEY_PAIRS) {
                 if (updates[plain] && after[enc] === before[enc]) safe[plain] = updates[plain];
               }
               if (Object.keys(safe).length > 0) {
@@ -869,6 +880,15 @@ export const useSettingsStore = create<SettingsState>()(
         interviewMimoBaseUrl: state.interviewMimoBaseUrl,
         // S3: Persist encrypted api key, not plaintext
         _enc_interviewMimoApiKey: state._enc_interviewMimoApiKey,
+        // S3 (video analysis): same encrypted-key pattern as interview — the
+        // base URL / model / ASR settings were previously not persisted at
+        // all, so every restart silently wiped the whole video config.
+        videoAnalysisBaseUrl: state.videoAnalysisBaseUrl,
+        videoAnalysisApiKeyEnv: state.videoAnalysisApiKeyEnv,
+        _enc_videoAnalysisApiKey: state._enc_videoAnalysisApiKey,
+        videoAnalysisModel: state.videoAnalysisModel,
+        videoAnalysisAccelEnabled: state.videoAnalysisAccelEnabled,
+        videoAnalysisAsrModel: state.videoAnalysisAsrModel,
         interviewMimoApiKeyEnv: state.interviewMimoApiKeyEnv,
         interviewPreset: state.interviewPreset,
         interviewAsrModel: state.interviewAsrModel,
@@ -905,7 +925,11 @@ export function getEffectiveThinking(meta: { snapshotThinking?: ThinkingLevel } 
 export function isLargeContextMode(model?: string, mode?: ContextWindowMode): boolean {
   if (mode === 'large1m') return true;
   const lower = (model || '').toLowerCase();
-  return lower.includes('1m') || lower.includes('[1m]');
+  // Must mirror the Rust fallback inference (session.rs): explicit [1m] marker
+  // or MiMo family models. NO bare-substring '1m' match — any model name
+  // containing "1m" (e.g. a 200K "glm-5-1m" variant) would be misclassified
+  // as 1M and the two sides would drift apart.
+  return lower.includes('mimo') || lower.includes('[1m]');
 }
 
 export function getContextWindowForModel(model?: string, mode?: ContextWindowMode): number {
