@@ -1345,7 +1345,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const bgFlushStdinId = bgDrainTab?.sessionMeta.stdinId;
           if (bgNextMsg && bgFlushStdinId) {
             store.setSessionStatus(tabId, 'running');
-            store.setSessionMeta(tabId, { turnStartTime: Date.now(), turnStartSource: 'auto', lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0 });
+            store.setSessionMeta(tabId, { turnStartTime: Date.now(), turnStartSource: 'auto', lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0, compactTurnPending: undefined });
             store.setActivityStatus(tabId, { phase: 'thinking' });
             bridge.sendStdin(bgFlushStdinId, bgNextMsg).catch((err) => {
               console.error('[TC:bg] Failed to send pending message:', err);
@@ -2484,6 +2484,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                   lastProgressAt: retryTurnStartedAt,
                   inputTokens: 0,
                   outputTokens: 0,
+                  // A1-defensive: stale compact markers never outlive their turn.
+                  compactTurnPending: undefined,
                 });
                 setActivityStatus({ phase: 'thinking' });
                 agentActions.clearAgents();
@@ -2839,6 +2841,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               lastProgressAt: nextTurnStartedAt,
               inputTokens: 0,
               outputTokens: 0,
+              // A1-defensive: stale compact markers never outlive their turn
+              // (see InputBar send — same rationale).
+              compactTurnPending: undefined,
             });
             setActivityStatus({ phase: 'thinking' });
             agentActions.clearAgents();

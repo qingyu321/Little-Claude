@@ -934,6 +934,11 @@ export function InputBar() {
       lastProgressAt: turnStartedAt,
       inputTokens: 0,
       outputTokens: 0,
+      // A1-defensive: a stale compact-turn marker must never outlive its turn.
+      // If it leaked (e.g. a compact whose result never arrived), every later
+      // result would be misclassified as a compact turn — dropping the Ctx bar
+      // to 0% and discarding the session's token stats.
+      compactTurnPending: undefined,
     });
     useChatStore.getState().setActivityStatus(tabId, { phase: 'thinking' });
     lastStderrRef.current = ''; // Clear stale stderr before new turn

@@ -48,6 +48,26 @@ export interface LoadedSession {
   messages: ChatMessage[];
   agents: AgentData[];
   mainAgentStartTime: number;
+  /** Token/context stats recovered from the JSONL's assistant usage records.
+   *  Live-stream writes these into sessionMeta on result events; reopening a
+   *  session from disk left them undefined, so the Ctx bar read 0% (and the
+   *  sidebar counters read 0) until the next turn's result arrived. */
+  usage?: LoadedSessionUsage;
+}
+
+/** Same metric as the live path (fullInputContextBreakdown): the FULL
+ *  last-request context including cached tokens — not bare input_tokens. */
+export interface LoadedSessionUsage {
+  contextTokens: number;
+  contextInputTokens: number;
+  contextCacheReadTokens: number;
+  contextCacheCreationTokens: number;
+  /** Last turn's input/output (live-stream semantics). */
+  inputTokens: number;
+  outputTokens: number;
+  /** Cumulative across turns (per-JSONL-message, deduped by usage equality). */
+  totalInputTokens: number;
+  totalOutputTokens: number;
 }
 
 /**
@@ -86,6 +106,15 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
 
   // Collect tool_use_id → index mapping for binding tool results
   const toolUseIdToIndex = new Map<string, number>();
+
+  // Token/context recovery (see LoadedSession.usage): rebuild the in-memory
+  // counters from the JSONL's assistant usage records. Mirrors the live path —
+  // full context incl. cached tokens — and skips system text (compact
+  // continuations) just like the live path excludes compact turns.
+  let usageRec: LoadedSessionUsage | undefined;
+  let lastUsageKey = '';
+  let runningTotalInput = 0;
+  let runningTotalOutput = 0;
 
   for (const msg of rawMessages) {
     // Skip system-injected meta messages
@@ -152,6 +181,41 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
       }
     } else if (msg.type === 'assistant') {
       const blocks = msg.message?.content;
+      // Recover usage stats (contextTokens etc.) from this assistant record.
+      // A turn's usage is re-emitted per message block with identical values —
+      // dedupe by usage equality so cumulative totals count each turn once.
+      // System-text records (compact continuations) never contribute, matching
+      // the live path's wasCompactTurn exclusion.
+      const u = msg.message?.usage;
+      if (u && typeof u === 'object' && (u.input_tokens || u.output_tokens)) {
+        const hasSystemText = Array.isArray(blocks) && blocks.some(
+          (b: any) => b?.type === 'text' && isSystemText(b.text || ''));
+        if (!hasSystemText) {
+          const input = u.input_tokens || 0;
+          const output = u.output_tokens || 0;
+          const cacheRead = u.cache_read_input_tokens || 0;
+          const ccNested = u.cache_creation || {};
+          const cacheCreation = (u.cache_creation_input_tokens || 0)
+            + (ccNested.ephemeral_1h_input_tokens || 0)
+            + (ccNested.ephemeral_5m_input_tokens || 0);
+          const usageKey = `${input}|${output}|${cacheRead}|${cacheCreation}`;
+          if (usageKey !== lastUsageKey) {
+            lastUsageKey = usageKey;
+            runningTotalInput += input;
+            runningTotalOutput += output;
+          }
+          usageRec = {
+            contextTokens: input + cacheRead + cacheCreation,
+            contextInputTokens: input,
+            contextCacheReadTokens: cacheRead,
+            contextCacheCreationTokens: cacheCreation,
+            inputTokens: input,
+            outputTokens: output,
+            totalInputTokens: runningTotalInput,
+            totalOutputTokens: runningTotalOutput,
+          };
+        }
+      }
       if (Array.isArray(blocks)) {
         for (let blockIdx = 0; blockIdx < blocks.length; blockIdx++) {
           const block = blocks[blockIdx];
@@ -248,5 +312,5 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
     }
   }
 
-  return { messages, agents, mainAgentStartTime: sessionStartTime };
+  return { messages, agents, mainAgentStartTime: sessionStartTime, usage: usageRec };
 }

@@ -359,7 +359,23 @@ export function ConversationList() {
       if (useSessionStore.getState().selectedSessionId !== sessionId) {
         return;
       }
-      const { messages, agents } = parseSessionMessages(rawMessages);
+      const { messages, agents, usage } = parseSessionMessages(rawMessages);
+
+      // Restore token/context stats from the JSONL — the Ctx bar and sidebar
+      // counters are in-memory (written on result events), so without this a
+      // reopened session reads 0% / 0 tokens until the next turn's result.
+      if (usage) {
+        setSessionMeta(sessionId, {
+          contextTokens: usage.contextTokens,
+          contextInputTokens: usage.contextInputTokens,
+          contextCacheReadTokens: usage.contextCacheReadTokens,
+          contextCacheCreationTokens: usage.contextCacheCreationTokens,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalInputTokens: usage.totalInputTokens,
+          totalOutputTokens: usage.totalOutputTokens,
+        });
+      }
 
       // Apply agents
       for (const agent of agents) {
