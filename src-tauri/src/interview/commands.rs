@@ -62,7 +62,9 @@ async fn get_mimo_client(base_url: &str, proxy_url: Option<&str>) -> reqwest::Cl
 pub async fn interview_start_system_audio_raw(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<SystemAudioChunk>(4);
+    // channel 8：local ASR 推理期间（几百 ms~数秒）前端 push 命令被占用时，
+    // 采集线程还能继续投递 ~6.4s 音频（800ms × 8）而不丢 chunk。
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<SystemAudioChunk>(8);
     let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
     // 启动 WASAPI（chunk 以内存 WAV 字节经 channel 直传，不落盘）

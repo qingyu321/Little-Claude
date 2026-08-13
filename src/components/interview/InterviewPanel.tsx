@@ -9,7 +9,24 @@ import { HybridCompareCard } from './HybridCompareCard';
 
 // ── 多模态直连参数 ──
 const SILENCE_DURATION_MS = 1500;
+// 单题音频累积上限（800ms chunk × 75 ≈ 60s）。两道防线：
+// 1) 系统音频模式下底噪（0.001~0.01）判为语音 → 静音判句永不触发 →
+//    音频无限累积。超限强制判句，防止内存/请求体积失控；
+// 2) 超长连续语音（无 1.5s 停顿）也靠它强制分段，避免一次发送整段长音频。
+const MAX_QA_AUDIO_CHUNKS = 75;
+// 系统音频采集失败后自动重启的退避间隔与最大重试次数（防无限重启循环）。
+const SYS_AUDIO_RESTART_MS = 5000;
+const SYS_AUDIO_MAX_RESTARTS = 3;
+// 麦克风静音判定阈值：近场信号强（正常语音 peak 0.05+），0.01 同时压掉
+// 环境底噪（风扇/白噪声常在 0.001~0.01）——低于它判静音帧，防止底噪
+// 持续重置静音计时器导致音频无限累积。
 const AUDIO_MIN_PEAK = 0.01;
+// 系统音频静音判定阈值：WASAPI loopback 回采的扬声器输出（微信电话/
+// 腾讯会议）是远场弱信号，峰值常落在 0.001~0.01。沿用麦克风标准会把
+// 系统语音全判成静音帧 → mimoQuestionStartedRef 永不置位 → local 后端
+// 静音门控永不 finalize → 识别不出。与 Rust 侧 system_audio.rs 的静音线
+// （peak < 0.001 计 silent_chunks）对齐。
+const SYS_AUDIO_MIN_PEAK = 0.001;
 
 /** 阶段 → 状态点颜色与文案 */
 const PHASE_META: Record<InterviewPhase, { dot: string; glow?: string; pulse?: boolean }> = {
@@ -60,12 +77,13 @@ function computeWavPeakFromBase64(base64: string): number {
 }
 
 /** 裁剪单声道 16bit PCM 首尾静音样本，返回 [start, end) 字节偏移。
- *  阈值对应 peak≈0.01（与 AUDIO_MIN_PEAK 一致）；首尾各留 0.1s 余量，
- *  避免切掉起收的辅音。全静音时原样返回。 */
+ *  阈值对应 peak≈0.001（与 SYS_AUDIO_MIN_PEAK 一致——系统语音是弱信号，
+ *  0.01 会把整段裁光）；首尾各留 0.1s 余量，避免切掉起收的辅音。
+ *  全静音时原样返回。 */
 function trimSilencePcm(pcm: Uint8Array, sampleRate: number): { start: number; end: number } {
   const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.length);
   const total = Math.floor(pcm.length / 2);
-  const THRESHOLD = 328; // 32768 * 0.01
+  const THRESHOLD = 33; // 32768 * 0.001
   let first = 0;
   let last = total - 1;
   while (first < total && Math.abs(view.getInt16(first * 2, true)) < THRESHOLD) first++;
@@ -279,7 +297,17 @@ export function InterviewPanel() {
   // ── 多模态直连状态 ──
   const mimoAudioChunksRef = useRef<string[]>([]);
   const mimoQuestionStartedRef = useRef(false);
+  /** 系统音频模式下收到过任何 chunk（含静音帧）——local 后端静音门控据此
+   *  放行 finalize：系统语音即使幅度低于 SYS_AUDIO_MIN_PEAK（被判静音帧），
+   *  只要音频已推给本地 ASR 就允许转写（恢复老版本"有输入即转写"行为）。
+   *  纯麦克风模式不受影响（仍按非静音帧置位）。 */
+  const sysAudioInputSeenRef = useRef(false);
   const sysAudioRawActiveRef = useRef(false);
+  const sysAudioRestartCountRef = useRef(0);
+  const sysAudioRestartTimerRef = useRef<number | null>(null);
+  /** local 模式下非静音 chunk 计数：超过单题时长上限强制 finalize
+   *  （底噪判为语音时静音判句永不触发，防止 Rust 缓冲区无限累积） */
+  const localAudioChunkCountRef = useRef(0);
   const silenceSinceRef = useRef<number | null>(null);
   /** 引擎冷启动期间的音频暂存区：引擎就绪后一次性 flush */
   const pendingAudioRef = useRef<string[]>([]);
@@ -424,6 +452,8 @@ export function InterviewPanel() {
   const finalizeLocalAsr = useCallback(async () => {
     // 先重置标志位，防止推理期间重复触发
     mimoQuestionStartedRef.current = false;
+    sysAudioInputSeenRef.current = false;
+    localAudioChunkCountRef.current = 0;
     silenceSinceRef.current = null;
     mimoAudioChunksRef.current = [];
     debugLog('local-asr', 'running final inference...');
@@ -508,10 +538,14 @@ export function InterviewPanel() {
     if (elapsed < SILENCE_DURATION_MS) return;
 
     if (backend === 'local') {
-      // 从未捕获到非静音帧（纯静音环境）→ 跳过空推理，避免每 ~1.5s 一次
-      // 空 ASR 推理空转 CPU。mimoQuestionStartedRef 在非静音帧置位、
-      // finalizeLocalAsr 开头复位，与 mimo 分支的"曾有人声"语义一致。
-      if (!mimoQuestionStartedRef.current) return;
+      // 空推理保护：从未捕获到非静音帧 → 跳过空推理，避免每 ~1.5s 一次
+      // 空 ASR 推理空转 CPU。放行条件：
+      //  - mimoQuestionStartedRef：出现过非静音帧（幅度达标，正常语音路径）；
+      //  - sysAudioInputSeenRef：系统音频模式下收到过任何 chunk（含幅度不
+      //    达标被判静音帧的弱语音）——音频已推给本地 ASR，SenseVoice 能转写
+      //    弱信号，必须放行（恢复老版本"有输入即转写"行为）。
+      // 两者都在 finalizeLocalAsr 开头复位，与"曾有人声"语义一致。
+      if (!mimoQuestionStartedRef.current && !sysAudioInputSeenRef.current) return;
       await finalizeLocalAsr();
       return;
     }
@@ -567,6 +601,21 @@ export function InterviewPanel() {
           mimoAudioChunksRef.current.push(wavBase64);
           if (mimoAudioChunksRef.current.length === 1) {
             debugLog('mimo', 'speech started (mic), peak=%.4f', peak);
+          }
+          // 上限兜底：超长连续语音（无 1.5s 停顿）强制分段判句
+          if (mimoAudioChunksRef.current.length >= MAX_QA_AUDIO_CHUNKS) {
+            debugLog('mimo', 'mic chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
+            silenceSinceRef.current = null;
+            void finalizeMimoQuestion();
+          }
+        } else {
+          // local 模式：非静音 chunk 计数，超单题时长上限强制转写
+          localAudioChunkCountRef.current += 1;
+          if (localAudioChunkCountRef.current >= MAX_QA_AUDIO_CHUNKS) {
+            debugLog('mimo', 'local mic chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
+            localAudioChunkCountRef.current = 0;
+            silenceSinceRef.current = null;
+            void finalizeLocalAsr();
           }
         }
       }
@@ -643,6 +692,11 @@ export function InterviewPanel() {
   // ── 退出面试 ──
   useEffect(() => {
     if (active) return;
+    if (sysAudioRestartTimerRef.current !== null) {
+      clearTimeout(sysAudioRestartTimerRef.current);
+      sysAudioRestartTimerRef.current = null;
+    }
+    sysAudioRestartCountRef.current = 0;
     stopCapture();
     if (sysAudioRawActiveRef.current) {
       bridge.stopSystemAudioRaw().then(() => {
@@ -662,6 +716,10 @@ export function InterviewPanel() {
   // ── 组件卸载清理 ──
   useEffect(() => {
     return () => {
+      if (sysAudioRestartTimerRef.current !== null) {
+        clearTimeout(sysAudioRestartTimerRef.current);
+        sysAudioRestartTimerRef.current = null;
+      }
       const state = useInterviewStore.getState();
       if (state.active) {
         stopCapture();
@@ -710,6 +768,9 @@ export function InterviewPanel() {
       const backend = useSettingsStore.getState().interviewAsrBackend;
       const needsLocal = backend === 'local' || backend === 'hybrid';
 
+      // 收到过任何系统音频 chunk（含静音帧）——local 后端静音门控据此放行
+      sysAudioInputSeenRef.current = true;
+
       // Push to local ASR if active; buffer if engine still loading
       if (needsLocal && wavBase64) {
         if (localAsrActive) {
@@ -721,7 +782,7 @@ export function InterviewPanel() {
         }
       }
 
-      if (typeof peak === 'number' && peak < AUDIO_MIN_PEAK) {
+      if (typeof peak === 'number' && peak < SYS_AUDIO_MIN_PEAK) {
         // 静音帧：记录首次静音时间或累积判断
         if (silenceSinceRef.current === null) {
           silenceSinceRef.current = Date.now();
@@ -740,12 +801,61 @@ export function InterviewPanel() {
           if (mimoAudioChunksRef.current.length === 1) {
             debugLog('mimo', 'speech started (sys), peak=%.4f', peak);
           }
+          // 累积上限兜底：底噪判为语音导致静音判句永不触发时，强制分段判句
+          if (mimoAudioChunksRef.current.length >= MAX_QA_AUDIO_CHUNKS) {
+            debugLog('mimo', 'sys audio chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
+            silenceSinceRef.current = null;
+            void finalizeMimoQuestion();
+          }
+        } else {
+          // local 模式：非静音 chunk 计数，超单题时长上限强制转写
+          localAudioChunkCountRef.current += 1;
+          if (localAudioChunkCountRef.current >= MAX_QA_AUDIO_CHUNKS) {
+            debugLog('mimo', 'local sys audio chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
+            localAudioChunkCountRef.current = 0;
+            silenceSinceRef.current = null;
+            void finalizeLocalAsr();
+          }
         }
       }
     });
 
     const p2 = onSystemAudioError((err) => {
       debugWarn('sys-audio', 'system audio error:', err);
+      // 设备拔出/切换（如插拔耳机）导致采集退出 → 自动重启（带退避防循环）
+      const st = useInterviewStore.getState();
+      if (!st.active || !st.systemAudioEnabled) return;
+      if (sysAudioRestartCountRef.current >= SYS_AUDIO_MAX_RESTARTS) {
+        debugWarn('sys-audio', 'restart limit reached (%d), giving up', SYS_AUDIO_MAX_RESTARTS);
+        setAudioError('系统音频采集中断，且自动恢复失败。请检查音频设备后重新开启系统音频。');
+        sysAudioRawActiveRef.current = false;
+        return;
+      }
+      if (sysAudioRestartTimerRef.current !== null) return; // 已有重启计时在跑
+      sysAudioRestartCountRef.current += 1;
+      debugLog('sys-audio', 'scheduling restart #%d in %dms', sysAudioRestartCountRef.current, SYS_AUDIO_RESTART_MS);
+      sysAudioRestartTimerRef.current = window.setTimeout(() => {
+        sysAudioRestartTimerRef.current = null;
+        const st2 = useInterviewStore.getState();
+        if (!st2.active || !st2.systemAudioEnabled) return;
+        bridge.startSystemAudioRaw().then(() => {
+          // 竞态防护：invoke 在途期间用户退出了面试/关了开关 → 立即停掉，
+          // 否则采集线程无人负责停止（exit effect 的 stop 已因 SYS_AUDIO_RAW
+          // 为空而失败过）
+          const st3 = useInterviewStore.getState();
+          if (!st3.active || !st3.systemAudioEnabled) {
+            bridge.stopSystemAudioRaw().catch(() => {});
+            sysAudioRawActiveRef.current = false;
+            return;
+          }
+          sysAudioRawActiveRef.current = true;
+          sysAudioRestartCountRef.current = 0; // 重启成功，重置计数
+          debugLog('sys-audio', 'restarted after error');
+        }).catch((e) => {
+          debugWarn('sys-audio', 'restart failed:', e);
+          sysAudioRawActiveRef.current = false;
+        });
+      }, SYS_AUDIO_RESTART_MS);
     });
 
     const p3 = onSystemAudioStatus((status) => {
@@ -758,7 +868,7 @@ export function InterviewPanel() {
       p2.then((u) => u()).catch(() => {});
       p3.then((u) => u()).catch(() => {});
     };
-  }, [active, handleMimoSilence, incrementSystemAudioChunks, setSystemAudioStatus, localAsrActive]);
+  }, [active, handleMimoSilence, incrementSystemAudioChunks, setSystemAudioStatus, localAsrActive, finalizeMimoQuestion, finalizeLocalAsr]);
 
   // 退出时自动关闭系统音频
   useEffect(() => {
@@ -794,6 +904,8 @@ export function InterviewPanel() {
       finalizeQA();
       mimoAudioChunksRef.current = [];
       mimoQuestionStartedRef.current = false;
+      sysAudioInputSeenRef.current = false;
+      localAudioChunkCountRef.current = 0;
       silenceSinceRef.current = null;
       startListening();
       setIsTransitioning(true);

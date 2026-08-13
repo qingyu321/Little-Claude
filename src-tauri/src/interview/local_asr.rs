@@ -687,6 +687,11 @@ pub fn start_local_asr_session() -> Result<String, String> {
     ))
 }
 
+/// 单题音频缓冲上限（60s @16kHz，与前端 MAX_QA_AUDIO_CHUNKS 兜底语义一致）。
+/// 前端强制分段判句失效时（如静音判句被持续底噪重置），Rust 侧截断头部
+/// 保留最新音频，防止 Vec 无限增长与超长推理。
+const MAX_BUFFER_SAMPLES: usize = MODEL_SAMPLE_RATE as usize * 60;
+
 /// 推送音频数据到本地 ASR 引擎（WAV base64，单声道 16bit）。
 /// 只累积音频，不做推理——推理在 stop 时一次性完成，避免 UI 冻结。
 #[tauri::command]
@@ -695,19 +700,40 @@ pub fn push_local_asr_audio(wav_base64: String) -> Result<(), String> {
 
     let lock = match ACTIVE_SESSION.get() {
         Some(l) => l,
-        None => return Ok(()), // 引擎尚未启动（冷启动窗口），静默丢弃
+        None => {
+            // 引擎尚未启动（冷启动窗口）——前端有 pendingAudioRef 暂存，
+            // 这里丢弃属预期，仅记日志便于诊断音频丢失场景
+            eprintln!("[local-asr] push dropped: no active session (cold-start window)");
+            return Ok(());
+        }
     };
     let mut guard = match lock.lock() {
         Ok(g) => g,
-        Err(_) => return Ok(()), // Mutex 中毒，静默丢弃
+        Err(_) => {
+            eprintln!("[local-asr] push dropped: mutex poisoned");
+            return Ok(());
+        }
     };
     let (_engine, buffer) = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(()), // 引擎正在重启（stop→start 窗口），静默丢弃
+        None => {
+            // 引擎正在重启（stop→start 窗口）或推理中（session 被临时取走）
+            eprintln!("[local-asr] push dropped: session busy (restart or inference)");
+            return Ok(());
+        }
     };
 
     // 只累积，不做推理（SenseVoice OfflineRecognizer 是全量模型，逐帧推理极慢）
     buffer.extend_from_slice(&samples);
+    // 缓冲上限：截断头部，保留最新 60s（面试问题刚说完，旧音频无转写价值）
+    if buffer.len() > MAX_BUFFER_SAMPLES {
+        let drop = buffer.len() - MAX_BUFFER_SAMPLES;
+        buffer.drain(0..drop);
+        eprintln!(
+            "[local-asr] buffer cap reached (60s), dropped {} samples from head",
+            drop
+        );
+    }
     Ok(())
 }
 
@@ -769,71 +795,76 @@ pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
     Ok(result_text)
 }
 
-/// 转录并重置：取走当前缓冲区 → 推理 → 放回空缓冲区，不销毁引擎。
+/// 转录并重置：取走当前会话（引擎 + 缓冲区）→ 锁外推理 → 放回引擎与空缓冲区。
 /// 避免每次推理后重新加载 239MB 模型（~500ms-1s 冷启动）。
-/// 推理在锁外执行，引擎留在锁内供后续 push 继续使用。
+/// 推理期间锁不被持有：push_local_asr_audio 不会阻塞等待推理完成（推理
+/// 时长与缓冲音频成正比，长音频时持锁会卡住采集管道导致 chunk 丢弃）；
+/// 代价是推理期间 push 看到 session 被取走 → 静默丢弃（有日志）。
 #[tauri::command]
 pub fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
 
-    // 取出缓冲区，放回空 Vec，引擎保留
-    let buffer = {
+    // 取出整个 session（引擎 + 缓冲区），锁外推理
+    let session = {
         let lock = ACTIVE_SESSION
             .get()
             .ok_or("No active ASR session.")?;
         let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let (_, buf) = guard
-            .as_mut()
-            .ok_or("ASR engine not initialized.")?;
-        std::mem::replace(buf, Vec::new())
+        guard.take()
     };
 
-    if buffer.is_empty() {
+    let (engine, buffer) = match session {
+        Some(s) => s,
+        None => {
+            eprintln!("[local-asr] transcribe_and_reset: engine gone (busy or stopped)");
+            return Ok(String::new());
+        }
+    };
+
+    let result_text = if buffer.is_empty() {
         eprintln!("[local-asr] transcribe_and_reset: buffer is empty");
-        return Ok(String::new());
-    }
+        String::new()
+    } else {
+        // 推理在锁外执行
+        let audio_dur = buffer.len() as f32 / MODEL_SAMPLE_RATE as f32;
+        eprintln!(
+            "[local-asr] transcribe_and_reset: {:.1}s of audio ({} samples)...",
+            audio_dur, buffer.len()
+        );
 
-    // 推理在锁外执行
-    let audio_dur = buffer.len() as f32 / MODEL_SAMPLE_RATE as f32;
-    eprintln!(
-        "[local-asr] transcribe_and_reset: {:.1}s of audio ({} samples)...",
-        audio_dur, buffer.len()
-    );
-
-    // 需要借用 engine 做推理——短暂加锁只读访问
-    let result_text = {
-        let lock = ACTIVE_SESSION.get().unwrap();
-        let guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        match guard.as_ref() {
-            Some((engine, _)) => match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
-                Ok(text) => {
-                    let trimmed = text.trim().to_string();
-                    eprintln!(
-                        "[local-asr] transcribe_and_reset done: {} chars, \"{}\"",
-                        trimmed.len(),
-                        if trimmed.len() > 80 { &trimmed[..80] } else { &trimmed }
-                    );
-                    let _ = app.emit(
-                        "local-asr:transcript",
-                        serde_json::json!({
-                            "text": trimmed.clone(),
-                            "startTime": 0.0,
-                            "isFinal": true,
-                        }),
-                    );
-                    trimmed
-                }
-                Err(e) => {
-                    eprintln!("[local-asr] transcribe_and_reset inference error: {}", e);
-                    String::new()
-                }
-            },
-            None => {
-                eprintln!("[local-asr] transcribe_and_reset: engine gone");
+        match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
+            Ok(text) => {
+                let trimmed = text.trim().to_string();
+                eprintln!(
+                    "[local-asr] transcribe_and_reset done: {} chars, \"{}\"",
+                    trimmed.len(),
+                    if trimmed.len() > 80 { &trimmed[..80] } else { &trimmed }
+                );
+                let _ = app.emit(
+                    "local-asr:transcript",
+                    serde_json::json!({
+                        "text": trimmed.clone(),
+                        "startTime": 0.0,
+                        "isFinal": true,
+                    }),
+                );
+                trimmed
+            }
+            Err(e) => {
+                eprintln!("[local-asr] transcribe_and_reset inference error: {}", e);
                 String::new()
             }
         }
     };
+
+    // 放回引擎与空缓冲区（推理期间 push 被丢弃的音频在下一轮正常接收）
+    {
+        let lock = ACTIVE_SESSION
+            .get()
+            .ok_or("No active ASR session.")?;
+        let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
+        *guard = Some((engine, Vec::new()));
+    }
 
     Ok(result_text)
 }
