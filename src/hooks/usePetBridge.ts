@@ -19,9 +19,18 @@ import {
   showPetWindow,
 } from "../lib/pet/bridge";
 import { PET_THROTTLE_MS, EVOLUTION_PAIRS } from "../lib/pet/constants";
+import {
+  buildNotifyText,
+  ensureNotifyPermission,
+  sendPetNotification,
+  shouldNotify,
+  type NotifyLast,
+} from "../lib/pet/notify";
 import type {
+  PetAgent,
   PetBubbleMessage,
   PetMessageTemplates,
+  PetPhase,
   PetStatusPayload,
 } from "../lib/pet/types";
 
@@ -75,6 +84,12 @@ export function usePetBridge() {
     let timer: number | undefined;
     let lastJson: string | null = null;
     let unsubCmd: (() => void) | null = null;
+    // Notification state: per-agent phase of the last pushed payload (an
+    // active → completed/error transition is the notify trigger), per-agent
+    // cooldown, and a one-shot permission check.
+    let prevPhase: Partial<Record<PetAgent, PetPhase>> = {};
+    const lastNotify: Partial<Record<PetAgent, NotifyLast>> = {};
+    let permChecked = false;
 
     const showPet = () => {
       if (petShown) return;
@@ -116,6 +131,29 @@ export function usePetBridge() {
       });
       if (json === lastJson) return;
       lastJson = json;
+
+      // System notification on active → completed/error transitions. Per-agent
+      // cooldown + petNotify toggle; the 200ms trailing throttle debounces
+      // bursty store updates, and the transition check makes it idempotent.
+      const now = Date.now();
+      for (const agent of ["claude", "codex"] as const) {
+        const cur = computed[agent].phase;
+        const prev = prevPhase[agent];
+        prevPhase[agent] = cur; // always track, even when notifications are off
+        if (!settings.petNotify || !shouldNotify(prev, cur, lastNotify[agent] ?? null, now)) {
+          continue;
+        }
+        lastNotify[agent] = { phase: cur, at: now };
+        if (!permChecked) {
+          permChecked = true;
+          void ensureNotifyPermission();
+        }
+        // shouldNotify guarantees cur is completed/error here.
+        const kind = cur === "error" ? "error" : "completed";
+        const { title, body } = buildNotifyText(kind, agent, computed[agent].statusMessage ?? "");
+        void sendPetNotification(title, body);
+      }
+
       void emitPetStatus(toPayload(computed, settings.petScale, settings.petSkin));
     };
 

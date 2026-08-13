@@ -20,6 +20,8 @@ export function PetTab() {
   const setPetScale = useSettingsStore((s) => s.setPetScale);
   const petSkin = useSettingsStore((s) => s.petSkin);
   const setPetSkin = useSettingsStore((s) => s.setPetSkin);
+  const petNotify = useSettingsStore((s) => s.petNotify);
+  const setPetNotify = useSettingsStore((s) => s.setPetNotify);
 
   const [skins, setSkins] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
@@ -122,6 +124,35 @@ export function PetTab() {
             <span
               className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm
                 transition-smooth ${petEnabled ? 'translate-x-4.5' : 'translate-x-0.5'}`}
+            />
+          </button>
+        </label>
+      </div>
+
+      {/* ===== Completion notification toggle ===== */}
+      <div className="rounded-xl border border-border-subtle bg-bg-secondary/30 p-4 max-w-xl">
+        <label className="flex items-center justify-between cursor-pointer">
+          <div>
+            <span className="text-[13px] font-medium text-text-primary">
+              {t('pet.notify')}
+            </span>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              {t('pet.notifyHint')}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={petNotify}
+            onClick={() => setPetNotify(!petNotify)}
+            className={`relative inline-flex h-5 w-9 items-center rounded-full
+              transition-smooth flex-shrink-0 ml-3 ${
+                petNotify ? 'bg-accent' : 'bg-bg-tertiary'
+              }`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm
+                transition-smooth ${petNotify ? 'translate-x-4.5' : 'translate-x-0.5'}`}
             />
           </button>
         </label>

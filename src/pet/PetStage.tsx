@@ -171,7 +171,12 @@ export function PetStage({ config }: { config: PetSheetConfig }) {
           if (el >= 1) {
             fxQueueRef.current.shift();
             const next = fxQueueRef.current[0];
-            if (next) next.start = tMs;
+            if (next) {
+              next.start = tMs;
+            } else {
+              // Queue drained → back to variable-rate rendering.
+              engineRef.current?.setContinuous(false);
+            }
           }
         },
       },
@@ -232,8 +237,34 @@ export function PetStage({ config }: { config: PetSheetConfig }) {
     engineRef.current?.setScale(scale);
   }, [scale]);
 
+  // Idle liveliness: random one-shot actions every 8–15s. Skipped while the
+  // window is hidden, a drag is in progress, an FX sequence is running, or
+  // the pet is asleep. Skins without the state row make playAction a no-op.
+  useEffect(() => {
+    let timer: number | undefined;
+    const schedule = () => {
+      timer = window.setTimeout(() => {
+        if (
+          !document.hidden &&
+          !fxQueueRef.current.length &&
+          !dragRef.current &&
+          !engineRef.current?.isSleeping()
+        ) {
+          const act = ACTION_CYCLE[Math.floor(Math.random() * ACTION_CYCLE.length)];
+          engineRef.current?.playAction(act);
+        }
+        schedule();
+      }, 8000 + Math.random() * 7000);
+    };
+    schedule();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
   const onPointerDown = async (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
+    engineRef.current?.wake(); // input wake-up from sleep power-saving
     const win = getCurrentWindow();
     const pos = await win.outerPosition();
     dragRef.current = {
@@ -315,6 +346,8 @@ export function PetStage({ config }: { config: PetSheetConfig }) {
                 { type: "devolve", start: now + 650, dur: 1200 },
               ];
             }
+            // FX needs every frame — switch the engine to continuous mode.
+            engineRef.current?.setContinuous(true);
           } else {
             const act = ACTION_CYCLE[actionIdx.current % ACTION_CYCLE.length];
             actionIdx.current += 1;

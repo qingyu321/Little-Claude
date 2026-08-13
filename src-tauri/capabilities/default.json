@@ -15,6 +15,7 @@
     "core:window:allow-set-focus",
     "opener:default",
     "dialog:default",
-    "process:allow-exit"
+    "process:allow-exit",
+    "notification:default"
   ]
 }

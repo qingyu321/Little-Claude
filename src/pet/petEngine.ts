@@ -10,6 +10,13 @@
 
 import { PHASE_PRIORITY } from "../lib/pet/aggregate";
 import type { PetStatusPayload } from "../lib/pet/types";
+import {
+  AMBIENT_MAP,
+  AMBIENT_TIME_DRIVEN,
+  drawAmbient,
+  type AmbientKind,
+  type AmbientState,
+} from "./ambient";
 import { drawProceduralPet } from "./procedural";
 
 /** Sprite rows of a Codex-style spritesheet (8×9 grid) + a procedural sleep row. */
@@ -83,6 +90,29 @@ export interface PetFrameState {
 
 export function initialFrameState(): PetFrameState {
   return { state: "idle", frame: 0, accum: 0, idleMs: 0 };
+}
+
+/**
+ * Variable-rate redraw decision (pure — unit-testable).
+ * Redraw when: continuous mode (FX active), a time-driven ambient is live,
+ * or the animation frame/state actually changed. Idle frames (150ms) only
+ * repaint ~7×/s instead of 60×/s.
+ */
+export function shouldDrawFrame(
+  prev: PetFrameState,
+  next: PetFrameState,
+  continuous: boolean,
+  ambientTimeDriven: boolean,
+): boolean {
+  return continuous || ambientTimeDriven || prev.state !== next.state || prev.frame !== next.frame;
+}
+
+/**
+ * Whether the rAF loop should fully stop (sleep power saving). Decoupled from
+ * the pure stepFrame: it only reads the resulting state + continuous flag.
+ */
+export function shouldPauseRender(next: PetFrameState, continuous: boolean): boolean {
+  return next.state === "sleep" && !continuous;
 }
 
 /**
@@ -163,6 +193,21 @@ export class PetEngine {
   private sheet: HTMLImageElement | null = null;
   private opts: EngineOptions;
 
+  /** Continuous (every-frame) rendering — active while an FX queue runs. */
+  private continuous = false;
+  /** start()/stop() master switch (window visibility). */
+  private running = false;
+  /** Sleep power-saving pause: rAF fully stopped until an input wakes us. */
+  private sleepPaused = false;
+  /** Force one redraw (resume / scale change — backing store was cleared). */
+  private forceDraw = false;
+  /** Active ambient overlay (state ambience), or null. */
+  private ambient: AmbientState | null = null;
+  /** Next idle-heart schedule time (ms). */
+  private nextHeartAt = 0;
+  /** OffscreenCanvas cache for procedural frames, keyed by dev-pixel size. */
+  private procCache = new Map<string, CanvasImageSource>();
+
   constructor(
     private canvas: HTMLCanvasElement,
     private config: PetSheetConfig,
@@ -187,7 +232,9 @@ export class PetEngine {
     const next = resolvePetState(payload);
     if (next === this.frameState.state) return false;
     this.frameState = { state: next, frame: 0, accum: 0, idleMs: 0 };
+    this.setAmbientForState(next);
     this.opts.onStateChange?.(next);
+    this.resumeIfPaused();
     return true;
   }
 
@@ -195,6 +242,9 @@ export class PetEngine {
     if (scale === this.scale) return;
     this.scale = scale;
     this.syncBackingSize();
+    // Backing store was reset by the resize — force a repaint.
+    this.forceDraw = true;
+    this.resumeIfPaused();
   }
 
   /** Play a one-shot transient animation (e.g. click → jump/wave). Falls back
@@ -203,8 +253,60 @@ export class PetEngine {
     const cfg = this.config.states[state];
     if (cfg && !cfg.loop) {
       this.frameState = { state, frame: 0, accum: 0, idleMs: 0 };
+      this.setAmbientForState(state);
       this.opts.onStateChange?.(state);
+      this.resumeIfPaused();
     }
+  }
+
+  /** Toggle continuous rendering (FX queue non-empty). Wakes a paused loop. */
+  setContinuous(v: boolean) {
+    if (this.continuous === v) return;
+    this.continuous = v;
+    if (v) {
+      this.forceDraw = true;
+      this.resumeIfPaused();
+    }
+  }
+
+  /** Input wake-up: pointer down on the pet resumes a sleep-paused loop. */
+  wake() {
+    this.resumeIfPaused();
+  }
+
+  /** True while the pet is asleep (used to skip idle random actions). */
+  isSleeping(): boolean {
+    return this.sleepPaused || this.frameState.state === "sleep";
+  }
+
+  private setAmbientForState(state: PetStateKey) {
+    const spec = AMBIENT_MAP[state];
+    this.ambient = spec
+      ? { kind: spec.kind, start: performance.now(), until: spec.until === Infinity ? Infinity : performance.now() + spec.until }
+      : null;
+  }
+
+  private setAmbient(kind: AmbientKind, dur: number) {
+    this.ambient = {
+      kind,
+      start: performance.now(),
+      until: dur === Infinity ? Infinity : performance.now() + dur,
+    };
+  }
+
+  /** Idle occasionally floats a heart (8–15s random). */
+  private maybeScheduleHearts(now: number) {
+    if (this.frameState.state !== "idle" || now < this.nextHeartAt) return;
+    this.nextHeartAt = now + 8000 + Math.random() * 7000;
+    this.ambient = { kind: "hearts", start: now, until: now + 1200 };
+  }
+
+  private resumeIfPaused() {
+    if (!this.sleepPaused) return;
+    this.sleepPaused = false;
+    this.lastNow = 0;
+    this.forceDraw = true;
+    if (this.running) this.raf = requestAnimationFrame(this.tick);
   }
 
   private syncBackingSize() {
@@ -219,12 +321,16 @@ export class PetEngine {
   }
 
   start() {
+    this.running = true;
     this.lastNow = 0;
+    this.sleepPaused = false;
+    this.forceDraw = true;
     cancelAnimationFrame(this.raf);
     this.raf = requestAnimationFrame(this.tick);
   }
 
   stop() {
+    this.running = false;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
   }
@@ -232,19 +338,41 @@ export class PetEngine {
   private tick = (now: number) => {
     if (this.lastNow) {
       const dt = Math.min(now - this.lastNow, 100); // clamp long gaps (hidden window etc.)
+      const prev = this.frameState;
       this.frameState = stepFrame(
-        this.frameState,
+        prev,
         dt,
         this.config.states,
         this.opts.sleepAfterMs,
       );
-      this.draw();
+      if (this.frameState.state !== prev.state && this.frameState.state === "sleep") {
+        this.setAmbient("zzz", Infinity);
+      }
+      this.maybeScheduleHearts(now);
+      const ambientDriven =
+        this.ambient !== null &&
+        this.ambient.until > now &&
+        AMBIENT_TIME_DRIVEN.has(this.ambient.kind);
+      if (
+        this.forceDraw ||
+        shouldDrawFrame(prev, this.frameState, this.continuous, ambientDriven)
+      ) {
+        this.forceDraw = false;
+        this.draw(now);
+      }
+      if (shouldPauseRender(this.frameState, this.continuous)) {
+        // Sleep power saving: fully stop the rAF loop. Any input (status
+        // change, click, FX) resumes it via resumeIfPaused().
+        this.sleepPaused = true;
+        this.lastNow = now;
+        return;
+      }
     }
     this.lastNow = now;
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  private draw() {
+  private draw(now: number) {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
     const { w, h } = this.config.frame;
@@ -258,22 +386,74 @@ export class PetEngine {
       this.frameState = { state: "idle", frame: 0, accum: 0, idleMs: this.frameState.idleMs };
       if (!st) return; // no idle either — nothing to draw
     }
+    ctx.save();
+    if (this.frameState.state === "idle") {
+      // Idle breathing sway — frame-index driven, adds no extra redraws.
+      const sway = Math.sin((this.frameState.frame / 16) * Math.PI * 2) * 6 * (w / 96);
+      ctx.translate(sway, 0);
+    }
+    this.opts.fxHooks?.beforeDraw?.(ctx, now);
     if (this.sheet) {
       const f = this.config.frame;
       const sx = (this.frameState.frame % f.cols) * f.w;
       const sy = st.row * f.h;
-      ctx.save();
-      this.opts.fxHooks?.beforeDraw?.(ctx, performance.now());
       ctx.drawImage(this.sheet, sx, sy, f.w, f.h, 0, 0, w, h);
-      ctx.restore();
     } else {
-      ctx.save();
-      this.opts.fxHooks?.beforeDraw?.(ctx, performance.now());
-      drawProceduralPet(ctx, this.frameState.state, this.frameState.frame, st, w, h);
-      ctx.restore();
+      this.drawProceduralCached(ctx, st, w, h);
+    }
+    ctx.restore();
+    // State ambience (skin-agnostic; procedural skin skips its duplicates).
+    if (this.ambient) {
+      drawAmbient(
+        ctx,
+        this.ambient,
+        this.frameState.state,
+        this.frameState.frame,
+        now,
+        w,
+        h,
+        !this.config.sprite,
+      );
     }
     ctx.save();
-    this.opts.fxHooks?.afterDraw?.(ctx, performance.now());
+    this.opts.fxHooks?.afterDraw?.(ctx, now);
     ctx.restore();
+  }
+
+  /**
+   * Procedural frames are cached to OffscreenCanvas per (state, frame, device
+   * size) — a 192×208 pet with ~30 canvas ops only re-renders when the
+   * animation frame actually changes. The cache key includes the device-pixel
+   * size, so scale/dpr changes invalidate automatically (drawImage maps 1:1
+   * under the current dpr·scale transform).
+   */
+  private drawProceduralCached(
+    ctx: CanvasRenderingContext2D,
+    st: PetStateCfg,
+    w: number,
+    h: number,
+  ) {
+    const state = this.frameState.state;
+    const frame = this.frameState.frame;
+    if (typeof OffscreenCanvas === "undefined") {
+      drawProceduralPet(ctx, state, frame, st, w, h);
+      return;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const devW = Math.round(w * this.scale * dpr);
+    const devH = Math.round(h * this.scale * dpr);
+    const key = `${state}:${frame}:${devW}x${devH}`;
+    let c = this.procCache.get(key);
+    if (!c) {
+      c = new OffscreenCanvas(devW, devH);
+      const g = c.getContext("2d");
+      if (g) {
+        g.setTransform(this.scale * dpr, 0, 0, this.scale * dpr, 0, 0);
+        drawProceduralPet(g, state, frame, st, w, h);
+      }
+      if (this.procCache.size > 128) this.procCache.clear();
+      this.procCache.set(key, c);
+    }
+    ctx.drawImage(c, 0, 0, w, h);
   }
 }

@@ -59,7 +59,7 @@ function poseFor(state: PetStateKey, frame: number): Pose {
 }
 
 function drawEye(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   x: number,
   y: number,
   style: Pose["eyes"],
@@ -118,7 +118,12 @@ function drawEye(
   ctx.restore();
 }
 
-function drawMouth(ctx: CanvasRenderingContext2D, x: number, y: number, style: Pose["mouth"]) {
+function drawMouth(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  x: number,
+  y: number,
+  style: Pose["mouth"],
+) {
   ctx.save();
   ctx.strokeStyle = INK;
   ctx.lineWidth = 1.8;
@@ -156,7 +161,7 @@ function drawMouth(ctx: CanvasRenderingContext2D, x: number, y: number, style: P
 }
 
 export function drawProceduralPet(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   state: PetStateKey,
   frame: number,
   _cfg: PetStateCfg,

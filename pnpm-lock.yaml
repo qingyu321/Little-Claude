@@ -16,7 +16,7 @@ importers:
         version: 6.3.1
       '@codemirror/lang-html':
         specifier: ^6.4.11
-        version: 6.4.11
+        version: 6.4.12
       '@codemirror/lang-java':
         specifier: ^6.0.2
         version: 6.0.2
@@ -65,6 +65,9 @@ importers:
       '@tauri-apps/plugin-dialog':
         specifier: 2.7.2
         version: 2.7.2
+      '@tauri-apps/plugin-notification':
+        specifier: ^2.3.3
+        version: 2.3.3
       '@tauri-apps/plugin-opener':
         specifier: 2.5.4
         version: 2.5.4
@@ -94,7 +97,7 @@ importers:
         version: 4.25.4(@babel/runtime@7.28.6)(@codemirror/autocomplete@6.20.0)(@codemirror/language@6.12.1)(@codemirror/lint@6.9.4)(@codemirror/search@6.6.0)(@codemirror/state@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@codemirror/view@6.39.14)(codemirror@6.0.2)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       highlight.js:
         specifier: ^11.11.1
-        version: 11.11.1
+        version: 11.11.2
       react:
         specifier: ^19.1.0
         version: 19.2.4
@@ -271,8 +274,8 @@ packages:
   '@codemirror/lang-css@6.3.1':
     resolution: {integrity: sha512-kr5fwBGiGtmz6l0LSJIbno9QrifNMUusivHbnA1H6Dmqy4HZFte3UAICix1VuKo0lMPKQr2rqB+0BkKi/S3Ejg==}
 
-  '@codemirror/lang-html@6.4.11':
-    resolution: {integrity: sha512-9NsXp7Nwp891pQchI7gPdTwBuSuT3K65NGTHWHNJ55HjYcHLllr0rbIZNdOzas9ztc1EUVBlHou85FFZS4BNnw==}
+  '@codemirror/lang-html@6.4.12':
+    resolution: {integrity: sha512-pw2ReWKUqSkbvh76RAT4NYxiogRu+PWkR2ukAwO9uOgrm8uipkzjtKKtNpyeAQwHOqxEeSvAXZ6vr3AfyB9y/w==}
 
   '@codemirror/lang-java@6.0.2':
     resolution: {integrity: sha512-m5Nt1mQ/cznJY7tMfQTJchmrjdjQ71IDs+55d1GAa8DGaB8JXWsVCkVT284C3RTASaY43YknrK2X3hPO/J3MOQ==}
@@ -312,9 +315,6 @@ packages:
 
   '@codemirror/search@6.6.0':
     resolution: {integrity: sha512-koFuNXcDvyyotWcgOnZGmY7LZqEOXZaaxD/j6n18TCLx2/9HieZJ5H6hs1g8FiRxBD0DNfs0nXn17g872RmYdw==}
-
-  '@codemirror/state@6.5.4':
-    resolution: {integrity: sha512-8y7xqG/hpB53l25CIoit9/ngxdfoG+fx+V3SHBrinnhOtLvKHRyAJJuHzkWrR4YXXLX8eXBsejgAAxHUOdW1yw==}
 
   '@codemirror/state@6.7.1':
     resolution: {integrity: sha512-9QzNDgE4EYDnAHfrTlR2lwiPciiOymLtwKK+8yHQzCc7GXhAP9xdEbEJFy2IWB1j9UGUl9BsgMmTo/ImA02T7A==}
@@ -911,6 +911,9 @@ packages:
 
   '@tauri-apps/plugin-dialog@2.7.2':
     resolution: {integrity: sha512-pX0IGm1I3I6wc+zeKYcq1GSqogK6okCNX5fOdaNU5ab1AjGS6l1E5wFNjEb7meg7ZFSp0JUs+0jQGQNyOvLrsg==}
+
+  '@tauri-apps/plugin-notification@2.3.3':
+    resolution: {integrity: sha512-Zw+ZH18RJb41G4NrfHgIuofJiymusqN+q8fGUIIV7vyCH+5sSn5coqRv/MWB9qETsUs97vmU045q7OyseCV3Qg==}
 
   '@tauri-apps/plugin-opener@2.5.4':
     resolution: {integrity: sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ==}
@@ -1635,8 +1638,8 @@ packages:
   hastscript@9.0.1:
     resolution: {integrity: sha512-g7df9rMFX/SPi34tyGCyUBREQoKkapwdY/T04Qn9TDWfHhAYt4/I0gMVirzK5wEzeUqIjEB+LXC/ypb7Aqno5w==}
 
-  highlight.js@11.11.1:
-    resolution: {integrity: sha512-Xwwo44whKBVCYoliBQwaPvtd/2tYFkRQtXDWj1nackaV2JPXx3L0+Jvd8/qCJ2p+ML0/XVkJ2q+Mr+UVdpJK5w==}
+  highlight.js@11.11.2:
+    resolution: {integrity: sha512-oaXMACAU0kzOMXBjWpNcX+vlwSBCIAiZ9BHa7gA15NOTtT2L/l8OSZDuqS2XppOhZBPJ7hm4o8ep2kyuip2uEQ==}
     engines: {node: '>=12.0.0'}
 
   html-escaper@2.0.2:
@@ -2713,7 +2716,7 @@ snapshots:
   '@codemirror/autocomplete@6.20.3':
     dependencies:
       '@codemirror/language': 6.12.1
-      '@codemirror/state': 6.5.4
+      '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
       '@lezer/common': 1.5.1
 
@@ -2737,7 +2740,7 @@ snapshots:
       '@lezer/common': 1.5.1
       '@lezer/css': 1.3.0
 
-  '@codemirror/lang-html@6.4.11':
+  '@codemirror/lang-html@6.4.12':
     dependencies:
       '@codemirror/autocomplete': 6.20.0
       '@codemirror/lang-css': 6.3.1
@@ -2772,7 +2775,7 @@ snapshots:
   '@codemirror/lang-markdown@6.5.1':
     dependencies:
       '@codemirror/autocomplete': 6.20.0
-      '@codemirror/lang-html': 6.4.11
+      '@codemirror/lang-html': 6.4.12
       '@codemirror/language': 6.12.1
       '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
@@ -2835,19 +2838,15 @@ snapshots:
 
   '@codemirror/lint@6.9.4':
     dependencies:
-      '@codemirror/state': 6.5.4
+      '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
       crelt: 1.0.7
 
   '@codemirror/search@6.6.0':
     dependencies:
-      '@codemirror/state': 6.5.4
+      '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
       crelt: 1.0.7
-
-  '@codemirror/state@6.5.4':
-    dependencies:
-      '@marijn/find-cluster-break': 1.0.3
 
   '@codemirror/state@6.7.1':
     dependencies:
@@ -2856,7 +2855,7 @@ snapshots:
   '@codemirror/theme-one-dark@6.1.3':
     dependencies:
       '@codemirror/language': 6.12.1
-      '@codemirror/state': 6.5.4
+      '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
       '@lezer/highlight': 1.2.3
 
@@ -3300,6 +3299,10 @@ snapshots:
       '@tauri-apps/cli-win32-x64-msvc': 2.11.4
 
   '@tauri-apps/plugin-dialog@2.7.2':
+    dependencies:
+      '@tauri-apps/api': 2.11.1
+
+  '@tauri-apps/plugin-notification@2.3.3':
     dependencies:
       '@tauri-apps/api': 2.11.1
 
@@ -3817,7 +3820,7 @@ snapshots:
       '@codemirror/language': 6.12.1
       '@codemirror/lint': 6.9.4
       '@codemirror/search': 6.6.0
-      '@codemirror/state': 6.5.4
+      '@codemirror/state': 6.7.1
       '@codemirror/view': 6.39.14
 
   color-convert@2.0.1:
@@ -4140,7 +4143,7 @@ snapshots:
       property-information: 7.1.0
       space-separated-tokens: 2.0.2
 
-  highlight.js@11.11.1: {}
+  highlight.js@11.11.2: {}
 
   html-escaper@2.0.2: {}
 
@@ -4339,7 +4342,7 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.4
       devlop: 1.1.0
-      highlight.js: 11.11.1
+      highlight.js: 11.11.2
 
   lru-cache@5.1.1:
     dependencies:

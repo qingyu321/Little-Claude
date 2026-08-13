@@ -3,6 +3,8 @@ import type { PetPhase, PetStatusPayload } from "../../lib/pet/types";
 import {
   initialFrameState,
   resolvePetState,
+  shouldDrawFrame,
+  shouldPauseRender,
   STATE_MAPPING,
   stepFrame,
   type PetFrameState,
@@ -132,5 +134,49 @@ describe("stepFrame", () => {
     let fs: PetFrameState = { state: "wave", frame: 0, accum: 0, idleMs: 0 };
     fs = stepFrame(fs, 10, noWave, 60_000);
     expect(fs.state).toBe("idle");
+  });
+});
+
+describe("shouldDrawFrame", () => {
+  const prev: PetFrameState = { state: "idle", frame: 1, accum: 0, idleMs: 0 };
+  const same: PetFrameState = { state: "idle", frame: 1, accum: 0, idleMs: 0 };
+  const nextFrame: PetFrameState = { state: "idle", frame: 2, accum: 0, idleMs: 0 };
+  const nextState: PetFrameState = { state: "waiting", frame: 0, accum: 0, idleMs: 0 };
+
+  it("skips identical frames in variable-rate mode (idle ≈ 7fps, not 60)", () => {
+    expect(shouldDrawFrame(prev, same, false, false)).toBe(false);
+  });
+
+  it("redraws when the animation frame changes", () => {
+    expect(shouldDrawFrame(prev, nextFrame, false, false)).toBe(true);
+  });
+
+  it("redraws when the state changes", () => {
+    expect(shouldDrawFrame(prev, nextState, false, false)).toBe(true);
+  });
+
+  it("redraws every frame in continuous mode (FX active)", () => {
+    expect(shouldDrawFrame(prev, same, true, false)).toBe(true);
+  });
+
+  it("redraws every frame while a time-driven ambient is live", () => {
+    expect(shouldDrawFrame(prev, same, false, true)).toBe(true);
+  });
+});
+
+describe("shouldPauseRender", () => {
+  const sleep: PetFrameState = { state: "sleep", frame: 0, accum: 0, idleMs: 0 };
+  const idle: PetFrameState = { state: "idle", frame: 0, accum: 0, idleMs: 0 };
+
+  it("fully stops the rAF loop once asleep (power saving)", () => {
+    expect(shouldPauseRender(sleep, false)).toBe(true);
+  });
+
+  it("keeps rendering during sleep while an FX sequence runs", () => {
+    expect(shouldPauseRender(sleep, true)).toBe(false);
+  });
+
+  it("never pauses outside sleep", () => {
+    expect(shouldPauseRender(idle, false)).toBe(false);
   });
 });

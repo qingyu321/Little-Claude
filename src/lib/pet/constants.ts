@@ -28,6 +28,9 @@ export const PET_BUBBLE_TTL_COMPLETED_MS = 8000;
 /** Idle (no state change) duration before the pet falls asleep (ms). */
 export const PET_SLEEP_AFTER_MS = 60_000;
 
+/** Min gap between system notifications for the same agent (ms). */
+export const NOTIFY_COOLDOWN_MS = 30_000;
+
 /**
  * Evolution pairs: skin id → the skin it transforms into when clicked.
  * Used by both windows — the pet window plays the FX sequence (golden tassel
