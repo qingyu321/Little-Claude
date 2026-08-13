@@ -767,10 +767,13 @@ pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
             match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
                 Ok(text) => {
                     let trimmed = text.trim().to_string();
+                    // 日志预览按字符截断（字节切片 [..80] 会在多字节 UTF-8
+                    // 字符中间 panic — 中文转写 >80 字节时闪退）
+                    let preview = preview_chars(&trimmed, 80);
                     eprintln!(
                         "[local-asr] Inference done: {} chars, \"{}\"",
                         trimmed.len(),
-                        if trimmed.len() > 80 { &trimmed[..80] } else { &trimmed }
+                        preview
                     );
                     let _ = app.emit(
                         "local-asr:transcript",
@@ -835,10 +838,12 @@ pub fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, S
         match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
             Ok(text) => {
                 let trimmed = text.trim().to_string();
+                // 预览按字符截断 — 见推理路径注释（字节切片会 panic 闪退）
+                let preview = preview_chars(&trimmed, 80);
                 eprintln!(
                     "[local-asr] transcribe_and_reset done: {} chars, \"{}\"",
                     trimmed.len(),
-                    if trimmed.len() > 80 { &trimmed[..80] } else { &trimmed }
+                    preview
                 );
                 let _ = app.emit(
                     "local-asr:transcript",
@@ -949,6 +954,13 @@ fn decode_wav_base64_to_f32(_base64: &str) -> Result<Vec<f32>, String> {
     Err("Local ASR not compiled".to_string())
 }
 
+/// 日志预览：按字符（非字节）截断。
+/// 字节切片 `&s[..n]` 会在多字节 UTF-8（中文/emoji）字符中间 panic —
+/// 转写文本 >80 字节时闪退的根因，禁止直接对字符串做字节切片。
+fn preview_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 /// 线性重采样
 fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
     if src_rate == dst_rate {
@@ -966,4 +978,38 @@ fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
         out.push(samples[i0] * (1.0 - frac) + samples[i1] * frac);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_never_panics_on_multibyte_boundaries() {
+        // 中文每个字 3 字节：100 字 = 300 字节，旧实现 &s[..80] 会切在
+        // 字符中间 panic（80 不是 3 的倍数）
+        let cn = "中".repeat(100);
+        let p = preview_chars(&cn, 80);
+        assert_eq!(p.chars().count(), 80); // 80 个字符
+        assert_eq!(p.len(), 240); // 字节长度保持完整字符（80×3），未在中间切断
+
+        // emoji 4 字节边界
+        let emoji = "🎤".repeat(60);
+        assert_eq!(preview_chars(&emoji, 30).chars().count(), 30);
+
+        // 短文本 / 空文本
+        assert_eq!(preview_chars("短", 80), "短");
+        assert_eq!(preview_chars("", 80), "");
+
+        // 混合中英
+        let mixed = format!("面试问题{}", "abc".repeat(50));
+        let p = preview_chars(&mixed, 80);
+        assert_eq!(p.chars().count(), 80);
+    }
+
+    #[test]
+    fn preview_caps_at_ascii_too() {
+        let long_ascii = "a".repeat(200);
+        assert_eq!(preview_chars(&long_ascii, 80), "a".repeat(80));
+    }
 }
