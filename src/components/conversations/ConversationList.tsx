@@ -92,6 +92,7 @@ export function ConversationList() {
   const customPreviews = useSessionStore((s) => s.customPreviews);
   const setCustomPreview = useSessionStore((s) => s.setCustomPreview);
   const runningSessions = useSessionStore((s) => s.runningSessions);
+  const sessionStatuses = useSessionStore((s) => s.sessionStatuses);
   const contentSearchResults = useSessionStore((s) => s.contentSearchResults);
   const isContentSearching = useSessionStore((s) => s.isContentSearching);
   const searchSessionContent = useSessionStore((s) => s.searchSessionContent);
@@ -776,7 +777,7 @@ export function ConversationList() {
           sessions={items}
           isExpanded={isExpanded(project)}
           selectedId={selectedId}
-          runningSessions={runningSessions}
+          sessionStatuses={sessionStatuses}
           pinnedSessions={pinnedSessions}
           archivedSessions={archivedSessions}
           customPreviews={customPreviews}
@@ -813,7 +814,7 @@ export function ConversationList() {
                 key={session.id}
                 session={session}
                 isSelected={selectedId === session.id}
-                isRunning={runningSessions.has(session.id)}
+                sessionStatus={sessionStatuses.get(session.id)}
                 isPinned={pinnedSessions.has(session.id)}
                 isArchived={archivedSessions.has(session.id)}
                 displayName={displayName(session)}

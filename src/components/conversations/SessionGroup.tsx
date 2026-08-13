@@ -2,6 +2,7 @@ import { useMemo, memo } from 'react';
 import { SessionListItem } from '../../lib/tauri-bridge';
 import { SessionItem } from './SessionItem';
 import { useT } from '../../lib/i18n';
+import type { SessionStatus } from '../../stores/sessionStore';
 
 /** Determine date category for a timestamp */
 function getDateCategory(ms: number): 'today' | 'yesterday' | 'thisWeek' | 'earlier' {
@@ -27,7 +28,7 @@ interface SessionGroupProps {
   sessions: SessionListItem[];
   isExpanded: boolean;
   selectedId: string | null;
-  runningSessions: Set<string>;
+  sessionStatuses: ReadonlyMap<string, SessionStatus>;
   pinnedSessions: Set<string>;
   archivedSessions: Set<string>;
   customPreviews: Record<string, string>;
@@ -52,7 +53,7 @@ export const SessionGroup = memo(function SessionGroup({
   sessions,
   isExpanded,
   selectedId,
-  runningSessions,
+  sessionStatuses,
   pinnedSessions,
   archivedSessions,
   customPreviews,
@@ -192,7 +193,7 @@ export const SessionGroup = memo(function SessionGroup({
                   key={session.id}
                   session={session}
                   isSelected={selectedId === session.id}
-                  isRunning={runningSessions.has(session.id)}
+                  sessionStatus={sessionStatuses.get(session.id)}
                   isPinned={true}
                   isArchived={archivedSessions.has(session.id)}
                   displayName={getDisplayName(session)}
@@ -225,7 +226,7 @@ export const SessionGroup = memo(function SessionGroup({
                   key={session.id}
                   session={session}
                   isSelected={selectedId === session.id}
-                  isRunning={runningSessions.has(session.id)}
+                  sessionStatus={sessionStatuses.get(session.id)}
                   isPinned={false}
                   isArchived={archivedSessions.has(session.id)}
                   displayName={getDisplayName(session)}

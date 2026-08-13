@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SessionListItem } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { t as tStatic } from '../../lib/i18n';
+import type { SessionStatus } from '../../stores/sessionStore';
 
 function formatRelativeTime(ms: number): string {
   if (!ms) return '';
@@ -50,7 +51,9 @@ function HighlightedSnippet({ text, query }: { text: string; query: string }) {
 interface SessionItemProps {
   session: SessionListItem;
   isSelected: boolean;
-  isRunning: boolean;
+  /** Lifecycle state for the status dot — running (pulse green), completed
+   *  (steady green), error (red), or undefined for never-active sessions. */
+  sessionStatus?: SessionStatus;
   isPinned?: boolean;
   isArchived?: boolean;
   displayName: string;
@@ -71,7 +74,7 @@ interface SessionItemProps {
 export const SessionItem = memo(function SessionItem({
   session,
   isSelected,
-  isRunning,
+  sessionStatus,
   isPinned,
   isArchived,
   displayName: name,
@@ -243,11 +246,17 @@ export const SessionItem = memo(function SessionItem({
             </svg>
           </span>
         )}
-        {isRunning && (
+        {sessionStatus === 'running' ? (
           <span className="flex-shrink-0 w-2 h-2 rounded-full bg-success
             shadow-[0_0_6px_var(--color-accent-glow)]
             animate-pulse-soft" />
-        )}
+        ) : sessionStatus === 'completed' ? (
+          // Finished conversation (text reply end): steady green, same
+          // completed semantics as the sidebar's current-session card.
+          <span className="flex-shrink-0 w-2 h-2 rounded-full bg-success" />
+        ) : sessionStatus === 'error' ? (
+          <span className="flex-shrink-0 w-2 h-2 rounded-full bg-error" />
+        ) : null}
       </div>
       {contentSnippet && (
         <div className="flex gap-1 mt-0.5 text-[10px] text-text-muted leading-relaxed">
