@@ -184,8 +184,13 @@ fn resolve_in(windows: &HashMap<String, u64>, model: &str) -> Option<u64> {
 }
 
 /// Background pre-warm for `.setup()` — never blocks startup, never panics.
+///
+/// MUST use tauri's async_runtime: `.setup()` runs on the event-loop thread
+/// (RuntimeRunEvent::Ready), which has no Tokio thread-local context — a bare
+/// `tokio::spawn` panics there ("there is no reactor running") and crashes the
+/// app at startup. tauri::async_runtime::spawn enters the runtime first.
 pub(crate) fn prewarm() {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if let Some((fetched_at, _)) = read_cache() {
             if now_secs().saturating_sub(fetched_at) <= CACHE_TTL_SECS {
                 return; // fresh enough — skip the network round trip
