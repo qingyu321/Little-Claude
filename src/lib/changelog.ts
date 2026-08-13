@@ -19,6 +19,43 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.1.5',
+    date: '2026-08-13',
+    highlights: {
+      zh: ['修复 v1.1.4 启动闪退（模型窗口预取裸 tokio::spawn panic → Tauri 异步运行时）+ 面试模块系统语音识别修复（微信电话/腾讯会议）+ 面试健壮性加固 + 桌宠系统通知与状态氛围 + 会话列表状态点四态'],
+      en: ['Fixed v1.1.4 startup crash (model-window prewarm panicked on a bare tokio::spawn → now on the Tauri async runtime) + interview system-audio recognition fix (WeChat calls / Tencent Meeting) + interview hardening + pet system notifications & state ambience + session status dots (running/completed/error)'],
+    },
+    categories: [
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '修复启动闪退 — v1.1.4 的模型窗口预取在事件循环线程裸启 tokio 协程，触发 "there is no reactor running" panic，部分环境下点开即闪退；现改走 Tauri 异步运行时，启动不阻塞也不再崩溃',
+            '修复面试模块无法识别系统语音 — 微信电话/腾讯会议的系统音频（远场弱信号）被麦克风阈值误判为静音；新增系统音频专用阈值（0.001）与麦克风阈值（0.01）分离判定，「系统音频有输入即转写」恢复老版本行为',
+            '静音裁切阈值放宽 — 弱语音不再被裁切逻辑裁光，转写内容完整',
+            '面试音频累积上限 — 超时强制分段判句，防底噪误判导致音频无限累积与转写积压',
+            '系统音频采集失败自动重启 — 5 秒退避最多 3 次，插拔设备/采集中断后自动恢复',
+            '本机 ASR 推理移出锁区 — 转写期间采集管道不再阻塞等待，音频不丢；缓冲上限双保险 + 丢弃日志',
+            '桌宠系统通知 — 任务完成/出错发 Windows 系统通知（带冷却去重），宠物被遮挡也不错过结果',
+            '桌宠状态氛围 — 引擎级覆盖效果（思考点点/写作光标/工具扫描线/完成彩带/失败泪滴/睡眠浮 Z/闲逛爱心），导入皮肤只有 idle 帧也能看到状态',
+            '会话列表状态点四态常驻 — 运行中脉冲绿点/完成静态绿点/出错红点，以普通文本回复结尾的对话完成后也有绿点',
+          ],
+          en: [
+            'Fixed startup crash — v1.1.4 model-window prewarm spawned a bare tokio task on the event-loop thread ("there is no reactor running" panic) that crashed the app on launch in some environments; now uses the Tauri async runtime, non-blocking and stable',
+            'Fixed interview failing to hear system audio — WeChat/Teams-style system output (far-field weak signal) was misjudged as silence by the mic threshold; added a separate system-audio threshold (0.001) vs mic threshold (0.01), and restored the legacy "any system input → transcribe" behavior',
+            'Silence-trim threshold relaxed — weak speech is no longer trimmed away',
+            'Audio accumulation cap — forced segment finalization on timeout, preventing infinite buffering from noise misclassification',
+            'System-audio capture auto-restart — 5s backoff, up to 3 retries, self-heals after device unplug/switch',
+            'Local ASR inference moved out of the lock — capture pipeline never blocks on transcription; buffer cap as a second line of defense + drop logging',
+            'Pet system notifications — Windows toasts on task completion/error with cooldown dedup; results are never missed even when the pet is hidden',
+            'Pet state ambience — engine-level overlay effects (thinking dots / writing caret / tool scan line / confetti / tear / sleeping Zs / idle hearts); imported skins with only an idle row still show the current state',
+            'Session status dots (4 states) — pulsing green while running, steady green on completion, red on error; sessions ending in plain text also get the green dot',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.1.4',
     date: '2026-08-12',
     highlights: {
