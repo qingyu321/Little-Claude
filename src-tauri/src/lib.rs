@@ -5,6 +5,7 @@ pub mod interview;
 mod protocol;
 
 use commands::{ApiProvider, ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager, WatcherManager};
+use commands::model_windows::prewarm as prewarm_model_windows;
 use commands::session::cleanup_tracked_sessions;
 #[cfg(feature = "video-analysis")]
 use commands::video_analysis::install_bundled_video_analysis_skill;
@@ -2071,6 +2072,7 @@ pub fn run() {
         .manage(crate::commands::anthropic_proxy::ProxyManager::new())
         .manage(WatcherManager::default())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         // Custom protocol: serve frontend SPA from embedded binary (release mode).
         // In dev mode this is unused — Vite dev server handles all requests.
         .register_asynchronous_uri_scheme_protocol("tokico", |_ctx, request, responder| {
@@ -2152,11 +2154,19 @@ pub fn run() {
             #[cfg(not(desktop))]
             let _ = app;
 
+            // Model-window table pre-warm: fetch LiteLLM's model list in the
+            // background so the first session spawn / Ctx bar render resolves
+            // the declared context window without a blocking network round
+            // trip. Silent failure — the hardcoded fallback list still works.
+            prewarm_model_windows();
+
             eprintln!("[little-claude] setup done, {:?} since run()", t_run.elapsed());
             Ok(())
         }})
         .invoke_handler(tauri::generate_handler![
             start_claude_session,
+            commands::model_windows::get_model_context_window,
+            commands::model_windows::load_model_windows,
             preview_open_url,
             preview_refresh,
             preview_back,

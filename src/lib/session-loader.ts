@@ -2,6 +2,7 @@ import type { ChatMessage } from '../stores/chatStore';
 import { generateMessageId } from '../stores/chatStore';
 import type { AgentPhase } from '../stores/agentStore';
 import { isSystemText } from './system-text';
+import { semanticContextTokens } from './context-tokens';
 
 // 报告B9 复查: session reload used to inject full tool results straight into
 // memory, bypassing the 256 KiB cap that bounds live streams — reopening a
@@ -55,7 +56,7 @@ export interface LoadedSession {
   usage?: LoadedSessionUsage;
 }
 
-/** Same metric as the live path (fullInputContextBreakdown): the FULL
+/** Same metric as the live path (semanticContextTokens): the FULL
  *  last-request context including cached tokens — not bare input_tokens. */
 export interface LoadedSessionUsage {
   contextTokens: number;
@@ -198,18 +199,28 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
           const cacheCreation = (u.cache_creation_input_tokens || 0)
             + (ccNested.ephemeral_1h_input_tokens || 0)
             + (ccNested.ephemeral_5m_input_tokens || 0);
+          // E3: same semantics-aware metric as the live path (see
+          // context-tokens.ts) — DeepSeek-style usage (input already includes
+          // the cached share) uses input alone; Anthropic-style usage must sum
+          // all three. The CUMULATIVE total must use the same metric too:
+          // summing only the raw input_tokens (the uncached remainder on
+          // Anthropic) made a restored session's sidebar counter read ~0 while
+          // the live session counted full context — 10000x off on cache-heavy
+          // sessions. Live-path parity: per-turn inputTokens is the semantic
+          // full, and each turn's full counts into the running total once.
+          const fullInput = semanticContextTokens({ input, cacheRead, cacheCreation });
           const usageKey = `${input}|${output}|${cacheRead}|${cacheCreation}`;
           if (usageKey !== lastUsageKey) {
             lastUsageKey = usageKey;
-            runningTotalInput += input;
+            runningTotalInput += fullInput;
             runningTotalOutput += output;
           }
           usageRec = {
-            contextTokens: input + cacheRead + cacheCreation,
+            contextTokens: fullInput,
             contextInputTokens: input,
             contextCacheReadTokens: cacheRead,
             contextCacheCreationTokens: cacheCreation,
-            inputTokens: input,
+            inputTokens: fullInput,
             outputTokens: output,
             totalInputTokens: runningTotalInput,
             totalOutputTokens: runningTotalOutput,

@@ -88,20 +88,33 @@ export interface SessionMeta {
   stdinId?: string;
   /** Message ID of a pending processing card (for CLI slash commands) */
   pendingCommandMsgId?: string;
-  /** Accumulated input tokens from stream events (message_start) — per turn, reset each turn */
+  /** Input tokens of the CURRENT turn — semantics-aware full input (last-wins
+   *  overwrite on message_start/message_delta, not an accumulation): DeepSeek /
+   *  opencode-style usage reports the whole context incl. the cached share, so
+   *  summing it like an Anthropic increment double-counted every turn. Result
+   *  events overwrite it with the authoritative value. */
   inputTokens?: number;
+  /** Gate so a turn's input+cache usage is logged into the cumulative totals
+   *  exactly once — set on the first message_start/message_delta that carries
+   *  usage, cleared on the next message_start. */
+  turnInputLogged?: boolean;
   /** Accumulated output tokens from stream events (message_delta) — per turn, reset each turn */
   outputTokens?: number;
   /** Accumulated cache-read (cache hit) tokens — per turn (OpenAI-compat proxy path) */
   cacheReadTokens?: number;
   /** Accumulated cache-creation (cache miss) tokens — per turn (OpenAI-compat proxy path) */
   cacheCreationTokens?: number;
-  /** Full input context of the LAST request (input + cache-read + cache-creation).
-   *  B2 fix: authoritative "context used" for the Ctx bar and auto-compact —
-   *  input_tokens alone excludes cached content (95%+ of context in real sessions). */
+  /** Full input context of the LAST request — semantics-aware (see
+   *  context-tokens.ts): Anthropic-style endpoints sum input + cache-read +
+   *  cache-creation; DeepSeek-style endpoints use input alone (already
+   *  includes the cached share). B2 fix: authoritative "context used" for the
+   *  Ctx bar and auto-compact — input_tokens alone excludes cached content
+   *  (95%+ of context in real Anthropic sessions). */
   contextTokens?: number;
-  /** Breakdown of the last request's context (sums to contextTokens) — for the
-   *  Ctx bar tooltip and cache-miss detection. Only set on result events. */
+  /** Breakdown of the last request's context (raw fields; sums to contextTokens
+   *  only under Anthropic semantics — DeepSeek-style input already contains the
+   *  cached share). For the Ctx bar tooltip and cache-miss detection. Only set
+   *  on result events. */
   contextInputTokens?: number;
   contextCacheReadTokens?: number;
   contextCacheCreationTokens?: number;
@@ -530,8 +543,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   setSessionStatus: (tabId, status) => {
-    // Sync running state to sessionStore for tab indicators
-    useSessionStore.getState().setSessionRunning(tabId, status === 'running');
+    // Sync full lifecycle state to sessionStore for the conversation-list
+    // status dot (running/completed/error/idle — not just the busy flag, so a
+    // finished conversation keeps its dot until the session is active again).
+    useSessionStore.getState().setSessionStatus(tabId, status);
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => ({
         ...tab,
@@ -848,8 +863,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         });
       }
     }
-    // Sync running state to sessionStore for sidebar indicator (FI-1 fix)
-    useSessionStore.getState().setSessionRunning(tabId, tab.sessionStatus === 'running');
+    // Sync full lifecycle state to sessionStore for the sidebar indicator (FI-1
+    // fix) — the conversation list renders running/completed/error dots.
+    useSessionStore.getState().setSessionStatus(tabId, tab.sessionStatus);
     return true;
   },
 

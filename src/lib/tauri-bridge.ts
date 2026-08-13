@@ -517,6 +517,14 @@ export const bridge = {
   getProfileStats: () =>
     invoke<ProfileStats>('get_profile_stats'),
 
+  /** Model context window from the LiteLLM table cache (exact window, any value). */
+  getModelContextWindow: (model: string) =>
+    invoke<number | null>('get_model_context_window', { model }),
+
+  /** Full flattened { model-key → window } map for sync window resolution. */
+  loadModelWindows: () =>
+    invoke<Record<string, number>>('load_model_windows'),
+
   appendUsageRecord: (params: {
     session_id: string;
     message_id: string;

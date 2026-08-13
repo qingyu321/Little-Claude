@@ -494,27 +494,66 @@ pub async fn start_claude_session(
     // Inject the CLI's compact window ONLY for declared-1M models. The
     // frontend declares 200K for every non-1M model (getContextWindowForModel
     // has just two tiers), but 200K is a guess for unknown windows — a
-    // 128K/64K gateway model (qwen/glm/DeepSeek etc.) forced to a 200K
-    // declaration compacts at ~160K and hits the API's context-length error
-    // with no compact opportunity (and the UI's 160K hint never fires either).
-    // Non-1M models keep the CLI's own conservative ~80K inference (~70K
-    // compact), which never breaks a session — deepseek-v4-flash users can
-    // still opt into the full 1M window via the large1m contextWindowMode.
-    let declared_context_window = params.context_window.unwrap_or_else(|| {
-        params
-            .model
-            .as_deref()
-            .map(|model_name| {
-                let m = model_name.to_lowercase();
-                if m.contains("mimo") || m.contains("[1m]") {
-                    1_000_000
-                } else {
-                    200_000
-                }
-            })
-            .unwrap_or(200_000)
-    });
-    if declared_context_window >= 1_000_000 {
+    // 128K/64K gateway model (qwen/glm/DeepSeek V3-era chat/reasoner etc.)
+    // forced to a 200K declaration compacts at ~160K and hits the API's
+    // context-length error with no compact opportunity (and the UI's 160K
+    // hint never fires either). Non-1M models keep the CLI's own conservative
+    // ~80K inference (~70K compact), which never breaks a session. The
+    // DeepSeek V4 family (pro/flash) is 1M-context and IS declared (mirrors
+    // the frontend isLargeContextMode — keep both in sync); V3-era
+    // deepseek-chat/reasoner intentionally do NOT match.
+    // Resolve the declared context window:
+    //  1. The frontend's explicit value (already table/learned-aware).
+    //  2. The LiteLLM model-window cache (exact windows incl. 512K/262K —
+    //     see model_windows.rs) — third-party providers only; the official
+    //     Anthropic API's window is decided by the CLI's own first-party
+    //     capability table, and a stale community entry could over-declare
+    //     and make the CLI wait for an API rejection instead of compacting.
+    //  3. The hardcoded 1M-family list (offline fallback, mirrors the
+    //     frontend isLargeContextMode — keep both in sync).
+    //  4. 200K default.
+    let table_window = if params.provider_id.as_deref().is_some() {
+        match params.model.as_deref() {
+            Some(m) => crate::commands::model_windows::lookup_window(m).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let declared_context_window = params
+        .context_window
+        .map(|w| w as u64)
+        .or(table_window)
+        .unwrap_or_else(|| {
+            params
+                .model
+                .as_deref()
+                .map(|model_name| {
+                    let m = model_name.to_lowercase();
+                    // Mirrors the frontend isLargeContextMode (keep both in sync).
+                    // 1M-context families verified as of 2026-08; every other model
+                    // keeps the 200K fallback tier (see the frontend comment for
+                    // which near-1M variants intentionally do NOT match).
+                    if m.contains("mimo") || m.contains("[1m]")
+                        || m.starts_with("deepseek-v4") || m.contains("deepseek-v4")
+                        || m.contains("qwen3.5-plus") || m.contains("qwen3.6-plus")
+                        || m.contains("qwen3-coder-plus") || m.contains("glm-5.2")
+                        || m.contains("kimi-k3") || m.contains("minimax-m3")
+                        || m.contains("longcat-2")
+                    {
+                        1_000_000
+                    } else {
+                        200_000
+                    }
+                })
+                .unwrap_or(200_000)
+        });
+    // Inject the window into the CLI for any declared window >= 200K (the
+    // frontend/table may carry exact values like 262K/512K — the CLI caps its
+    // own AUTO_COMPACT_WINDOW at 200K for third-party models, so declaring
+    // them saves the unused context instead of compacting at ~167K). Values
+    // below 200K stay un-injected and keep the CLI's conservative inference.
+    if declared_context_window >= 200_000 {
         resolved_env.insert(
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
             declared_context_window.to_string(),

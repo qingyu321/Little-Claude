@@ -10,6 +10,7 @@ pub mod git;
 pub mod local_model;
 pub mod ls_persist;
 pub mod metadata;
+pub mod model_windows;
 pub mod pet;
 pub mod prereq;
 pub mod preview;

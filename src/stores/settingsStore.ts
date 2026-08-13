@@ -203,6 +203,15 @@ interface SettingsState {
   autoCompactThresholdTokens: number;
   /** User's chosen auto-compact timing policy (defaults to CLI-aligned 'auto'). */
   autoCompactMode: AutoCompactMode;
+  /** Learned 1M models from runtime evidence: a success turn whose context
+   *  exceeded 900K proves the model's real window is ≥1M (a 200K-class model
+   *  would have been rejected by the API long before). Next spawn declares 1M
+   *  automatically — the fallback for models the LiteLLM table doesn't know. */
+  learned1mModels: Record<string, boolean>;
+  /** LiteLLM model-window table cache { model-key → max_input_tokens }.
+   *  In-memory only (loaded once at startup via load_model_windows) so
+   *  getContextWindowForModel resolves synchronously during renders. */
+  modelWindows: Record<string, number>;
   /** Whether closing the window asks for confirmation (default true) */
   confirmOnClose: boolean;
   /** Whether a newer version is available (set by auto-check on startup) */
@@ -300,6 +309,8 @@ interface SettingsState {
   petScale: number;
   /** 桌面宠物 — 当前皮肤 id（"default" 或已导入宠物 id） */
   petSkin: string;
+  /** 桌面宠物 — 任务完成/出错时发送系统通知 */
+  petNotify: boolean;
   /** Transient request: open the settings panel on this tab (pet window "设置" button).
    *  Consumed once by SettingsPanel on mount/open, then cleared. NEVER persisted. */
   settingsOpenRequest: { tab: string } | null;
@@ -334,6 +345,8 @@ interface SettingsState {
   setThinkingLevel: (level: ThinkingLevel) => void;
   setContextWindowMode: (mode: ContextWindowMode) => void;
   setCliBackend: (backend: 'claude' | 'codex') => void;
+  setModelWindows: (modelWindows: Record<string, number>) => void;
+  learnModel1m: (model: string) => void;
   setAutoCompactThresholdTokens: (tokens: number) => void;
   setAutoCompactMode: (mode: AutoCompactMode) => void;
   setConfirmOnClose: (confirm: boolean) => void;
@@ -378,6 +391,7 @@ interface SettingsState {
   setPetEnabled: (enabled: boolean) => void;
   setPetScale: (scale: number) => void;
   setPetSkin: (skin: string) => void;
+  setPetNotify: (v: boolean) => void;
   setSettingsOpenRequest: (req: { tab: string } | null) => void;
   setWallpaperQuality: (quality: WallpaperQuality) => void;
   setWallpaperOpacity: (opacity: number) => void;
@@ -421,6 +435,8 @@ export const useSettingsStore = create<SettingsState>()(
       contextWindowMode: 'default',
       autoCompactThresholdTokens: 160_000,
       autoCompactMode: 'auto',
+      learned1mModels: {},
+      modelWindows: {},
       confirmOnClose: true,
       updateAvailable: false,
       updateVersion: '',
@@ -448,6 +464,7 @@ export const useSettingsStore = create<SettingsState>()(
       petEnabled: false,
       petScale: 1,
       petSkin: 'default',
+      petNotify: true,
       settingsOpenRequest: null,
       wallpaperName: '',
       wallpaperQuality: 'balanced' as WallpaperQuality,
@@ -572,6 +589,19 @@ export const useSettingsStore = create<SettingsState>()(
         }),
 
       setCliBackend: (cliBackend) => set(() => ({ cliBackend })),
+
+      /** Replace the in-memory LiteLLM table cache (called once at startup). */
+      setModelWindows: (modelWindows) => set(() => ({ modelWindows })),
+
+      /** Record a model as learned-1M (runtime evidence) so future spawns
+       *  declare its 1M window. Persisted; fires the toast flag once per model. */
+      learnModel1m: (model) => {
+        if (!model) return;
+        set((state) => {
+          if (state.learned1mModels[model]) return {};
+          return { learned1mModels: { ...state.learned1mModels, [model]: true } };
+        });
+      },
 
       setPreviewSidebarVisible: (previewSidebarVisible) =>
         set(() => ({ previewSidebarVisible })),
@@ -731,12 +761,14 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ petScale: scale })),
       setPetSkin: (skin) =>
         set(() => ({ petSkin: skin })),
+      setPetNotify: (v) =>
+        set(() => ({ petNotify: v })),
       setSettingsOpenRequest: (req) =>
         set(() => ({ settingsOpenRequest: req })),
     }),
     {
       name: 'tokenicode-settings',
-      version: 27,
+      version: 29,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -902,6 +934,15 @@ export const useSettingsStore = create<SettingsState>()(
             persisted.autoCompactMode = 'custom';
           }
         }
+        if (version < 28) {
+          // 桌宠完成通知：老用户升级默认开启（可在设置关闭）
+          persisted.petNotify = true;
+        }
+        if (version < 29) {
+          // Learned-1M map added (runtime evidence learning). Empty for
+          // existing users — models get learned on first 900K+ success turn.
+          (persisted as Record<string, unknown>).learned1mModels = {};
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -924,6 +965,7 @@ export const useSettingsStore = create<SettingsState>()(
         contextWindowMode: state.contextWindowMode,
         autoCompactThresholdTokens: state.autoCompactThresholdTokens,
         autoCompactMode: state.autoCompactMode,
+        learned1mModels: state.learned1mModels,
         confirmOnClose: state.confirmOnClose,
         updateAvailable: state.updateAvailable,
         updateVersion: state.updateVersion,
@@ -938,6 +980,7 @@ export const useSettingsStore = create<SettingsState>()(
         petEnabled: state.petEnabled,
         petScale: state.petScale,
         petSkin: state.petSkin,
+        petNotify: state.petNotify,
         wallpaperName: state.wallpaperName,
         wallpaperQuality: state.wallpaperQuality,
         wallpaperOpacity: state.wallpaperOpacity,
@@ -995,18 +1038,71 @@ export function getEffectiveThinking(meta: { snapshotThinking?: ThinkingLevel } 
   return meta?.snapshotThinking ?? useSettingsStore.getState().thinkingLevel;
 }
 
-export function isLargeContextMode(model?: string, mode?: ContextWindowMode): boolean {
-  if (mode === 'large1m') return true;
+/** Hardcoded 1M-family fallback — used only when the LiteLLM table cache is
+ *  empty (offline first run) and the model was never runtime-learned. Mirrors
+ *  the Rust fallback inference (session.rs). 1M-context families verified as
+ *  of 2026-08 (a 259K-token DeepSeek V4 session was previously misread as
+ *  200K-exceeded → constant 100% bar):
+ *   - deepseek-v4-pro / -flash (1M is standard for V4)
+ *   - mimo (presets mark the 1M tier explicitly as mimo-v2-pro[1m])
+ *   - qwen3.5-plus / qwen3.6-plus / qwen3-coder-plus (Alibaba; the open-weight
+ *     qwen3.5-397b and qwen3-max are 262K and intentionally do NOT match)
+ *   - glm-5.2 (Zhipu; glm-5 / glm-5.1 / glm-4.7 are 200K and do NOT match)
+ *   - kimi-k3 (Moonshot; kimi-k2.x are 256K and do NOT match)
+ *   - minimax-m3 (MiniMax; m2.x are 200K and do NOT match)
+ *   - longcat-2.x (Meituan)
+ * NO bare '1m' substring match — a 200K "glm-5-1m" variant must not be
+ * classified 1M (keeps the two sides from drifting apart). V3-era
+ * deepseek-chat/reasoner (128K/64K) intentionally do NOT match either. */
+function isKnown1mFamily(model?: string): boolean {
   const lower = (model || '').toLowerCase();
-  // Must mirror the Rust fallback inference (session.rs): explicit [1m] marker
-  // or MiMo family models. NO bare-substring '1m' match — any model name
-  // containing "1m" (e.g. a 200K "glm-5-1m" variant) would be misclassified
-  // as 1M and the two sides would drift apart.
-  return lower.includes('mimo') || lower.includes('[1m]');
+  return lower.includes('mimo') || lower.includes('[1m]')
+    || lower.startsWith('deepseek-v4') || lower.includes('deepseek-v4')
+    || lower.includes('qwen3.5-plus') || lower.includes('qwen3.6-plus')
+    || lower.includes('qwen3-coder-plus') || lower.includes('glm-5.2')
+    || lower.includes('kimi-k3') || lower.includes('minimax-m3')
+    || lower.includes('longcat-2');
 }
 
+/** Mirror of the Rust lookup (model_windows.rs): exact match on the bare id
+ *  or a key's last /-segment wins; substring fallback takes the MAXIMUM
+ *  window across hits (the model's own window is a property of the model,
+ *  provider-specific overrides are deployment details we can't see). */
+export function windowFromTable(table: Record<string, number>, model: string): number | undefined {
+  const m = model.trim().toLowerCase();
+  if (!m || !table || Object.keys(table).length === 0) return undefined;
+  if (table[m] != null) return table[m];
+  for (const [key, val] of Object.entries(table)) {
+    if (key === m || key.split('/').pop() === m) return val;
+  }
+  let best: number | undefined;
+  for (const [key, val] of Object.entries(table)) {
+    if (key.includes(m)) best = best === undefined ? val : Math.max(best, val);
+  }
+  return best;
+}
+
+export function isLargeContextMode(model?: string, mode?: ContextWindowMode): boolean {
+  if (mode === 'large1m') return true;
+  return getContextWindowForModel(model, mode) >= 900_000;
+}
+
+/** Resolve a model's context window — five tiers, most authoritative first:
+ *  1. Manual 大上下文 mode (user override, wins over everything).
+ *  2. Runtime-learned 1M (a success turn exceeded 900K of context).
+ *  3. LiteLLM table cache — exact window, ANY value (262K/512K/1M…), loaded
+ *     once at startup from the Rust cache (see model_windows.rs).
+ *  4. Hardcoded 1M-family list (offline fallback).
+ *  5. 200K default. */
 export function getContextWindowForModel(model?: string, mode?: ContextWindowMode): number {
-  return isLargeContextMode(model, mode) ? 1_000_000 : 200_000;
+  if (mode === 'large1m') return 1_000_000;
+  const st = useSettingsStore.getState();
+  if (model && st.learned1mModels[model]) return 1_000_000;
+  if (model) {
+    const tableWindow = windowFromTable(st.modelWindows, model);
+    if (tableWindow !== undefined) return tableWindow;
+  }
+  return isKnown1mFamily(model) ? 1_000_000 : 200_000;
 }
 
 export function getAutoCompactThreshold(

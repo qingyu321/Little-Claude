@@ -356,7 +356,10 @@ function ActivityIndicator({ activityStatus, sessionMeta, thinkingLength }: {
   // C1: same metric as the Ctx bar and auto-compact — the FULL last-request
   // context including cached tokens. Bare input_tokens reads ~5% of the real
   // usage on cache-heavy sessions (B2), so a 60% warning on it would never fire.
-  const contextTokens = sessionMeta.contextTokens ?? sessionMeta.inputTokens ?? 0;
+  // + output to match the CLI's own warning math (input+output against the
+  // output-reserved window — the threshold already reserves it).
+  const contextTokens = (sessionMeta.contextTokens ?? sessionMeta.inputTokens ?? 0)
+    + (sessionMeta.outputTokens ?? 0);
   const contextWarning = contextTokens > getContextWarningThreshold(
     resolvedModel,
     sessionMeta.snapshotContextWindowMode ?? contextWindowMode,
@@ -540,9 +543,11 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   // B2: prefer contextTokens — the full last-request input context INCLUDING
   // cached tokens. input_tokens alone excludes prompt-cache content (95%+ of
   // context in real sessions), making the bar read ~1% on long conversations.
+  // Fallback (streaming, before the first result) is inputTokens ONLY — output
+  // tokens are generated content, not context occupancy; adding them made the
+  // bar creep up during long replies and drop back at the result event.
   const used = Math.min(contextWindow, Math.max(0,
-    sessionMeta.contextTokens
-      ?? ((sessionMeta.inputTokens ?? 0) + (sessionMeta.outputTokens ?? 0)),
+    sessionMeta.contextTokens ?? (sessionMeta.inputTokens ?? 0),
   ));
   const available = Math.max(0, contextWindow - used);
   const percent = Math.min(100, Math.round((used / contextWindow) * 100));

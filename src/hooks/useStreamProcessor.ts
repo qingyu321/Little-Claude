@@ -18,6 +18,8 @@ import { useProviderStore } from '../stores/providerStore';
 import { t } from '../lib/i18n';
 import { cleanupStreamListener, registerStreamListener, clearLegacyListener } from '../lib/stream-cleanup';
 import { isSystemText } from '../lib/system-text';
+import { semanticContextTokens } from '../lib/context-tokens';
+import { showToast } from '../components/shared/Toast';
 
 // --- Error classification for user-facing messages ---
 // Each pattern maps to a friendly i18n key. Matched errors show the friendly
@@ -409,10 +411,12 @@ type StreamUsage = {
 /** B1/B2 fix: the FULL input context of a request. With prompt caching enabled
  * (the default), 95%+ of the context sits in cache_read_input_tokens — comparing
  * input_tokens alone against the compact threshold made auto-compact effectively
- * never fire (real data: input_tokens=6, cache_read=85163). */
+ * never fire (real data: input_tokens=6, cache_read=85163).
+ * Semantics-aware: DeepSeek/OpenAI-compatible endpoints already include the
+ * cached share in input_tokens (see context-tokens.ts), so summing all three
+ * there double-counts. */
 function fullInputContextTokens(usage: StreamUsage | undefined): number {
-  const b = fullInputContextBreakdown(usage);
-  return b.input + b.cacheRead + b.cacheCreation;
+  return semanticContextTokens(fullInputContextBreakdown(usage));
 }
 
 /** Split a request's full input context into its billable parts — new input,
@@ -591,7 +595,12 @@ function tryFireAutoCompact(
     settings.autoCompactThresholdTokens,
     settings.autoCompactMode,
   );
-  const contextTokens = fullInputContextTokens(msg.usage);
+  // Align the trigger metric with the CLI's own SDK logic (binary-verified:
+  // r = input + cacheCreation + cacheRead + output vs threshold). The
+  // threshold already reserves OUTPUT_RESERVATION_TOKENS for the reply, so
+  // counting output here matches its math — not counting it would leave the
+  // reservation double-reserved and compact ~one reply too late.
+  const contextTokens = fullInputContextTokens(msg.usage) + (msg.usage?.output_tokens ?? 0);
   if (contextTokens <= threshold) return false;
 
   const store = useChatStore.getState();
@@ -913,34 +922,71 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
         // Track tokens in background sessions (per-turn + cumulative total).
         // Skipped while a /compact card is pending — the summary request's
-        // usage is compression overhead, not dialogue.
-        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens
-            && !isCompactInFlight(tabId)) {
+        // usage is compression overhead, not dialogue. Same semantics-aware
+        // last-wins input handling as the foreground path (DeepSeek-style
+        // message_start reports the FULL input incl. cached share; opencode's
+        // tail usage arrives on the final message_delta — log each turn's
+        // input exactly once via the turnInputLogged gate).
+        if (evt.type === 'message_start' && !isCompactInFlight(tabId)) {
           const bgTab = store.getTab(tabId);
-          const delta = evt.message.usage.input_tokens;
-          store.setSessionMeta(tabId, {
-            inputTokens: (bgTab?.sessionMeta.inputTokens || 0) + delta,
-            totalInputTokens: (bgTab?.sessionMeta.totalInputTokens || 0) + delta,
-          });
+          if (evt.message?.usage?.input_tokens) {
+            const full = semanticContextTokens({
+              input: evt.message.usage.input_tokens,
+              cacheRead: evt.message.usage.cache_read_input_tokens || 0,
+              cacheCreation: evt.message.usage.cache_creation_input_tokens || 0,
+            });
+            const cacheRead = evt.message.usage.cache_read_input_tokens || 0;
+            const cacheCreation = evt.message.usage.cache_creation_input_tokens || 0;
+            store.setSessionMeta(tabId, {
+              inputTokens: full,
+              totalInputTokens: (bgTab?.sessionMeta.totalInputTokens || 0) + full,
+              cacheReadTokens: cacheRead,
+              totalCacheReadTokens: (bgTab?.sessionMeta.totalCacheReadTokens || 0) + cacheRead,
+              cacheCreationTokens: cacheCreation,
+              totalCacheCreationTokens: (bgTab?.sessionMeta.totalCacheCreationTokens || 0) + cacheCreation,
+              // Live Ctx bar (same as foreground): surface this request's full
+              // context now instead of freezing on the previous turn's value.
+              contextTokens: full,
+              contextInputTokens: evt.message.usage.input_tokens,
+              contextCacheReadTokens: cacheRead,
+              contextCacheCreationTokens: cacheCreation,
+              turnInputLogged: true,
+            });
+          } else {
+            store.setSessionMeta(tabId, { turnInputLogged: undefined });
+          }
         }
         if (evt.type === 'message_delta' && evt.usage?.output_tokens
             && !isCompactInFlight(tabId)) {
           const bgTab = store.getTab(tabId);
           const u = evt.usage;
           const deltaOut = u.output_tokens || 0;
-          const deltaIn = u.input_tokens || 0;
-          const deltaCacheRead = u.cache_read_input_tokens || 0;
-          const deltaCacheCreation = u.cache_creation_input_tokens || 0;
-          store.setSessionMeta(tabId, {
+          const updates: Parameters<typeof store.setSessionMeta>[1] = {
             outputTokens: (bgTab?.sessionMeta.outputTokens || 0) + deltaOut,
             totalOutputTokens: (bgTab?.sessionMeta.totalOutputTokens || 0) + deltaOut,
-            inputTokens: (bgTab?.sessionMeta.inputTokens || 0) + deltaIn,
-            totalInputTokens: (bgTab?.sessionMeta.totalInputTokens || 0) + deltaIn,
-            cacheReadTokens: (bgTab?.sessionMeta.cacheReadTokens || 0) + deltaCacheRead,
-            totalCacheReadTokens: (bgTab?.sessionMeta.totalCacheReadTokens || 0) + deltaCacheRead,
-            cacheCreationTokens: (bgTab?.sessionMeta.cacheCreationTokens || 0) + deltaCacheCreation,
-            totalCacheCreationTokens: (bgTab?.sessionMeta.totalCacheCreationTokens || 0) + deltaCacheCreation,
-          });
+          };
+          if (u.input_tokens && !bgTab?.sessionMeta.turnInputLogged) {
+            const full = semanticContextTokens({
+              input: u.input_tokens,
+              cacheRead: u.cache_read_input_tokens || 0,
+              cacheCreation: u.cache_creation_input_tokens || 0,
+            });
+            const cacheRead = u.cache_read_input_tokens || 0;
+            const cacheCreation = u.cache_creation_input_tokens || 0;
+            updates.inputTokens = full;
+            updates.totalInputTokens = (bgTab?.sessionMeta.totalInputTokens || 0) + full;
+            updates.cacheReadTokens = cacheRead;
+            updates.totalCacheReadTokens = (bgTab?.sessionMeta.totalCacheReadTokens || 0) + cacheRead;
+            updates.cacheCreationTokens = cacheCreation;
+            updates.totalCacheCreationTokens = (bgTab?.sessionMeta.totalCacheCreationTokens || 0) + cacheCreation;
+            // Same live-Ctx-bar treatment as message_start (see above).
+            updates.contextTokens = full;
+            updates.contextInputTokens = u.input_tokens;
+            updates.contextCacheReadTokens = cacheRead;
+            updates.contextCacheCreationTokens = cacheCreation;
+            updates.turnInputLogged = true;
+          }
+          store.setSessionMeta(tabId, updates);
           // NOTE: Usage persistence for the proxy path happens in Rust
           // (anthropic_proxy → usage_log). Accumulation above is runtime display.
         }
@@ -1272,28 +1318,61 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (!bgWasCompact) {
           const bgTab = store.getTab(tabId);
           const prevMeta = bgTab?.sessionMeta;
-          const resultInput = msg.usage?.input_tokens || 0;
           const resultOutput = msg.usage?.output_tokens || 0;
-          const streamedInput = prevMeta?.inputTokens || 0;
           const streamedOutput = prevMeta?.outputTokens || 0;
           const bd = fullInputContextBreakdown(msg.usage);
+          // E1: same semantics-aware drift correction as the foreground path —
+          // streamedInput is the semantic FULL input, so the raw input_tokens
+          // field must not be subtracted from it (negative on every Anthropic
+          // turn); when the stream never logged this turn (no usage on
+          // message_start/delta), log the authoritative value in full. Clamps
+          // keep usage-less failed results from draining the totals.
+          const resultFull = semanticContextTokens(bd);
+          const streamedLogged = prevMeta?.turnInputLogged === true;
+          const streamedInput = prevMeta?.inputTokens || 0;
+          const streamedCacheRead = prevMeta?.cacheReadTokens || 0;
+          const streamedCacheCreation = prevMeta?.cacheCreationTokens || 0;
           store.setSessionMeta(tabId, {
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
             turns: msg.num_turns,
-            inputTokens: resultInput,
+            inputTokens: resultFull,
             outputTokens: resultOutput,
-            totalInputTokens: (prevMeta?.totalInputTokens || 0) + (resultInput - streamedInput),
-            totalOutputTokens: (prevMeta?.totalOutputTokens || 0) + (resultOutput - streamedOutput),
-            // B2: full last-request context (incl. cached), same as foreground.
-            contextTokens: bd.input + bd.cacheRead + bd.cacheCreation,
-            // Breakdown for the Ctx bar tooltip + cache-miss detection
-            contextInputTokens: bd.input,
-            contextCacheReadTokens: bd.cacheRead,
-            contextCacheCreationTokens: bd.cacheCreation,
+            totalInputTokens: (prevMeta?.totalInputTokens || 0)
+              + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
+            totalOutputTokens: (prevMeta?.totalOutputTokens || 0)
+              + Math.max(0, resultOutput - streamedOutput),
+            totalCacheReadTokens: (prevMeta?.totalCacheReadTokens || 0)
+              + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
+            totalCacheCreationTokens: (prevMeta?.totalCacheCreationTokens || 0)
+              + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
+            cacheReadTokens: bd.cacheRead,
+            cacheCreationTokens: bd.cacheCreation,
+            // B2/E2: full last-request context (incl. cached), same as foreground.
+            // Usage-less results keep the streamed value instead of blanking.
+            ...(resultFull > 0 ? {
+              contextTokens: resultFull,
+              // Breakdown for the Ctx bar tooltip + cache-miss detection
+              contextInputTokens: bd.input,
+              contextCacheReadTokens: bd.cacheRead,
+              contextCacheCreationTokens: bd.cacheCreation,
+            } : {}),
             turnStartTime: undefined,
             lastProgressAt: undefined,
+            // Turn finished — the per-turn input gate resets with it (the next
+            // message_start re-arms logging for the fresh turn).
+            turnInputLogged: undefined,
           });
+          // F3: runtime learning — same evidence rule as the foreground path
+          // (success turn with >900K of context ⇒ real window is ≥1M).
+          const bgLearnedModel = prevMeta?.model || prevMeta?.spawnedModel || prevMeta?.snapshotModel;
+          if (msg.subtype === 'success' && resultFull > 900_000 && bgLearnedModel) {
+            const settings = useSettingsStore.getState();
+            if (!settings.learned1mModels[bgLearnedModel]) {
+              settings.learnModel1m(bgLearnedModel);
+              showToast(t('ctx.learned1m'), 'info');
+            }
+          }
           // Turn finished — pin the API-authoritative average on the speed
           // badge (pure API time — local tool waits excluded).
           useTokenSpeedStore.getState().end(tabId, resolveApiSpeed(msg));
@@ -1865,14 +1944,45 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Track input tokens from message_start (per-turn + cumulative total).
         // Skipped while a /compact card is pending — the summary request's
         // usage is compression overhead, not dialogue.
-        if (evt.type === 'message_start' && evt.message?.usage?.input_tokens
-            && !isCompactInFlight(tabId)) {
+        if (evt.type === 'message_start' && !isCompactInFlight(tabId)) {
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
-          const delta = evt.message.usage.input_tokens;
-          setSessionMeta({
-            inputTokens: (meta.inputTokens || 0) + delta,
-            totalInputTokens: (meta.totalInputTokens || 0) + delta,
-          });
+          if (evt.message?.usage?.input_tokens) {
+            // DeepSeek-style usage reports the FULL input incl. the cached
+            // share on message_start — it is the turn's whole context, so it
+            // OVERWRITES the per-turn counter and is logged into the totals
+            // exactly once (turnInputLogged gate), instead of being summed like
+            // an Anthropic increment (that summed the full context every turn
+            // and the bar inflated N-fold before each result corrected it).
+            const full = semanticContextTokens({
+              input: evt.message.usage.input_tokens,
+              cacheRead: evt.message.usage.cache_read_input_tokens || 0,
+              cacheCreation: evt.message.usage.cache_creation_input_tokens || 0,
+            });
+            const cacheRead = evt.message.usage.cache_read_input_tokens || 0;
+            const cacheCreation = evt.message.usage.cache_creation_input_tokens || 0;
+            setSessionMeta({
+              inputTokens: full,
+              totalInputTokens: (meta.totalInputTokens || 0) + full,
+              cacheReadTokens: cacheRead,
+              totalCacheReadTokens: (meta.totalCacheReadTokens || 0) + cacheRead,
+              cacheCreationTokens: cacheCreation,
+              totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0) + cacheCreation,
+              // Live Ctx bar: this usage IS the request's full context — surface
+              // it on message_start instead of freezing the bar on the previous
+              // turn's value until the result event arrives.
+              contextTokens: full,
+              contextInputTokens: evt.message.usage.input_tokens,
+              contextCacheReadTokens: cacheRead,
+              contextCacheCreationTokens: cacheCreation,
+              turnInputLogged: true,
+            });
+          } else {
+            // Anthropic-style message_start carries no usable usage — reset the
+            // gate so the final message_delta (opencode tail usage) can log
+            // this turn's input instead. A fresh message_start always means a
+            // fresh turn, so a stale gate from an interrupted turn is cleared.
+            setSessionMeta({ turnInputLogged: undefined });
+          }
         }
 
         // Track output tokens from message_delta (per-turn + cumulative total)
@@ -1881,22 +1991,39 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
           const u = evt.usage;
           const deltaOut = u.output_tokens || 0;
-          // OpenAI-compat proxy (opencode) sends the full tail usage on its final
-          // message_delta: input_tokens + cache fields. Accumulate them too, so
-          // input and cache (hit + miss) tokens are counted, not just output.
-          const deltaIn = u.input_tokens || 0;
-          const deltaCacheRead = u.cache_read_input_tokens || 0;
-          const deltaCacheCreation = u.cache_creation_input_tokens || 0;
-          setSessionMeta({
+          const updates: Parameters<typeof setSessionMeta>[0] = {
             outputTokens: (meta.outputTokens || 0) + deltaOut,
             totalOutputTokens: (meta.totalOutputTokens || 0) + deltaOut,
-            inputTokens: (meta.inputTokens || 0) + deltaIn,
-            totalInputTokens: (meta.totalInputTokens || 0) + deltaIn,
-            cacheReadTokens: (meta.cacheReadTokens || 0) + deltaCacheRead,
-            totalCacheReadTokens: (meta.totalCacheReadTokens || 0) + deltaCacheRead,
-            cacheCreationTokens: (meta.cacheCreationTokens || 0) + deltaCacheCreation,
-            totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0) + deltaCacheCreation,
-          });
+          };
+          // OpenAI-compat proxy (opencode) sends the full tail usage on its
+          // final message_delta: input_tokens + cache fields. The tail is the
+          // turn's authoritative input — log it exactly once (gate set by
+          // message_start when it carried usage) and last-wins the per-turn
+          // counter; previously it was added AGAIN on top of message_start's
+          // input, double-counting every turn.
+          if (u.input_tokens && !meta.turnInputLogged) {
+            const full = semanticContextTokens({
+              input: u.input_tokens,
+              cacheRead: u.cache_read_input_tokens || 0,
+              cacheCreation: u.cache_creation_input_tokens || 0,
+            });
+            const cacheRead = u.cache_read_input_tokens || 0;
+            const cacheCreation = u.cache_creation_input_tokens || 0;
+            updates.inputTokens = full;
+            updates.totalInputTokens = (meta.totalInputTokens || 0) + full;
+            updates.cacheReadTokens = cacheRead;
+            updates.totalCacheReadTokens = (meta.totalCacheReadTokens || 0) + cacheRead;
+            updates.cacheCreationTokens = cacheCreation;
+            updates.totalCacheCreationTokens = (meta.totalCacheCreationTokens || 0) + cacheCreation;
+            // Same live-Ctx-bar treatment as message_start — the tail usage is
+            // this request's full context, surface it now, not at result.
+            updates.contextTokens = full;
+            updates.contextInputTokens = u.input_tokens;
+            updates.contextCacheReadTokens = cacheRead;
+            updates.contextCacheCreationTokens = cacheCreation;
+            updates.turnInputLogged = true;
+          }
+          setSessionMeta(updates);
           // NOTE: Usage persistence for the OpenAI-compat proxy path now happens
           // in Rust (anthropic_proxy writes the authoritative usage directly to
           // usage_log). The CLI drops message_delta fields it doesn't know, so
@@ -2711,29 +2838,74 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           // Correct cumulative totals for any drift between streaming
           // accumulation and the authoritative result values.
           const meta = useChatStore.getState().getTab(tabId)?.sessionMeta ?? {};
-          const resultInput = msg.usage?.input_tokens || 0;
           const resultOutput = msg.usage?.output_tokens || 0;
-          const streamedInput = meta.inputTokens || 0;
           const streamedOutput = meta.outputTokens || 0;
           const bd = fullInputContextBreakdown(msg.usage);
+          // E1: the drift correction must use the SAME semantics-aware metric as
+          // the streaming path. streamedInput holds the semantic FULL input
+          // (input + cache for Anthropic-style endpoints), while the raw
+          // input_tokens field is only the uncached remainder — subtracting raw
+          // from full was negative on every Anthropic turn, deflating the
+          // sidebar's cumulative input counter toward zero (DeepSeek-style
+          // input already includes the cached share, so the mismatch hid there).
+          // The turnInputLogged gate tells us whether the stream logged this
+          // turn at all: logged → correct drift; not logged (no usage on
+          // message_start/delta) → log the authoritative value in full. The
+          // max(0, …) clamps keep a usage-less failed result from writing
+          // negative deltas that would drain the totals.
+          const resultFull = semanticContextTokens(bd);
+          const streamedLogged = meta.turnInputLogged === true;
+          const streamedInput = meta.inputTokens || 0;
+          const streamedCacheRead = meta.cacheReadTokens || 0;
+          const streamedCacheCreation = meta.cacheCreationTokens || 0;
           setSessionMeta({
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
             turns: msg.num_turns,
-            inputTokens: resultInput,
+            inputTokens: resultFull,
             outputTokens: resultOutput,
-            totalInputTokens: (meta.totalInputTokens || 0) + (resultInput - streamedInput),
-            totalOutputTokens: (meta.totalOutputTokens || 0) + (resultOutput - streamedOutput),
-            // B2: full last-request context (incl. cached) for the Ctx bar —
-            // input_tokens alone undercounts by the cache-read share.
-            contextTokens: bd.input + bd.cacheRead + bd.cacheCreation,
-            // Breakdown for the Ctx bar tooltip + cache-miss detection
-            contextInputTokens: bd.input,
-            contextCacheReadTokens: bd.cacheRead,
-            contextCacheCreationTokens: bd.cacheCreation,
+            totalInputTokens: (meta.totalInputTokens || 0)
+              + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
+            totalOutputTokens: (meta.totalOutputTokens || 0)
+              + Math.max(0, resultOutput - streamedOutput),
+            totalCacheReadTokens: (meta.totalCacheReadTokens || 0)
+              + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
+            totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0)
+              + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
+            cacheReadTokens: bd.cacheRead,
+            cacheCreationTokens: bd.cacheCreation,
+            // B2/E2: full last-request context (incl. cached) for the Ctx bar —
+            // input_tokens alone undercounts by the cache-read share. When the
+            // result carries no usable usage (CLI writes zero/missing), keep
+            // the streamed value instead of blanking the bar.
+            ...(resultFull > 0 ? {
+              contextTokens: resultFull,
+              // Breakdown for the Ctx bar tooltip + cache-miss detection
+              contextInputTokens: bd.input,
+              contextCacheReadTokens: bd.cacheRead,
+              contextCacheCreationTokens: bd.cacheCreation,
+            } : {}),
             turnStartTime: undefined,
             lastProgressAt: undefined,
+            // Turn finished — the per-turn input gate resets with it (the next
+            // message_start re-arms logging for the fresh turn).
+            turnInputLogged: undefined,
           });
+          // F3: runtime learning — a success turn whose context exceeded 900K
+          // proves the model's real window is ≥1M (a 200K-class model would
+          // have been rejected by the API long before that point). Record it
+          // so the next spawn declares 1M automatically — the fallback for
+          // models the LiteLLM table doesn't know. The fired-once
+          // autoCompactFired flag means a long session can grow past 200K
+          // post-compact, so this evidence actually arrives.
+          const learnedModel = meta.model || meta.spawnedModel || meta.snapshotModel;
+          if (msg.subtype === 'success' && resultFull > 900_000 && learnedModel) {
+            const settings = useSettingsStore.getState();
+            if (!settings.learned1mModels[learnedModel]) {
+              settings.learnModel1m(learnedModel);
+              showToast(t('ctx.learned1m'), 'info');
+            }
+          }
           // Turn finished — pin the API-authoritative average on the speed
           // badge (pure API time — local tool waits excluded).
           useTokenSpeedStore.getState().end(tabId, resolveApiSpeed(msg));

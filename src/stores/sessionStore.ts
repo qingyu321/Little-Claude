@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { bridge, SessionListItem, ContentSearchResult } from '../lib/tauri-bridge';
 import { encodeProjectName } from '../lib/platform';
 
+/** Full lifecycle state for the conversation-list status dot. The legacy
+ *  runningSessions Set stays as the "is it busy" projection (pet panel,
+ *  delete warnings); sessionStatuses carries the complete state so a
+ *  finished conversation (text reply end) still shows a dot. */
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'error';
+
 // Persist custom session names in localStorage as fast cache,
 // and sync to disk via Tauri backend for durability.
 const CUSTOM_PREVIEWS_KEY = 'tokenicode_custom_previews';
@@ -59,6 +65,9 @@ interface SessionState {
   customPreviews: Record<string, string>;
   /** Track which sessions are actively running (streaming/working) */
   runningSessions: Set<string>;
+  /** Full per-session lifecycle state (running/completed/error/idle) for the
+   *  conversation-list status dot — kept in sync with runningSessions. */
+  sessionStatuses: Map<string, SessionStatus>;
   /** Map stdinId → tabId so stream events can be routed to the correct session */
   stdinToTab: Record<string, string>;
   /** Content search results keyed by session ID */
@@ -79,6 +88,8 @@ interface SessionState {
   getDisplayName: (session: SessionListItem) => string;
   /** Mark a session as running (actively streaming/working) */
   setSessionRunning: (sessionId: string, running: boolean) => void;
+  /** Record a session's full lifecycle state; keeps runningSessions in sync. */
+  setSessionStatus: (sessionId: string, status: SessionStatus) => void;
   /** Check if a session is currently running */
   isSessionRunning: (sessionId: string) => boolean;
   /** Register a stdinId → tabId mapping (persisted to sessionStorage) */
@@ -113,6 +124,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   previousSessionId: null,
   customPreviews: loadCustomPreviewsSync(),
   runningSessions: new Set<string>(),
+  sessionStatuses: new Map(),
   stdinToTab: loadStdinToTabSync(),
   contentSearchResults: new Map<string, ContentSearchResult>(),
   isContentSearching: false,
@@ -187,7 +199,22 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     const next = new Set(state.runningSessions);
     if (running) next.add(sessionId);
     else next.delete(sessionId);
-    return { runningSessions: next };
+    // Legacy boolean path (pet panel / delete flow): a false has no status to
+    // report, so drop the full-state entry too rather than guess.
+    const statuses = new Map(state.sessionStatuses);
+    if (running) statuses.set(sessionId, 'running');
+    else statuses.delete(sessionId);
+    return { runningSessions: next, sessionStatuses: statuses };
+  }),
+
+  setSessionStatus: (sessionId, status) => set((state) => {
+    const statuses = new Map(state.sessionStatuses);
+    statuses.set(sessionId, status);
+    // Keep the legacy busy projection in lockstep (pet panel, delete warnings).
+    const next = new Set(state.runningSessions);
+    if (status === 'running') next.add(sessionId);
+    else next.delete(sessionId);
+    return { sessionStatuses: statuses, runningSessions: next };
   }),
 
   isSessionRunning: (sessionId) => get().runningSessions.has(sessionId),
@@ -230,6 +257,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       runningSessions.add(newRealId);
     }
 
+    // 3b) Migrate the full lifecycle state alongside the busy flag
+    const sessionStatuses = new Map(state.sessionStatuses);
+    if (sessionStatuses.has(oldDraftId)) {
+      sessionStatuses.set(newRealId, sessionStatuses.get(oldDraftId)!);
+      sessionStatuses.delete(oldDraftId);
+    }
+
     // 4) Migrate stdinToTab entries that pointed to oldDraftId
     const stdinToTab = { ...state.stdinToTab };
     for (const [k, v] of Object.entries(stdinToTab)) {
@@ -250,7 +284,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     }
 
     saveStdinToTab(stdinToTab);
-    return { sessions, selectedSessionId, previousSessionId, runningSessions, stdinToTab, customPreviews };
+    return { sessions, selectedSessionId, previousSessionId, runningSessions, sessionStatuses, stdinToTab, customPreviews };
   });
   },
 

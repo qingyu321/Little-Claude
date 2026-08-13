@@ -201,6 +201,11 @@ function App() {
   useEffect(() => {
     useSessionStore.getState().loadCustomPreviewsFromDisk();
     useProviderStore.getState().load();
+    // Load the LiteLLM model-window table cache so getContextWindowForModel
+    // resolves exact windows (262K/512K/1M…) synchronously during renders.
+    bridge.loadModelWindows().then((windows) => {
+      useSettingsStore.getState().setModelWindows(windows);
+    }).catch(() => {});
     // Notification permission is requested lazily on first need (see useStreamProcessor.ts)
   }, []);
 
