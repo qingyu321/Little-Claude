@@ -200,7 +200,25 @@ function App() {
   // Load custom session names and provider config on startup
   useEffect(() => {
     useSessionStore.getState().loadCustomPreviewsFromDisk();
-    useProviderStore.getState().load();
+    // Backend/provider alignment must run AFTER load() resolves — load()
+    // awaits key decryption, so reading activeProviderPerBackend right
+    // after calling it sees the empty initial state.
+    useProviderStore.getState().load().then(() => {
+      // DSH (deepseek backend) runs its own provider inside dsh web and
+      // ignores providers.json. If a provider is active for claude/codex
+      // but the header still says "deepseek", every message silently
+      // bypasses the provider ("跑不通"). Switch to the provider's
+      // backend so the active provider actually takes effect.
+      const { activeProviderPerBackend } = useProviderStore.getState();
+      const headerBackend = useSettingsStore.getState().cliBackend;
+      if (headerBackend === 'deepseek') {
+        if (activeProviderPerBackend.claude) {
+          useSettingsStore.getState().setCliBackend('claude');
+        } else if (activeProviderPerBackend.codex) {
+          useSettingsStore.getState().setCliBackend('codex');
+        }
+      }
+    });
     // Load the LiteLLM model-window table cache so getContextWindowForModel
     // resolves exact windows (262K/512K/1M…) synchronously during renders.
     bridge.loadModelWindows().then((windows) => {

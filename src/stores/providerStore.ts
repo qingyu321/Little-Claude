@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { bridge } from '../lib/tauri-bridge';
 import { normalizeProviderModelName } from '../lib/model-utils';
 import { debugLog } from '../lib/debug-log';
+import { useSettingsStore } from './settingsStore';
 
 const PROVIDERS_STORAGE_KEY = 'tokenicode_providers';
 
@@ -419,6 +420,14 @@ export const useProviderStore = create<ProviderState>()((set, get) => ({
         ? { activeProviderId: id }
         : {}),
     }));
+    // Activating a provider switches the chat-header backend to match it.
+    // Otherwise a user who configures/activates a Claude-backend provider
+    // while the header still says "deepseek" (DSH service mode) sends every
+    // message through dsh web — which uses its OWN provider config and never
+    // touches providers.json — and the provider appears broken ("跑不通").
+    if (id) {
+      useSettingsStore.getState().setCliBackend(backend === 'codex' ? 'codex' : 'claude');
+    }
     debouncedSave(get());
   },
 

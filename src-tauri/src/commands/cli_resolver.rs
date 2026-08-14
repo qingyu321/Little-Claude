@@ -646,23 +646,55 @@ fn collect_tiered_dirs_inner() -> Vec<TieredDir> {
 
 // ─── Core API ──────────────────────────────────────────────
 
-/// Binary names to search for, platform-specific.
-fn bin_names() -> &'static [&'static str] {
+/// Claude binary names, platform-specific.
+///
+/// NOTE: `dsh` AND `codex` deliberately NOT included — this list feeds the
+/// claude resolution paths (resolve()/resolve_ordered(), which back
+/// find_claude_binary/find_claude_binary_ordered and the claude session
+/// spawn). A machine with only codex (or only dsh) installed would otherwise
+/// misreport that binary as the Claude CLI, and claude sessions would spawn
+/// it with claude arguments (session breakage — e.g. codex fails with
+/// "CLI error: For more information, try '--help'."). codex is resolved via
+/// the CodexBackend's own find_binary() (PATH + npm-global scan); dsh via
+/// `find_binary_named` (see find_deepseek_binary in lib.rs). scan_all()
+/// (diagnostics panel) deliberately combines both name lists so the UI can
+/// show Codex installs separately (the frontend labels them by file name).
+fn claude_bin_names() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]
     {
-        &["claude.exe", "claude.cmd", "codex.exe", "codex.cmd"]
+        &["claude.exe", "claude.cmd"]
     }
     #[cfg(not(target_os = "windows"))]
     {
-        &["claude", "codex"]
+        &["claude"]
     }
+}
+
+/// Codex binary names — used only by scan_all() (diagnostics panel display),
+/// never by the claude session spawn path.
+fn codex_bin_names() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &["codex.exe", "codex.cmd"]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        &["codex"]
+    }
+}
+
+/// All binary names (claude + codex) — diagnostics/scan only.
+fn all_bin_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = claude_bin_names().to_vec();
+    names.extend_from_slice(codex_bin_names());
+    names
 }
 
 /// Resolve the best CLI binary, respecting tier priority.
 /// Within each directory: native binary preferred over shebang script.
 pub fn resolve() -> Option<(String, CliSource)> {
     let dirs = collect_tiered_dirs();
-    let names = bin_names();
+    let names = claude_bin_names();
 
     for td in &dirs {
         // Phase 1: prefer native binary in this dir
@@ -699,7 +731,7 @@ pub fn resolve() -> Option<(String, CliSource)> {
 /// Used by check_claude_cli to iterate on timeout.
 pub fn resolve_ordered() -> Vec<(String, CliSource)> {
     let dirs = collect_tiered_dirs();
-    let names = bin_names();
+    let names = claude_bin_names();
     let mut results = Vec::new();
     let mut seen_paths = HashSet::new();
 
@@ -722,7 +754,7 @@ pub fn resolve_ordered() -> Vec<(String, CliSource)> {
 /// Does NOT run --version (that's async, done by the diagnose Tauri command).
 pub fn scan_all() -> Vec<CliCandidate> {
     let dirs = collect_tiered_dirs();
-    let names = bin_names();
+    let names = all_bin_names();
     let mut candidates = Vec::new();
     let mut seen_paths = HashSet::new();
 
@@ -731,7 +763,7 @@ pub fn scan_all() -> Vec<CliCandidate> {
     let enriched_path = crate::build_enriched_path();
 
     for td in &dirs {
-        for name in names {
+        for &name in &names {
             let candidate = Path::new(&td.path).join(name);
             let path_str = candidate.to_string_lossy().to_string();
 
@@ -765,9 +797,11 @@ pub fn scan_all() -> Vec<CliCandidate> {
                 issues.extend(shebang_issues(&candidate, &enriched_path));
             }
 
-            // Windows: check git-bash availability
+            // Windows: check git-bash availability — only relevant for the
+            // claude CLI (it needs bash for git operations). Codex runs on
+            // the native Node runtime and does not require git-bash.
             #[cfg(target_os = "windows")]
-            if valid {
+            if valid && claude_bin_names().contains(&name) {
                 if crate::find_git_bash().is_none() {
                     issues.push("Git Bash not found (required on Windows)".to_string());
                 }
@@ -952,6 +986,24 @@ pub fn find_binary() -> Option<String> {
         );
     }
     resolve().map(|(path, _)| path)
+}
+
+/// Find a CLI by an explicit name list (e.g. DeepSeek Harness `dsh`),
+/// scanning the same tiered directories without touching the claude pin.
+pub fn find_binary_named(names: &[&str]) -> Option<String> {
+    let dirs = collect_tiered_dirs();
+    for td in &dirs {
+        for name in names {
+            let candidate = Path::new(&td.path).join(name);
+            if is_native_binary(&candidate) || is_valid_executable(&candidate) {
+                let path = candidate.to_string_lossy().to_string();
+                eprintln!("[cli_resolver] resolved {}: {} (source: {})", name, path, td.source);
+                return Some(path);
+            }
+        }
+    }
+    eprintln!("[cli_resolver] no binary found for {:?}", names);
+    None
 }
 
 // ─── CLI Pinning ───────────────────────────────────────────

@@ -402,8 +402,30 @@ pub async fn start_claude_session(
     settings_env_clear.insert("NO_PROXY".to_string(), serde_json::Value::String("*".to_string()));
     settings_env_clear.insert("no_proxy".to_string(), serde_json::Value::String("*".to_string()));
 
+    // Write the settings JSON to a temp file and pass the path: --settings
+    // accepts file-or-json, but on Windows the cmd /C wrapper (required for
+    // .cmd CLIs) mangles the JSON's double quotes — cmd's batch quoting
+    // rules conflict with CreateProcess's \" escaping, so the CLI receives
+    // corrupted JSON and dies with "Invalid JSON provided to --settings"
+    // ("CLI error: For more information, try '--help'."). A plain file path
+    // has no quoting issues on any platform.
+    let settings_json = settings_val.to_string();
+    let settings_path = std::env::temp_dir().join(format!(
+        "little-claude-settings-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(e) = std::fs::write(&settings_path, &settings_json) {
+        return Err(format!("Failed to write settings file: {}", e));
+    }
+    // Best-effort cleanup: the CLI reads the file at startup, so deleting
+    // it 60s later is safe even for long-running sessions.
+    let cleanup_path = settings_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let _ = tokio::fs::remove_file(&cleanup_path).await;
+    });
     args.push("--settings".to_string());
-    args.push(settings_val.to_string());
+    args.push(settings_path.to_string_lossy().to_string());
 
     // Append provider-specific CLI args (e.g. --setting-sources project,local)
     args.extend(provider_extra_args);
