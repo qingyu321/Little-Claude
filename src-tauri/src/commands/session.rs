@@ -599,26 +599,6 @@ pub async fn start_claude_session(
         }
     }
 
-    // On Windows, .cmd/.bat files must be launched via cmd /C
-    #[cfg(target_os = "windows")]
-    {
-        // H3: cmd /C 会展开命令行里的 %VAR%（已定义环境变量）——实测 %% 与
-        // ^% 在引号内均无法转义。--settings JSON 若含与真实环境变量同名的
-        // %NAME% 序列（含 %NAME:~a,b% 子串语法），JSON 会被 cmd 展开破坏
-        // （配置篡改/注入）。检测到即拒绝启动；正常 URL 的 %20、%E5 等
-        // 未定义变量名不受影响，放行。
-        if crate::claude_needs_cmd_wrapper(&claude_bin) {
-            if let Some(pos) = args.iter().position(|a| a == "--settings") {
-                if let Some(json) = args.get(pos + 1) {
-                    if !settings_json_cmd_safe(json) {
-                        return Err(
-                            "--settings JSON 含 cmd 可展开的 %VAR% 序列（% 会被环境变量替换破坏配置）。请在 provider 配置/URL 中移除 %VAR% 形式的字符".to_string()
-                        );
-                    }
-                }
-            }
-        }
-    }
 
     // H2: 先递增代际再杀旧进程——旧 stdout reader 在 EOF 后据此识别自己已
     // 过期（不再清理新会话的句柄、不 emit 伪 process_exit）。若先杀后递增，
@@ -2257,37 +2237,6 @@ pub(crate) fn decode_project_name(encoded: &str) -> String {
     format!("{}{}", root, decoded_segments.join(sep))
 }
 
-/// H3: cmd /C 启动路径下检查 --settings JSON 是否含可被 cmd 展开的 %VAR%。
-/// cmd 只展开「与真实环境变量同名」的 %NAME%（含 %NAME:~a,b% 子串语法）；
-/// 未定义名（如 URL 编码 %20、%E5）原样通过。因此逐个 %…% 对检查基名是否
-/// 在本进程环境中存在——存在即会在命令行展开破坏 JSON，返回 false。
-#[cfg(target_os = "windows")]
-fn settings_json_cmd_safe(json: &str) -> bool {
-    let bytes = json.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            // 找配对的 %；未配对（结尾孤 %) 的 % 不被 cmd 展开，安全。
-            let Some(rel) = bytes[i + 1..].iter().position(|&b| b == b'%') else {
-                break;
-            };
-            let name = &json[i + 1..i + 1 + rel];
-            if !name.is_empty() {
-                // %NAME:~a,b% 子串语法：基名取冒号前部分
-                let base = name.split(':').next().unwrap_or(name);
-                if base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    && std::env::var(base).is_ok()
-                {
-                    return false;
-                }
-            }
-            i += 1 + rel + 1;
-            continue;
-        }
-        i += 1;
-    }
-    true
-}
 
 /// Redact sensitive values inside `--settings` args for stderr logging.
 /// The real args contain the API key inside the settings JSON; the env dump

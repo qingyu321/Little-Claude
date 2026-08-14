@@ -54,9 +54,24 @@ fn cache_creation_tokens(usage: &Value) -> u64 {
 /// requests across day boundaries (e.g. 00:00–02:00 local lands on the
 /// previous UTC day). Falls back to the raw prefix on parse failure.
 fn local_date_from_timestamp(ts: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|_| ts.get(0..10).unwrap_or("unknown").to_string())
+    // RFC3339 (Claude CLI JSONL + frontend usage-log records).
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+    }
+    // Unix seconds — the Anthropic→OpenAI conversion proxy persisted
+    // SystemTime::now().as_secs() as a plain integer string. Parsing it as
+    // RFC3339 fails, and the raw-prefix fallback would slice the digits
+    // (1786584107 → "1786584107") producing a garbage bucket instead of a
+    // date. Bucket by the local calendar day of that epoch.
+    if let Ok(secs) = ts.trim().parse::<i64>() {
+        if secs > 0 && secs < 4_102_444_800 {
+            // 2100-01-01 — sane upper bound for unix seconds.
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
+                return dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+            }
+        }
+    }
+    ts.get(0..10).unwrap_or("unknown").to_string()
 }
 
 /// Path to Little Claude's own usage log (append-only NDJSON).
@@ -534,4 +549,27 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
         "daily": daily_values,
         "models": model_values,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_date_from_timestamp;
+
+    #[test]
+    fn rfc3339_utc_is_bucketed_to_local_date() {
+        // 2026-08-14T20:00:00Z — local (+08:00) is 2026-08-15.
+        assert_eq!(local_date_from_timestamp("2026-08-14T20:00:00Z"), "2026-08-15");
+    }
+
+    #[test]
+    fn unix_seconds_are_bucketed_to_local_date() {
+        // 1786584107 == 2026-08-13T01:21:47Z → local (+08:00) 2026-08-13 09:21.
+        assert_eq!(local_date_from_timestamp("1786584107"), "2026-08-13");
+    }
+
+    #[test]
+    fn garbage_falls_back_to_raw_prefix() {
+        assert_eq!(local_date_from_timestamp("not-a-timestamp"), "not-a-time");
+        assert_eq!(local_date_from_timestamp(""), "unknown");
+    }
 }

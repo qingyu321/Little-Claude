@@ -425,8 +425,10 @@ export const useProviderStore = create<ProviderState>()((set, get) => ({
     // while the header still says "deepseek" (DSH service mode) sends every
     // message through dsh web — which uses its OWN provider config and never
     // touches providers.json — and the provider appears broken ("跑不通").
-    if (id) {
-      useSettingsStore.getState().setCliBackend(backend === 'codex' ? 'codex' : 'claude');
+    if (id && (backend === 'claude' || backend === 'codex')) {
+      // Only claude/codex providers own the chat-header backend; a future
+      // deepseek-backend provider must NOT flip the header off DSH mode.
+      useSettingsStore.getState().setCliBackend(backend);
     }
     debouncedSave(get());
   },
