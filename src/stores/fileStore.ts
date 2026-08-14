@@ -379,8 +379,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
       await bridge.writeFileContent(selectedFile, editContent);
       // Update fileContent to match saved content
       set({ fileContent: editContent, editContent: null, isSaving: false, previewMode: 'preview' });
-    } catch {
+    } catch (e) {
       set({ isSaving: false });
+      // U1: silent failure used to look like a successful save — the user
+      // could switch away and lose their edits. Surface the error (aligned
+      // with skillStore.saveSkill's A10 toast).
+      console.error('[fileStore] saveFile failed:', e);
+      showToast(t('files.saveFailed'), 'error');
     }
   },
 

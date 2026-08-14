@@ -16,6 +16,9 @@ export type WallpaperQuality = 'fast' | 'balanced' | 'quality';
 export type SecondaryPanelTab = 'files' | 'preview' | 'skills' | 'plugins' | 'interview';
 export type ModelId = 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 export type SessionMode = 'code' | 'ask' | 'plan' | 'bypass';
+
+/** DSH busy-Enter policy: queue follow-ups while running, or steer (interrupt & send) */
+export type BusyEnterMode = 'queue' | 'steer';
 export type FontFamily = 'system' | 'microsoft' | 'sourceHan' | 'lxgw' | 'mono';
 /** CLI permission mode for the SDK control protocol */
 export type CliPermissionMode = 'acceptEdits' | 'default' | 'plan' | 'bypassPermissions';
@@ -180,6 +183,8 @@ interface SettingsState {
   workingDirectory: string;
   selectedModel: string;
   sessionMode: SessionMode;
+  /** Busy-Enter: 'queue' (default) or 'steer' — Ctrl+Enter flips it at submit time */
+  busyEnter: BusyEnterMode;
   locale: Locale;
   /** Global UI font size in px (default 18) */
   fontSize: number;
@@ -267,8 +272,8 @@ interface SettingsState {
   wallpaperQuality: WallpaperQuality;
   /** Wallpaper overlay opacity (0.05–0.50). Default 0.18. */
   wallpaperOpacity: number;
-  /** Active CLI backend: "claude" (default) or "codex". Independent of API provider. */
-  cliBackend: 'claude' | 'codex';
+  /** Active CLI backend: "claude" (default), "codex" or "deepseek" (DSH headless). Independent of API provider. */
+  cliBackend: 'claude' | 'codex' | 'deepseek';
   /** 模块管理 — 侧边栏预览按钮显隐 */
   previewSidebarVisible: boolean;
   /** 模块管理 — 侧边栏技能按钮显隐 */
@@ -331,6 +336,7 @@ interface SettingsState {
   setWorkingDirectory: (dir: string) => void;
   setSelectedModel: (model: string) => void;
   setSessionMode: (mode: SessionMode) => void;
+  setBusyEnter: (mode: BusyEnterMode) => void;
   setLocale: (locale: Locale) => void;
   toggleLocale: () => void;
   setFontSize: (size: number) => void;
@@ -344,7 +350,7 @@ interface SettingsState {
   setOnboardingOpen: (open: boolean) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   setContextWindowMode: (mode: ContextWindowMode) => void;
-  setCliBackend: (backend: 'claude' | 'codex') => void;
+  setCliBackend: (backend: 'claude' | 'codex' | 'deepseek') => void;
   setModelWindows: (modelWindows: Record<string, number>) => void;
   learnModel1m: (model: string) => void;
   setAutoCompactThresholdTokens: (tokens: number) => void;
@@ -413,7 +419,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set) => ({
       theme: 'system',
       colorTheme: 'black',
-      backgroundTheme: 'minimal',
+      backgroundTheme: 'deepseek',
       sidebarOpen: true,
       secondaryPanelOpen: false,
       secondaryPanelTab: 'files',
@@ -423,8 +429,9 @@ export const useSettingsStore = create<SettingsState>()(
       workingDirectory: '',
       selectedModel: 'claude-sonnet-4-6',
       sessionMode: 'bypass',
+      busyEnter: 'queue',
       locale: 'zh',
-      fontSize: 14,
+      fontSize: 18,
       fontFamily: 'microsoft',
       monoFontFollowsInterface: true,
       sidebarWidth: 280,
@@ -469,7 +476,9 @@ export const useSettingsStore = create<SettingsState>()(
       wallpaperName: '',
       wallpaperQuality: 'balanced' as WallpaperQuality,
       wallpaperOpacity: 0.18,
-      cliBackend: 'claude' as 'claude' | 'codex',
+      // DeepSeek Harness is the preferred backend (2026-08-14): service mode
+      // gives real streaming + context continuity out of the box.
+      cliBackend: 'deepseek' as 'claude' | 'codex' | 'deepseek',
       previewSidebarVisible: true,
       skillsSidebarVisible: true,
       interviewSidebarVisible: true,
@@ -532,6 +541,9 @@ export const useSettingsStore = create<SettingsState>()(
 
       setSessionMode: (mode) =>
         set(() => ({ sessionMode: mode })),
+
+      setBusyEnter: (mode) =>
+        set(() => ({ busyEnter: mode })),
 
       setLocale: (locale) =>
         set(() => ({ locale })),
@@ -615,8 +627,17 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ interviewMimoBaseUrl })),
       setInterviewMimoApiKey: (interviewMimoApiKey) => {
         const seq = ++_apiKeyEncryptSeq.interviewMimoApiKey;
-        set({ interviewMimoApiKey, _enc_interviewMimoApiKey: interviewMimoApiKey ? undefined as any : '' });
-        if (!interviewMimoApiKey) return;
+        // B3: keep the previous ciphertext until the new one is committed.
+        // Clearing it synchronously opened a window where exiting the app
+        // before async encryption finished lost the key entirely — now the
+        // old ciphertext stays valid, so a crash/exit mid-encryption still
+        // leaves the previous key usable.
+        set({ interviewMimoApiKey });
+        if (!interviewMimoApiKey) {
+          // Clearing the key: drop the stored ciphertext too.
+          set({ _enc_interviewMimoApiKey: '' });
+          return;
+        }
         // S3: Encrypt for localStorage persistence (async side-effect).
         // Sequence-guarded (per-field seq): a slow resolve for an older value
         // of THIS key must not overwrite a newer value's ciphertext. Retry once
@@ -695,8 +716,13 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ videoAnalysisBaseUrl: url.trim() })),
       setVideoAnalysisApiKey: (key) => {
         const seq = ++_apiKeyEncryptSeq.videoAnalysisApiKey;
-        set({ videoAnalysisApiKey: key, _enc_videoAnalysisApiKey: key ? undefined as any : '' });
-        if (!key) return;
+        // B3: same as setInterviewMimoApiKey — keep the old ciphertext
+        // until the new one is committed (no loss window on exit).
+        set({ videoAnalysisApiKey: key });
+        if (!key) {
+          set({ _enc_videoAnalysisApiKey: '' });
+          return;
+        }
         // S3: Encrypt for localStorage persistence (async side-effect).
         // Sequence-guarded: a slow resolve for an older key must not overwrite
         // a newer key's ciphertext. Retry once on transient failure; a
@@ -768,7 +794,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'tokenicode-settings',
-      version: 29,
+      version: 30,
       // 头像（报告B10）必须在 merge 里恢复，不能在 onRehydrateStorage 的
       // post 回调中 setState：persist 对同步 localStorage 的 hydrate 是同步
       // 执行的，post 回调在 create() 返回前运行，此时模块顶层的
@@ -943,6 +969,14 @@ export const useSettingsStore = create<SettingsState>()(
           // existing users — models get learned on first 900K+ success turn.
           (persisted as Record<string, unknown>).learned1mModels = {};
         }
+        if (version < 30) {
+          // v30 字体修复：早期版本的 persist 默认值是 14（与注释 "default 18"
+          // 不符），dev 隔离目录的磁盘快照也被初始默认 14 灌回，用户看到
+          // "字体变小"。把 14 一律升级为 18——14 从未是用户主动选择的正常值。
+          if (persisted.fontSize === 14) {
+            persisted.fontSize = 18;
+          }
+        }
         return persisted;
       },
       partialize: (state: SettingsState) => ({
@@ -954,6 +988,7 @@ export const useSettingsStore = create<SettingsState>()(
         workingDirectory: state.workingDirectory,
         selectedModel: state.selectedModel,
         sessionMode: state.sessionMode,
+        busyEnter: state.busyEnter,
         locale: state.locale,
         fontSize: state.fontSize,
         fontFamily: state.fontFamily,

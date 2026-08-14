@@ -95,6 +95,7 @@ export function ConversationList() {
   const sessionStatuses = useSessionStore((s) => s.sessionStatuses);
   const contentSearchResults = useSessionStore((s) => s.contentSearchResults);
   const isContentSearching = useSessionStore((s) => s.isContentSearching);
+  const searchError = useSessionStore((s) => s.searchError);
   const searchSessionContent = useSessionStore((s) => s.searchSessionContent);
   const clearContentSearch = useSessionStore((s) => s.clearContentSearch);
 
@@ -842,6 +843,13 @@ export function ConversationList() {
           <div className="w-3 h-3 border-[1.5px] border-text-tertiary/20
             border-t-text-tertiary/60 rounded-full animate-spin" />
           <span className="text-[10px]">{t('conv.searchingContent')}</span>
+        </div>
+      )}
+
+      {/* Content search failure — distinguish from 'no results' (U2) */}
+      {searchQuery.trim() && !isContentSearching && searchError && (
+        <div className="text-center py-3 px-4">
+          <span className="text-[11px] text-error">{t('conv.searchFailed')}</span>
         </div>
       )}
 

@@ -4,6 +4,7 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { create } from 'zustand';
 import { useChatStore, useActiveTab, generateMessageId, type ChatMessage, type SessionMeta } from '../../stores/chatStore';
 import { MessageBubble } from './MessageBubble';
+import { DeliverablesChips, collectTurnDeliverables } from './DeliverablesChips';
 import { showToast } from '../shared/Toast';
 import { ToolGroup } from './ToolGroup';
 import { InputBar } from './InputBar';
@@ -28,6 +29,7 @@ import { envFingerprint, resolveModelForProvider, resolveThinkingLevelForProvide
 import { useProviderStore } from '../../stores/providerStore';
 import { MarkdownRenderer } from '../shared/MarkdownRenderer';
 import { registerStreamListener } from '../../lib/stream-cleanup';
+import { debugWarn } from '../../lib/debug-log';
 import { SetupWizard } from '../setup/SetupWizard';
 import { AiAvatar } from '../shared/AiAvatar';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
@@ -435,7 +437,7 @@ function CliBackendToggle() {
   const cliBackend = useSettingsStore((s) => s.cliBackend);
   const setCliBackend = useSettingsStore((s) => s.setCliBackend);
   const [open, setOpen] = useState(false);
-  const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | 'deepseek' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -447,7 +449,8 @@ function CliBackendToggle() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const label = (b: string) => b === 'codex' ? 'Codex' : 'Claude';
+  const label = (b: string) =>
+    b === 'codex' ? 'Codex' : b === 'deepseek' ? 'DeepSeek' : 'Claude';
 
   return (
     <div ref={ref} className="relative">
@@ -473,7 +476,7 @@ function CliBackendToggle() {
         <div className="absolute top-full left-0 mt-1 min-w-[150px]
           bg-bg-card border border-border-subtle rounded-xl shadow-lg
           py-1 z-50 animate-in fade-in slide-in-from-top-1 duration-150">
-          {(['claude', 'codex'] as const).map((b) => {
+          {(['claude', 'codex', 'deepseek'] as const).map((b) => {
             const isCurrent = cliBackend === b;
             return (
               <button
@@ -528,12 +531,28 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   const autoCompactThresholdTokens = useSettingsStore((s) => s.autoCompactThresholdTokens);
   const autoCompactMode = useSettingsStore((s) => s.autoCompactMode);
   const [isCompacting, setIsCompacting] = useState(false);
+  // "已压缩 −X" transient badge: re-shown on every new compaction, hides 5s later.
+  const [showCompacted, setShowCompacted] = useState(false);
+  useEffect(() => {
+    if (!sessionMeta.compactedAt) {
+      setShowCompacted(false);
+      return;
+    }
+    setShowCompacted(true);
+    const timer = setTimeout(() => setShowCompacted(false), 5000);
+    return () => clearTimeout(timer);
+  }, [sessionMeta.compactedAt]);
   const modelForContext = sessionMeta.spawnedModel
     || sessionMeta.snapshotModel
     || sessionMeta.model
     || resolveModelForProvider(selectedModel);
   const effectiveContextMode = sessionMeta.snapshotContextWindowMode ?? contextWindowMode;
-  const contextWindow = getContextWindowForModel(modelForContext, effectiveContextMode);
+  // DSH alignment: the harness declares its own window via the request/context
+  // projection — prefer it over the local model-window guess when present
+  // (display only; the auto-compact threshold logic is unchanged).
+  const contextWindow = sessionMeta.dshContextWindow && sessionMeta.dshContextWindow > 0
+    ? sessionMeta.dshContextWindow
+    : getContextWindowForModel(modelForContext, effectiveContextMode);
   const compactThreshold = getAutoCompactThreshold(
     modelForContext,
     effectiveContextMode,
@@ -639,13 +658,22 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
       )}
       <div className="w-20 h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
         <div
-          className={`h-full rounded-full ${percent >= thresholdPercent ? 'bg-warning' : 'bg-accent'}`}
+          className={`h-full rounded-full ${percent >= thresholdPercent ? 'bg-warning' : 'bg-accent'} ${sessionMeta.compactionInProgress ? 'animate-pulse' : ''}`}
           style={{ width: `${percent}%` }}
         />
       </div>
-      <span className={percent >= thresholdPercent ? 'text-warning' : 'text-text-tertiary'}>
-        {percent}%
-      </span>
+      {sessionMeta.compactionInProgress ? (
+        <span className="text-text-muted">{t('ctx.compacting')}</span>
+      ) : (
+        <span className={percent >= thresholdPercent ? 'text-warning' : 'text-text-tertiary'}>
+          {percent}%
+        </span>
+      )}
+      {showCompacted && sessionMeta.compactionSavedTokens ? (
+        <span className="text-accent font-medium">
+          {t('ctx.compacted', { tokens: formatTokens(sessionMeta.compactionSavedTokens) })}
+        </span>
+      ) : null}
       <span className="hidden md:inline">{formatTokens(available)} {t('ctx.free')}</span>
       <button
         onClick={handleCompact}
@@ -1645,8 +1673,15 @@ export function ChatPanel() {
     const sidePadding = msg.role === 'user'
       ? 'pl-20 pr-20'
       : 'pl-5 pr-20';
+    // DSH deliverables: turn-tail chips under the user message that closes
+    // the previous assistant turn (produced files from Edit/Write).
+    const turnDeliverables =
+      msg.role === 'user' ? collectTurnDeliverables(messages, idx) : [];
     return (
       <div key={msg.id} className={`${spacing} chat-message-item ${sidePadding}`}>
+        {turnDeliverables.length > 0 && (
+          <DeliverablesChips paths={turnDeliverables} />
+        )}
         <MessageBubble
           message={msg}
           isFirstInGroup={isFirstInGroup}
@@ -2038,8 +2073,10 @@ async function startDraftSession(folderPath: string) {
       }
     });
     const unlistenStderr = await onClaudeStderr(preWarmId, (line: string) => {
-      // Log pre-warm stderr for debugging (errors here explain why CLI may fail)
-      console.warn('[LITTLECLAUDE] pre-warm stderr:', line);
+      // Pre-warm stderr for debugging (errors here explain why CLI may fail).
+      // debugWarn keeps this out of production consoles — every stderr line
+      // used to spam console.warn on CLI boot noise.
+      if (line.trim()) debugWarn('session', 'pre-warm stderr:', line);
     });
 
     // Store unlisten per stdinId for multi-session support

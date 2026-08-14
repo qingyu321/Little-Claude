@@ -74,6 +74,9 @@ interface SessionState {
   contentSearchResults: Map<string, ContentSearchResult>;
   isContentSearching: boolean;
   contentSearchQuery: string;
+  /** U2: non-null when the last content search failed — lets the UI
+   *  distinguish 'no results' from 'search failed'. */
+  searchError: string | null;
 
   fetchSessions: () => Promise<void>;
   setSearchQuery: (query: string) => void;
@@ -129,6 +132,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   contentSearchResults: new Map<string, ContentSearchResult>(),
   isContentSearching: false,
   contentSearchQuery: '',
+  searchError: null,
 
   fetchSessions: async () => {
     const isFirstLoad = get().sessions.length === 0;
@@ -283,8 +287,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       saveCustomPreviewsLocal(customPreviews);
     }
 
+    // 7) B5: content-search results keyed by the old draft id would
+    //    otherwise linger as dead data after promotion.
+    const contentSearchResults = new Map(state.contentSearchResults);
+    if (contentSearchResults.has(oldDraftId)) {
+      const v = contentSearchResults.get(oldDraftId)!;
+      contentSearchResults.delete(oldDraftId);
+      contentSearchResults.set(newRealId, v);
+    }
+
     saveStdinToTab(stdinToTab);
-    return { sessions, selectedSessionId, previousSessionId, runningSessions, sessionStatuses, stdinToTab, customPreviews };
+    return { sessions, selectedSessionId, previousSessionId, runningSessions, sessionStatuses, stdinToTab, customPreviews, contentSearchResults };
   });
   },
 
@@ -309,7 +322,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   getLastSessionId: () => loadLastSessionId(),
 
   searchSessionContent: async (query: string, roleFilter?: string | null) => {
-    set({ isContentSearching: true, contentSearchQuery: query });
+    set({ isContentSearching: true, contentSearchQuery: query, searchError: null });
     try {
       const results = await bridge.searchSessions(query, roleFilter);
       // Stale check: discard if query has changed while awaiting
@@ -319,8 +332,10 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         map.set(r.session_id, r);
       }
       set({ contentSearchResults: map, isContentSearching: false });
-    } catch {
-      set({ isContentSearching: false });
+    } catch (e) {
+      // U2: a failed search used to look identical to an empty result set.
+      console.error('[sessionStore] searchSessionContent failed:', e);
+      set({ isContentSearching: false, searchError: String(e) });
     }
   },
 
@@ -329,6 +344,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       contentSearchResults: new Map<string, ContentSearchResult>(),
       isContentSearching: false,
       contentSearchQuery: '',
+      searchError: null,
     });
   },
 }));

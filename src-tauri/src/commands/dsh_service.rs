@@ -29,6 +29,11 @@ const READY_INTERVAL: Duration = Duration::from_millis(500);
 const SPAWN_PORT_TRIES: u16 = 4;
 /// Unary request timeout.
 const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Short timeout for liveness probes (ensure / spawn readiness). A hung or
+/// half-dead service must not block session startup for 30s.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Max reconnect backoff (exponential 1s -> 2s -> ... capped here).
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
 /// Shared, lazily-created HTTP client.
 static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
@@ -45,6 +50,28 @@ fn http() -> &'static reqwest::Client {
             }
         }
     })
+}
+
+/// Short-timeout client for liveness probes (2s). Never used for real RPC.
+static PROBE_HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+fn probe_http() -> &'static reqwest::Client {
+    PROBE_HTTP.get_or_init(|| {
+        match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[dsh:service] probe client build failed, using default: {}", e);
+                reqwest::Client::new()
+            }
+        }
+    })
+}
+
+/// Exponential reconnect backoff: 1s -> 2s -> 4s -> ... capped at 30s.
+async fn reconnect_delay(attempt: &mut u32) {
+    let seconds = 1u64 << (*attempt).min(5);
+    let delay = Duration::from_secs(seconds.min(RECONNECT_BACKOFF_CAP.as_secs()));
+    *attempt = attempt.saturating_add(1);
+    tokio::time::sleep(delay).await;
 }
 
 /// One routed LC tab on a DSH session.
@@ -74,6 +101,11 @@ pub struct DshServiceState {
     pub session_routes: Arc<Mutex<HashMap<String, DshRoute>>>,
     /// Highest consumed seq per session (reconnect catch-up baseline).
     pub last_seqs: Arc<Mutex<HashMap<String, u64>>>,
+    /// Per-session translators (S1). Held here — not as locals of
+    /// route_mux_frames — so kill_session / lifecycle ends can drop stale
+    /// entries (D10: they used to grow unboundedly for every session ever
+    /// routed on this service).
+    pub translators: Arc<Mutex<HashMap<String, crate::backends::dsh_events::DshTranslator>>>,
 }
 
 impl DshServiceState {
@@ -89,19 +121,53 @@ impl DshServiceState {
             self.base_url.clone(),
             self.session_routes.clone(),
             self.last_seqs.clone(),
+            self.translators.clone(),
         ));
-        // Host stream: keep the socket alive (session lifecycle events are
-        // not surfaced to the frontend yet — running state is derived from
-        // turn events, which is already accurate).
-        tokio::spawn(read_host_loop(self.ws_url.clone()));
+        // Host stream: keep the socket alive and surface session lifecycle
+        // end events to the owning tab (prevents permanent "running" UI).
+        tokio::spawn(read_host_loop(
+            self.ws_url.clone(),
+            self.session_routes.clone(),
+            self.translators.clone(),
+            self.last_seqs.clone(),
+        ));
+    }
+
+    /// Best-effort synchronous teardown of a spawned service (app exit or
+    /// stale-service replacement). Windows: `taskkill /T` kills the whole
+    /// cmd -> node tree (kill_on_drop alone would only kill cmd.exe).
+    /// Elsewhere: `start_kill` + `kill_on_drop` reaps on Arc drop.
+    pub fn shutdown_sync(&self) {
+        if !self.spawned {
+            return; // external service — never touch it
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let pid = self.child.lock().unwrap().as_ref().and_then(|c| c.id());
+            if let Some(pid) = pid {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(mut c) = self.child.lock().unwrap().take() {
+                let _ = c.start_kill();
+            }
+        }
     }
 }
 
 /// Reads `server-request` frames from the mux WebSocket and broadcasts them.
 async fn read_mux_loop(ws_url: String, tx: broadcast::Sender<Value>) {
+    let mut attempt: u32 = 0;
     loop {
         match open_ws(&ws_url).await {
             Ok(mut ws) => {
+                attempt = 0; // connected — reset backoff
                 log::info!("[dsh:service] mux connected ({})", ws_url);
                 loop {
                     match ws.next().await {
@@ -125,23 +191,76 @@ async fn read_mux_loop(ws_url: String, tx: broadcast::Sender<Value>) {
             }
             Err(e) => log::warn!("[dsh:service] mux connect failed: {}", e),
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        reconnect_delay(&mut attempt).await;
     }
 }
 
-/// Keeps the host downlink socket open (frames are currently informational).
-async fn read_host_loop(ws_url: String) {
+/// Keeps the host downlink socket open. Session lifecycle frames (ended /
+/// deleted / killed) are surfaced to the owning tab as `process_exit` so the
+/// UI can't stay in a permanent "running" state when the service closes a
+/// session out from under us.
+async fn read_host_loop(
+    ws_url: String,
+    session_routes: Arc<Mutex<HashMap<String, DshRoute>>>,
+    translators: Arc<Mutex<HashMap<String, crate::backends::dsh_events::DshTranslator>>>,
+    last_seqs: Arc<Mutex<HashMap<String, u64>>>,
+) {
     let host_ws = format!("{}/api/events.host", ws_url.trim_end_matches("/api/events.mux"));
+    let mut attempt: u32 = 0;
     loop {
         match open_ws(&host_ws).await {
             Ok(mut ws) => {
-                while let Some(Ok(_)) = ws.next().await {}
+                attempt = 0; // connected — reset backoff
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                        if let Ok(frame) = serde_json::from_str::<Value>(&text) {
+                            if let Some(exit) = parse_host_lifecycle_exit(&frame) {
+                                let sid = exit.0.clone();
+                                let routes = session_routes.lock().await;
+                                if let Some(route) = routes.get(&sid).cloned() {
+                                    drop(routes);
+                                    let _ = crate::emit_stream_event(
+                                        &route.stdin_id,
+                                        json!({ "type": "process_exit", "code": 0 }),
+                                    );
+                                }
+                                // D10: session is gone — prune translator +
+                                // seq bookkeeping so the maps don't grow with
+                                // every session ever routed.
+                                translators.lock().await.remove(&sid);
+                                last_seqs.lock().await.remove(&sid);
+                            }
+                        }
+                    }
+                }
                 log::warn!("[dsh:service] host stream closed, reconnecting…");
             }
             Err(e) => log::warn!("[dsh:service] host connect failed: {}", e),
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        reconnect_delay(&mut attempt).await;
     }
+}
+
+/// Best-effort detection of a host-frame that terminates a DSH session.
+/// Returns `(sessionId)` when the frame looks like a lifecycle end event.
+/// Unknown frame shapes are ignored (never guess — the mux stream remains
+/// the authoritative event source).
+fn parse_host_lifecycle_exit(frame: &Value) -> Option<(String,)> {
+    let payload = frame.get("payload")?;
+    let sid = payload.get("sessionId").and_then(|v| v.as_str())?;
+    if sid.is_empty() {
+        return None;
+    }
+    let ty = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let ty_lower = ty.to_ascii_lowercase();
+    let looks_like_end = ["ended", "closed", "deleted", "killed", "removed", "cancelled"]
+        .iter()
+        .any(|k| ty_lower.contains(k));
+    if !looks_like_end {
+        return None;
+    }
+    log::info!("[dsh:service] host lifecycle end for session {} ({})", sid, ty);
+    Some((sid.to_string(),))
 }
 
 /// Raw WebSocket connect (text messages only — the server closes with 1008
@@ -165,13 +284,14 @@ async fn route_mux_frames(
     base_url: String,
     session_routes: Arc<Mutex<HashMap<String, DshRoute>>>,
     last_seqs: Arc<Mutex<HashMap<String, u64>>>,
+    translators: Arc<Mutex<HashMap<String, crate::backends::dsh_events::DshTranslator>>>,
 ) {
     use crate::backends::dsh_events;
     // S1: one translator per DSH session. DSH block indices restart from 0 on
     // every turn, so a shared translator would let concurrent tabs' frames
     // collide on the same indices (missed content_block_start, tool blocks
-    // misclassified at block-end, usage polluted across sessions).
-    let mut translators: HashMap<String, dsh_events::DshTranslator> = HashMap::new();
+    // misclassified at block-end, usage polluted across sessions). The map
+    // lives on DshServiceState so lifecycle ends can prune it (D10).
     loop {
         match rx.recv().await {
             Ok(frame) => {
@@ -181,11 +301,6 @@ async fn route_mux_frames(
                 match frame_type {
                     "session/event" => {
                         let sid = session_id.unwrap_or_default().to_string();
-                        // Track seq for catch-up.
-                        if let Some(seq) = payload.pointer("/event/seq").and_then(|v| v.as_u64()) {
-                            let mut seqs = last_seqs.lock().await;
-                            seqs.insert(sid.clone(), seq);
-                        }
                         let route = {
                             let routes = session_routes.lock().await;
                             routes.get(&sid).cloned()
@@ -193,16 +308,30 @@ async fn route_mux_frames(
                         let Some(route) = route else {
                             continue; // not our session
                         };
-                        // New turn / finished turn: clear the translator's
-                        // per-turn state so stale block indices can't leak.
+                        // Seq monotonicity: drop stale/replayed frames after a
+                        // reconnect (the server may replay from an earlier
+                        // checkpoint). last_seqs is the high-water mark.
+                        let seq = payload.pointer("/event/seq").and_then(|v| v.as_u64());
+                        if let Some(seq) = seq {
+                            let mut seqs = last_seqs.lock().await;
+                            if seqs.get(&sid).is_some_and(|&last| seq <= last) {
+                                continue; // duplicate / out-of-order — drop
+                            }
+                            seqs.insert(sid.clone(), seq);
+                        }
+                        // New turn: clear the translator's per-turn state so
+                        // stale block indices can't leak. turn/end is NOT reset
+                        // here — translate_turn_end reads state.usage, so it
+                        // must run before the next turn/start clears it.
                         let ev_type = payload.pointer("/event/type").and_then(|v| v.as_str());
-                        if matches!(ev_type, Some("turn/start") | Some("turn/end")) {
-                            if let Some(t) = translators.get_mut(&sid) {
+                        let events = {
+                            let mut ts = translators.lock().await;
+                            let t = ts.entry(sid).or_default();
+                            if ev_type == Some("turn/start") {
                                 t.reset_for_turn();
                             }
-                        }
-                        let translator = translators.entry(sid).or_default();
-                        let events = dsh_events::translate_session_event(translator, &payload);
+                            dsh_events::translate_session_event(t, &payload)
+                        };
                         for ev in events {
                             let _ = crate::emit_stream_event(&route.stdin_id, ev);
                         }
@@ -295,7 +424,21 @@ impl DshServiceManager {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl Drop for DshServiceManager {
+    fn drop(&mut self) {
+        // Last-resort cleanup: the tokio runtime may already be gone during
+        // app teardown, so only the synchronous path is safe here. The
+        // primary cleanup runs in lib.rs's RunEvent::Exit hook (teardown()),
+        // which fires while the runtime is still alive.
+        if let Some(state) = self.inner.try_write().ok().and_then(|mut g| g.take()) {
+            state.shutdown_sync();
+        }
+    }
+}
+
+impl DshServiceManager {
     /// Get the current service if one exists (no spawn). For teardown paths
     /// (kill_session) where spawning a fresh service just to delete a route
     /// would be wasteful.
@@ -304,17 +447,32 @@ impl DshServiceManager {
     }
 
     /// Get the current service, ensuring one exists (probe → spawn).
+    /// A cached Arc is only reused if it still answers host.describe with
+    /// the short probe timeout; a dead service is torn down and respawned
+    /// instead of pinning every session to a corpse (H1).
     pub async fn ensure(&self) -> Result<Arc<DshServiceState>, String> {
         {
             let guard = self.inner.read().await;
             if let Some(state) = guard.as_ref() {
-                return Ok(state.clone());
+                let base = state.base_url.clone();
+                if probe_unary(&base, "host.describe", json!({})).await.is_ok() {
+                    return Ok(state.clone());
+                }
+                log::warn!("[dsh:service] cached service at {} not responding", base);
             }
         }
         // Double-checked: only one spawner wins the write lock.
         let mut guard = self.inner.write().await;
         if let Some(state) = guard.as_ref() {
-            return Ok(state.clone());
+            let base = state.base_url.clone();
+            if probe_unary(&base, "host.describe", json!({})).await.is_ok() {
+                return Ok(state.clone());
+            }
+            log::warn!("[dsh:service] cached service dead, replacing");
+            let stale = guard.take();
+            if let Some(stale) = stale {
+                stale.shutdown_sync(); // usually already dead — no-op
+            }
         }
         let state = self.spawn_or_reuse().await?;
         state.start_readers();
@@ -322,9 +480,18 @@ impl DshServiceManager {
         Ok(state)
     }
 
+    /// Tear down the current service (spawned only — external services are
+    /// never touched). Used by the app-exit hook and by ensure() when the
+    /// cached service is detected dead.
+    pub fn teardown(&self) {
+        if let Some(state) = self.inner.try_write().ok().and_then(|mut g| g.take()) {
+            state.shutdown_sync();
+        }
+    }
+
     async fn spawn_or_reuse(&self) -> Result<Arc<DshServiceState>, String> {
         // 1. Probe the default port for an externally running service.
-        if let Ok(desc) = unary(&format!("http://127.0.0.1:{}", DEFAULT_PORT), "host.describe", json!({})).await {
+        if let Ok(desc) = probe_unary(&format!("http://127.0.0.1:{}", DEFAULT_PORT), "host.describe", json!({})).await {
             log::info!(
                 "[dsh:service] reusing external dsh at :{} (cwd={})",
                 DEFAULT_PORT,
@@ -337,6 +504,7 @@ impl DshServiceManager {
                 child: std::sync::Mutex::new(None),
                 session_routes: Arc::new(Mutex::new(HashMap::new())),
                 last_seqs: Arc::new(Mutex::new(HashMap::new())),
+                translators: Arc::new(Mutex::new(HashMap::new())),
             }));
         }
 
@@ -357,9 +525,10 @@ impl DshServiceManager {
                 }
             };
             let base_url = format!("http://127.0.0.1:{}", port);
-            // Poll until ready.
+            // Poll until ready (short probe timeout — a hung spawn probe
+            // must not stall session startup for 30s per attempt).
             for _ in 0..READY_POLLS {
-                if unary(&base_url, "host.describe", json!({})).await.is_ok() {
+                if probe_unary(&base_url, "host.describe", json!({})).await.is_ok() {
                     log::info!("[dsh:service] spawned dsh web at :{}", port);
                     return Ok(Arc::new(DshServiceState {
                         base_url,
@@ -368,6 +537,7 @@ impl DshServiceManager {
                         child: std::sync::Mutex::new(Some(child)),
                         session_routes: Arc::new(Mutex::new(HashMap::new())),
                         last_seqs: Arc::new(Mutex::new(HashMap::new())),
+                        translators: Arc::new(Mutex::new(HashMap::new())),
                     }));
                 }
                 tokio::time::sleep(READY_INTERVAL).await;
@@ -425,7 +595,7 @@ fn port_free(port: u16) -> bool {
 /// (3080). Used by `check_dsh_cli` to report service-mode availability.
 pub async fn probe_default_service() -> bool {
     let base = format!("http://127.0.0.1:{}", DEFAULT_PORT);
-    unary(&base, "host.describe", json!({})).await.is_ok()
+    probe_unary(&base, "host.describe", json!({})).await.is_ok()
 }
 
 /// Unary RPC: `POST /api/<method>` with the client-request envelope.
@@ -466,6 +636,41 @@ pub async fn unary(base_url: &str, method: &str, payload: Value) -> Result<Value
             err.get("code").and_then(|v| v.as_str()).unwrap_or("internal"),
             err.get("message").and_then(|v| v.as_str()).unwrap_or("")
         ));
+    }
+    Ok(result.get("value").cloned().unwrap_or(Value::Null))
+}
+
+/// Liveness-probe RPC using the 2s short-timeout client. Used by ensure()
+/// and spawn-readiness polling — never for real work (real RPC keeps the
+/// 30s budget via `unary`).
+pub async fn probe_unary(base_url: &str, method: &str, payload: Value) -> Result<Value, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let url = format!("{}/api/{}", base_url, method);
+    let resp = probe_http()
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&json!({
+            "type": "client-request",
+            "rpcId": id,
+            "method": method,
+            "payload": payload,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("dsh probe {}: {}", method, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("dsh probe {}: HTTP {}", method, resp.status()));
+    }
+    let full: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("dsh probe {}: bad JSON: {}", method, e))?;
+    if full.get("rpcId").and_then(|v| v.as_str()) != Some(id.as_str()) {
+        return Err(format!("dsh probe {}: rpcId echo mismatch", method));
+    }
+    let result = full.get("result").cloned().unwrap_or_default();
+    if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!("dsh probe {}: result not ok", method));
     }
     Ok(result.get("value").cloned().unwrap_or(Value::Null))
 }

@@ -17,7 +17,7 @@ use commands::{
     open_video_analysis_skill_dir, save_video_analysis_multimodal_config,
     set_video_analysis_acceleration, set_video_analysis_asr_model,
 };
-use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
+use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_dsh_cli, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_dsh_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
 use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
@@ -26,6 +26,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 #[cfg(target_os = "windows")]
@@ -287,6 +288,25 @@ pub(crate) fn find_git_bash() -> Option<String> {
 
 pub(crate) fn find_claude_binary() -> Option<String> {
     commands::cli_resolver::find_binary()
+}
+
+/// Locate the DeepSeek Harness CLI (`dsh`) — global npm install.
+pub(crate) fn find_deepseek_binary() -> Option<String> {
+    commands::cli_resolver::find_binary_named(&["dsh.exe", "dsh.cmd", "dsh"])
+}
+
+/// Global app handle — set in setup(); used by the DSH service routing task
+/// to emit `claude:stream:{stdinId}` events without an AppHandle parameter.
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// Emit one translated stream event to a tab's stream channel (no-op before
+/// setup, errors swallowed — the frontend tolerates missing events).
+pub(crate) fn emit_stream_event(stdin_id: &str, value: Value) -> Result<(), String> {
+    let Some(app) = APP_HANDLE.get() else {
+        return Ok(());
+    };
+    app.emit(&format!("claude:stream:{}", stdin_id), value)
+        .map_err(|e| e.to_string())
 }
 
 /// Return all valid CLI binaries in priority order, for fallback iteration.
@@ -1508,6 +1528,12 @@ async fn start_codex_session(
     #[cfg(not(target_os = "windows"))]
     let mut child = {
         let mut cmd = tokio::process::Command::new(&codex_bin);
+        #[cfg(unix)]
+        {
+            // H4: own process group so ProcessManager::remove can reap the
+            // whole tree with kill(-pid) — same rationale as the Claude path.
+            cmd.process_group(0);
+        }
         cmd.args(&args)
             .current_dir(&params.cwd)
             .env("PATH", &enriched_path)
@@ -1907,6 +1933,90 @@ async fn start_codex_session(
     })
 }
 
+/// Start a DeepSeek Harness task via the D-N1-B service integration:
+/// ensure the `dsh web` service (reuse external or spawn), create (or reuse)
+/// the tab's DSH session for real context continuity, register the session
+/// route, and prompt. All streaming output arrives on the service's mux
+/// WebSocket and is translated/emitted by the routing task — there is no
+/// process per session anymore.
+async fn start_deepseek_session(
+    app: AppHandle,
+    state: State<'_, ProcessManager>,
+    stdin_mgr: State<'_, StdinManager>,
+    params: StartSessionParams,
+    stdin_id: String,
+    _generation: u64,
+) -> Result<SessionInfo, String> {
+    use crate::commands::dsh_service::{unary, DshRoute};
+    use serde_json::json;
+
+    let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+    let service = dsh_mgr.ensure().await?;
+
+    // Reuse the tab's DSH session (real context continuity), else create one.
+    let dsh_session_id = match state.get_deepseek_session(&stdin_id).await {
+        Some(sid) => sid,
+        None => {
+            let created = unary(&service.base_url, "session.create", json!({ "cwd": params.cwd }))
+                .await
+                .map_err(|e| format!("dsh session.create failed: {}", e))?;
+            let sid = created
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "dsh session.create returned no sessionId".to_string())?
+                .to_string();
+            state.insert_deepseek_session(&stdin_id, sid.clone()).await;
+            sid
+        }
+    };
+
+    // Register the route: mux events for this session reach this tab.
+    // Bypass mode auto-allows approvals (no PermissionCards) — mirrors
+    // Claude's --dangerously-skip-permissions.
+    let auto_allow = matches!(
+        params.permission_mode.as_deref(),
+        Some("bypassPermissions") | Some("bypass")
+    );
+    {
+        let routes = service.session_routes.clone();
+        let mut routes = routes.lock().await;
+        routes.insert(
+            dsh_session_id.clone(),
+            DshRoute {
+                stdin_id: stdin_id.clone(),
+                auto_allow,
+            },
+        );
+    }
+
+    eprintln!(
+        "[LITTLECLAUDE:deepseek] service mode: tab={} dsh_session={} auto_allow={}",
+        stdin_id, dsh_session_id, auto_allow
+    );
+
+    // Prompt (queue mode — steer/interrupts go through send_stdin/kill).
+    let _ = unary(
+        &service.base_url,
+        "session.prompt",
+        json!({
+            "sessionId": dsh_session_id,
+            "mode": "queue",
+            "content": [{ "type": "text", "text": params.prompt }],
+        }),
+    )
+    .await
+    .map_err(|e| format!("dsh session.prompt failed: {}", e))?;
+
+    let dsh_bin = crate::find_deepseek_binary().unwrap_or_default();
+    let _ = stdin_mgr; // service mode has no stdin pipe
+    Ok(SessionInfo {
+        session_id: stdin_id,
+        pid: 0,
+        cli_path: dsh_bin,
+    })
+}
+
+
 /// WebView2 Evergreen runtime detection for Windows — the portable EXE does
 /// NOT embed the runtime (Win10 20H2+ ships it), but stripped/LTSC systems
 /// may lack it, and without it the webview window fails to create (blank/
@@ -2071,6 +2181,7 @@ pub fn run() {
         .manage(StdinManager::new())
         .manage(crate::commands::anthropic_proxy::ProxyManager::new())
         .manage(WatcherManager::default())
+        .manage(crate::commands::dsh_service::DshServiceManager::new())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         // Custom protocol: serve frontend SPA from embedded binary (release mode).
@@ -2102,6 +2213,9 @@ pub fn run() {
             #[cfg(not(feature = "video-analysis"))]
             let _ = &app;
             eprintln!("[little-claude] setup start, {:?} since run()", t_run.elapsed());
+            // D-N1-B: global handle for the DSH service routing task to emit
+            // stream events without threading AppHandle through every call.
+            let _ = APP_HANDLE.set(app.handle().clone());
             // 手动创建主窗口与桌宠窗口（conf 的 windows 数组已移除，见
             // create_app_windows 注释：注入 --ignore-gpu-blocklist 修复
             // Intel 核显被 WebView2 151 blocklist 导致的壁纸软渲染卡顿）
@@ -2159,6 +2273,21 @@ pub fn run() {
             // the declared context window without a blocking network round
             // trip. Silent failure — the hardcoded fallback list still works.
             prewarm_model_windows();
+
+            // M3: warm the CLI resolver caches on the main thread while
+            // setup is still cheap. The first session start otherwise pays
+            // the 0.5-3s synchronous probe (cmd /C where, login-shell PATH,
+            // dozens of directory stats) on a tokio worker, stalling the
+            // first message. All three are OnceLock caches: subsequent
+            // callers get a lock-free cache hit.
+            {
+                let _ = find_claude_binary();
+                let _ = build_enriched_path();
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = resolve_git_bash();
+                }
+            }
 
             eprintln!("[little-claude] setup done, {:?} since run()", t_run.elapsed());
             Ok(())
@@ -2257,6 +2386,8 @@ pub fn run() {
             install_codex_cli,
             update_codex_cli,
             check_codex_update,
+            check_dsh_cli,
+            install_dsh_cli,
             export_codex_to_claude,
             export_claude_to_codex,
             check_node_env,
@@ -2319,7 +2450,20 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     ensure_webview2_runtime();
 
-    app.run(|_app_handle, _event| {});
+    // D-N1-B: the spawned `dsh web` child has `kill_on_drop(true)`, but on
+    // Windows the spawn goes through `cmd /C`, so dropping the Child only
+    // kills cmd.exe — the node process would linger and keep the port busy.
+    // Tear down explicitly on exit (taskkill /T kills the whole tree);
+    // external services are never touched (spawned=false).
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(mgr) = app_handle
+                .try_state::<crate::commands::dsh_service::DshServiceManager>()
+            {
+                mgr.teardown();
+            }
+        }
+    });
 }
 
 #[cfg(test)]

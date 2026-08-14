@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+/** L2: cap persisted preview history — unbounded growth wrote the whole
+ *  array to localStorage on every navigation. */
+const HISTORY_LIMIT = 50;
+
 export type PreviewCommand =
   | { type: 'open'; url: string }
   | { type: 'refresh' }
@@ -65,7 +69,10 @@ export const usePreviewStore = create<PreviewState>()(
         if (!url) return;
         const state = get();
         const base = state.history.slice(0, state.historyIndex + 1);
-        const history = base[base.length - 1] === url ? base : [...base, url];
+        let history = base[base.length - 1] === url ? base : [...base, url];
+        if (history.length > HISTORY_LIMIT) {
+          history = history.slice(history.length - HISTORY_LIMIT);
+        }
         set({
           url,
           history,

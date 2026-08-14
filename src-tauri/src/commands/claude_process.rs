@@ -145,6 +145,11 @@ pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
     /// Codex thread IDs keyed by session_id, populated after thread/start response.
     pub(crate) codex_thread_ids: Arc<Mutex<HashMap<String, String>>>,
+    /// DeepSeek (DSH service mode) session IDs keyed by LC session_id.
+    /// D-N1-B: one DSH session per LC tab — follow-ups reuse it for real
+    /// context continuity (no process is involved; the dsh web service owns
+    /// the session lifecycle).
+    pub(crate) deepseek_sessions: Arc<Mutex<HashMap<String, String>>>,
     /// Windows Job Objects keyed by session_id for whole-tree kill.
     /// Empty on non-Windows (field only exists under cfg(windows)).
     #[cfg(windows)]
@@ -172,6 +177,24 @@ impl ProcessManager {
     /// Remove the Codex thread ID when a session is cleaned up.
     pub async fn remove_codex_thread_id(&self, session_id: &str) {
         let mut map = self.codex_thread_ids.lock().await;
+        map.remove(session_id);
+    }
+
+    /// Retrieve the DSH session ID for an LC session (service mode).
+    pub async fn get_deepseek_session(&self, session_id: &str) -> Option<String> {
+        let map = self.deepseek_sessions.lock().await;
+        map.get(session_id).cloned()
+    }
+
+    /// Record the DSH session ID for an LC session (service mode).
+    pub async fn insert_deepseek_session(&self, session_id: &str, dsh_session_id: String) {
+        let mut map = self.deepseek_sessions.lock().await;
+        map.insert(session_id.to_string(), dsh_session_id);
+    }
+
+    /// Remove the DSH session mapping on cleanup.
+    pub async fn remove_deepseek_session(&self, session_id: &str) {
+        let mut map = self.deepseek_sessions.lock().await;
         map.remove(session_id);
     }
 }
@@ -272,6 +295,7 @@ impl ProcessManager {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             codex_thread_ids: Arc::new(Mutex::new(HashMap::new())),
+            deepseek_sessions: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(windows)]
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -327,11 +351,28 @@ impl ProcessManager {
             }
             #[cfg(not(windows))]
             {
+                #[cfg(unix)]
+                {
+                    // H4: the CLI is spawned with process_group(0) (see
+                    // session.rs), so the whole tree — node + bash/git
+                    // grandchildren — shares pgid == child pid. kill(-pid)
+                    // reaps them all; without this the direct child dies but
+                    // grandchildren keep the stdout pipe open and the reader
+                    // never sees EOF (tab stuck in "running").
+                    if let Some(pid) = managed.child.id() {
+                        let pgid = pid as i32;
+                        let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                        if rc != 0 {
+                            let err = std::io::Error::last_os_error();
+                            // ESRCH: child already exited — not an error.
+                            if err.raw_os_error() != Some(libc::ESRCH) {
+                                eprintln!("[LITTLECLAUDE] killpg({}) failed: {}", pgid, err);
+                            }
+                        }
+                    }
+                }
                 if let Err(e) = managed.child.kill().await {
-                    eprintln!(
-                        "[LITTLECLAUDE] Failed to kill process for session {}: {}",
-                        id, e
-                    );
+                    eprintln!("[LITTLECLAUDE] Failed to kill process for session {}: {}", id, e);
                 }
             }
         }

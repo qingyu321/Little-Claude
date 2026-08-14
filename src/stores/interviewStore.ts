@@ -1,5 +1,13 @@
 import { create } from 'zustand';
 
+// M4: WASAPI loopback chunks arrive at 50–100Hz; committing each one to the
+// store would re-render the whole InterviewPanel at that rate. Count in a
+// module-level variable and flush to the store at most every 500ms (the UI
+// only uses systemAudioChunks as a liveness indicator).
+let _sysAudioChunkCount = 0;
+let _sysAudioChunkLastCommit = 0;
+const SYS_AUDIO_COMMIT_MS = 500;
+
 // --- Types ---
 
 /**
@@ -206,11 +214,23 @@ export const useInterviewStore = create<InterviewState>()((set, get) => ({
   clearHistory: () => set({ history: [] }),
 
   setSessionId: (sessionId) => set({ sessionId }),
-  toggleSystemAudio: () => set((s) => ({
-    systemAudioEnabled: !s.systemAudioEnabled,
-    systemAudioChunks: 0,
-  })),
-  incrementSystemAudioChunks: () =>
-    set((s) => ({ systemAudioChunks: s.systemAudioChunks + 1 })),
+  toggleSystemAudio: () => {
+    // Reset the module-level counter too, or the next flush would restore
+    // a stale chunk count right after the user toggled audio off.
+    _sysAudioChunkCount = 0;
+    _sysAudioChunkLastCommit = 0;
+    set((s) => ({
+      systemAudioEnabled: !s.systemAudioEnabled,
+      systemAudioChunks: 0,
+    }));
+  },
+  incrementSystemAudioChunks: () => {
+    _sysAudioChunkCount += 1;
+    const now = Date.now();
+    if (now - _sysAudioChunkLastCommit >= SYS_AUDIO_COMMIT_MS) {
+      _sysAudioChunkLastCommit = now;
+      set({ systemAudioChunks: _sysAudioChunkCount });
+    }
+  },
   setSystemAudioStatus: (systemAudioStatus) => set({ systemAudioStatus }),
 }));

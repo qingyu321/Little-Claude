@@ -118,6 +118,19 @@ export interface SessionMeta {
   contextInputTokens?: number;
   contextCacheReadTokens?: number;
   contextCacheCreationTokens?: number;
+  /** DSH-declared context window (from the request/context projection — the
+   *  adapter's authoritative capacity). The Ctx bar prefers it over the local
+   *  five-tier model-window guess; absent when the adapter declares none. */
+  dshContextWindow?: number;
+  /** DSH automatic compaction in progress (compaction/start → end). The Ctx
+   *  bar shows an animated "compacting" state while set. */
+  compactionInProgress?: boolean;
+  /** Last DSH compaction finished: timestamp (Date.now()) + shadowed tokens
+   *  (token-meter heuristic estimate). Drives the transient "已压缩 −X" badge;
+   *  the next request's usage/projection overwrites contextTokens with the
+   *  precise value. */
+  compactedAt?: number;
+  compactionSavedTokens?: number;
   /** Auto-compact already fired for this session (B3 fix: per-tab flag; used to be
    *  a single ref shared across all sessions of the one InputBar instance). */
   autoCompactFired?: boolean;
@@ -287,6 +300,8 @@ interface ChatState {
   shiftPendingMessage: (tabId: string) => string | undefined;
   flushPendingMessages: (tabId: string) => string[];
   clearPendingMessages: (tabId: string) => void;
+  /** Remove one queued message by index (QueueDock delete) */
+  removePendingMessage: (tabId: string, index: number) => void;
   rewindToTurn: (tabId: string, startMsgIdx: number) => void;
   setInteractionState: (tabId: string, msgId: string, state: InteractionState, error?: string) => void;
   getActiveInteraction: (tabId: string) => ChatMessage | undefined;
@@ -697,6 +712,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return result ?? {};
     }),
 
+  removePendingMessage: (tabId, index) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => ({
+        ...tab,
+        pendingUserMessages: tab.pendingUserMessages.filter((_, i) => i !== index),
+      }));
+      return result ?? {};
+    }),
+
   rewindToTurn: (tabId, startMsgIdx) =>
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => {
@@ -793,6 +817,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           delete a[k];
           newAnchors = a;
         }
+        // Memory hygiene: same purge as removeTab — the evicted tab's
+        // agent snapshot + batch-dedup index must not linger forever
+        // (LRU eviction used to skip _purgeTabCache, leaking per-tab
+        // AgentNode maps on heavy tab churn).
+        _purgeTabCache(k);
       }
     }
     set({ tabs: newTabs, sessionCache: newTabs, streams: newStreams, scrollAnchors: newAnchors });

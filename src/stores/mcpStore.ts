@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { bridge } from '../lib/tauri-bridge';
+import { showToast } from '../components/shared/Toast';
+import { t } from '../lib/i18n';
 
 // --- Types ---
 
@@ -331,7 +333,15 @@ export const useMcpStore = create<McpState>()((set, get) => ({
   },
 
   importDiscoveredServers: async (names) => {
-    const json = await readClaudeJson();
+    let json: any;
+    try {
+      json = await readClaudeJson();
+    } catch (e) {
+      // M5: corrupt ~/.claude.json must not leave the panel hanging.
+      console.error('[mcpStore] importDiscoveredServers read failed:', e);
+      showToast(t('mcp.saveFailed'), 'error');
+      return 0;
+    }
     const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
     const existing = new Set(Object.keys(mcpServers));
     const selected = new Set(names);
@@ -349,7 +359,13 @@ export const useMcpStore = create<McpState>()((set, get) => ({
     }
 
     json.mcpServers = mcpServers;
-    await writeClaudeJson(json);
+    try {
+      await writeClaudeJson(json);
+    } catch (e) {
+      console.error('[mcpStore] importDiscoveredServers write failed:', e);
+      showToast(t('mcp.saveFailed'), 'error');
+      return 0;
+    }
     const servers = parseServers(mcpServers);
     set((state) => ({
       servers,
@@ -363,46 +379,79 @@ export const useMcpStore = create<McpState>()((set, get) => ({
   },
 
   addServer: async (name, config) => {
-    const json = await readClaudeJson();
-    const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
-    mcpServers[name] = {
-      command: config.command,
-      args: config.args,
-      env: Object.keys(config.env).length > 0 ? config.env : undefined,
-      type: config.type,
-    };
-    json.mcpServers = mcpServers;
-    await writeClaudeJson(json);
-    const servers = parseServers(mcpServers);
-    set({ servers, isAdding: false });
+    try {
+      const json = await readClaudeJson();
+      const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
+      mcpServers[name] = {
+        command: config.command,
+        args: config.args,
+        env: Object.keys(config.env).length > 0 ? config.env : undefined,
+        type: config.type,
+      };
+      json.mcpServers = mcpServers;
+      await writeClaudeJson(json);
+      const servers = parseServers(mcpServers);
+      set({ servers, isAdding: false });
+    } catch (e) {
+      // M5: ~/.claude.json corrupt or write failure used to surface as an
+      // unhandled rejection with zero user feedback.
+      console.error('[mcpStore] addServer failed:', e);
+      set({ isAdding: false });
+      showToast(t('mcp.saveFailed'), 'error');
+    }
   },
 
   updateServer: async (oldName, newName, config) => {
-    const json = await readClaudeJson();
-    const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
-    if (oldName !== newName) {
-      delete mcpServers[oldName];
+    try {
+      const json = await readClaudeJson();
+      const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
+      if (oldName !== newName) {
+        // M5: renaming onto an existing server silently overwrote its
+        // config (data loss). Refuse instead.
+        if (mcpServers[newName] !== undefined) {
+          set({ editingServer: null });
+          showToast(t('mcp.nameConflict'), 'error');
+          return;
+        }
+        delete mcpServers[oldName];
+      }
+      mcpServers[newName] = {
+        command: config.command,
+        args: config.args,
+        env: Object.keys(config.env).length > 0 ? config.env : undefined,
+        type: config.type,
+      };
+      json.mcpServers = mcpServers;
+      await writeClaudeJson(json);
+      const servers = parseServers(mcpServers);
+      set({ servers, editingServer: null });
+    } catch (e) {
+      console.error('[mcpStore] updateServer failed:', e);
+      set({ editingServer: null });
+      showToast(t('mcp.saveFailed'), 'error');
     }
-    mcpServers[newName] = {
-      command: config.command,
-      args: config.args,
-      env: Object.keys(config.env).length > 0 ? config.env : undefined,
-      type: config.type,
-    };
-    json.mcpServers = mcpServers;
-    await writeClaudeJson(json);
-    const servers = parseServers(mcpServers);
-    set({ servers, editingServer: null });
   },
 
   deleteServer: async (name) => {
-    const json = await readClaudeJson();
-    const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
-    delete mcpServers[name];
-    json.mcpServers = mcpServers;
-    await writeClaudeJson(json);
-    const servers = parseServers(mcpServers);
-    set({ servers });
+    try {
+      const json = await readClaudeJson();
+      const mcpServers = (json.mcpServers as Record<string, unknown>) || {};
+      delete mcpServers[name];
+      json.mcpServers = mcpServers;
+      await writeClaudeJson(json);
+      const servers = parseServers(mcpServers);
+      set((state) => ({
+        servers,
+        // U3: a deleted imported server used to stay marked 'imported' in
+        // the scan list, making re-import impossible through the UI.
+        discoveredServers: state.discoveredServers.map((s) =>
+          s.name === name ? { ...s, imported: false } : s,
+        ),
+      }));
+    } catch (e) {
+      console.error('[mcpStore] deleteServer failed:', e);
+      showToast(t('mcp.saveFailed'), 'error');
+    }
   },
 
   setEditing: (name) => set({ editingServer: name, isAdding: false }),

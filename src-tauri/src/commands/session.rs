@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::commands::anthropic_proxy::WebSearchFallbackConfig;
@@ -174,6 +174,14 @@ pub async fn start_claude_session(
         state.remove(&session_id).await;
         return crate::start_codex_session(app, state, stdin_mgr, params, session_id, generation)
             .await;
+    }
+
+    if cli_backend == "deepseek" {
+        // D-N1-B service mode: no per-session process — the tab reuses its
+        // DSH session for real context continuity, so no generation bump or
+        // process teardown here (first message creates the session, later
+        // ones go through send_stdin → session.prompt on the same session).
+        return crate::start_deepseek_session(app, state, stdin_mgr, params, session_id, 0).await;
     }
     // ─── Claude path (existing logic) ───────────────────────────────────
 
@@ -737,6 +745,15 @@ pub async fn start_claude_session(
     let mut child = {
         let spawn_unix = |bin: &str| -> std::io::Result<tokio::process::Child> {
             let mut cmd = Command::new(bin);
+            #[cfg(unix)]
+            {
+                // H4: new process group so kill can reap the whole tree
+                // (bash/git/… spawned by the CLI). Without this, killing
+                // the direct child leaves grandchildren holding the stdout
+                // pipe — the reader never sees EOF and the tab hangs in
+                // "running" forever.
+                cmd.process_group(0);
+            }
             cmd.args(&args)
                 .current_dir(&params.cwd)
                 .env("PATH", &enriched_path)
@@ -1171,6 +1188,14 @@ pub async fn start_claude_session(
         let exit_code = pm_clone
             .wait_status(&sid_clone, std::time::Duration::from_secs(2))
             .await;
+        // M1: re-check the generation AFTER the 2s await. A restart of the
+        // same session_id inside this window would otherwise let this stale
+        // reader remove the NEW session's stdin/process entries and emit a
+        // bogus process_exit for it (first message then fails with
+        // "No stdin handle").
+        if !crate::is_session_generation_current(&sid_clone, my_generation) {
+            return;
+        }
         if exit_code.is_none() && !clean_eof {
             // F3: the read loop broke on an error (poisoned pipe / unreachable
             // frontend), but the CLI is still alive. Previously this orphaned the
@@ -1247,10 +1272,14 @@ pub async fn start_claude_session(
 
 #[tauri::command]
 pub async fn send_stdin(
+    app: AppHandle,
     process_mgr: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     session_id: String,
     message: String,
+    #[allow(unused_variables)]
+    mode: Option<String>, // DSH service mode only: "queue" | "steer"
+
 ) -> Result<(), String> {
     // Check which backend this session uses
     let backend_name = process_mgr.get_backend(&session_id).await;
@@ -1262,6 +1291,34 @@ pub async fn send_stdin(
         let thread_id = process_mgr.get_codex_thread_id(&session_id).await;
         let msg = backend.build_user_message(&message, thread_id.as_deref());
         stdin_mgr.send(&session_id, &msg).await
+    } else if backend_name.as_deref() == Some("deepseek") {
+        // D-N1-B service mode: follow-up on the tab's DSH session (real
+        // context continuity). Steer mode interrupts at the step boundary;
+        // queue mode waits for the current turn. Leading "/" is handled by
+        // DSH itself as a slash command.
+        let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+        let service = dsh_mgr.ensure().await?;
+        let dsh_sid = process_mgr
+            .get_deepseek_session(&session_id)
+            .await
+            .ok_or_else(|| {
+                "No DSH session for this tab — send the first message first".to_string()
+            })?;
+        let mode = match mode.as_deref() {
+            Some("steer") => "steer",
+            _ => "queue",
+        };
+        crate::commands::dsh_service::unary(
+            &service.base_url,
+            "session.prompt",
+            serde_json::json!({
+                "sessionId": dsh_sid,
+                "mode": mode,
+                "content": [{ "type": "text", "text": message }],
+            }),
+        )
+        .await
+        .map(|_| ())
     } else {
         // Claude: wrap user text in stream-json NDJSON format
         let json_msg = serde_json::json!({
@@ -1309,6 +1366,7 @@ pub async fn send_raw_stdin(
 /// Format mirrors exactly what the SDK constructs (from reverse-engineered source).
 #[tauri::command]
 pub async fn respond_permission(
+    app: AppHandle,
     process_mgr: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     session_id: String,
@@ -1321,7 +1379,34 @@ pub async fn respond_permission(
     // Check which backend this session uses
     let backend_name = process_mgr.get_backend(&session_id).await;
 
-    if backend_name.as_deref() == Some("codex") {
+    if backend_name.as_deref() == Some("deepseek") {
+        // S2: DSH permission cards (approval/requested) are answered via the
+        // unary `respond` RPC — the same envelope the auto-allow path uses
+        // (dsh_service.rs), so non-bypass sessions can approve/deny tools.
+        // The request_id surfaced to the frontend IS the approvalId.
+        let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+        let service = dsh_mgr.ensure().await?;
+        let dsh_sid = process_mgr
+            .get_deepseek_session(&session_id)
+            .await
+            .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
+        let outcome = if allow { "allowed-once" } else { "denied" };
+        crate::commands::dsh_service::unary(
+            &service.base_url,
+            "respond",
+            serde_json::json!({
+                "type": "client-response",
+                "rpcId": request_id,
+                "result": { "ok": true, "value": {
+                    "sessionId": dsh_sid,
+                    "approvalId": request_id,
+                    "outcome": outcome,
+                } },
+            }),
+        )
+        .await
+        .map(|_| ())
+    } else if backend_name.as_deref() == Some("codex") {
         // M4: codex permission requests are registered in start_codex_session
         // (lib.rs, out of scope for this module's registry). Their request_ids
         // are JSON-RPC integer ids (backends/codex.rs translate_approval_request)
@@ -1398,6 +1483,7 @@ pub async fn respond_permission(
 /// Send a runtime control request to the CLI (set_permission_mode, set_model, interrupt).
 #[tauri::command]
 pub async fn send_control_request(
+    app: AppHandle,
     process_mgr: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     session_id: String,
@@ -1408,7 +1494,30 @@ pub async fn send_control_request(
     let backend_name = process_mgr.get_backend(&session_id).await;
     let is_codex = backend_name.as_deref() == Some("codex");
 
-    if is_codex {
+    if backend_name.as_deref() == Some("deepseek") {
+        // S2: DSH has no stdin control channel — interrupt maps to
+        // session.cancel; mode/model/rewind controls are not applicable
+        // (approval behavior is fixed at session start via auto_allow), so
+        // silently succeed like codex's no-op path.
+        match subtype.as_str() {
+            "interrupt" => {
+                let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+                let service = dsh_mgr.ensure().await?;
+                let dsh_sid = process_mgr
+                    .get_deepseek_session(&session_id)
+                    .await
+                    .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
+                crate::commands::dsh_service::unary(
+                    &service.base_url,
+                    "session.cancel",
+                    serde_json::json!({ "sessionId": dsh_sid }),
+                )
+                .await
+                .map(|_| ())
+            }
+            _ => Ok(()),
+        }
+    } else if is_codex {
         let backend = crate::backends::resolve_backend(Some("codex"));
         let msg = match subtype.as_str() {
             "interrupt" => backend.build_interrupt_message(),
@@ -1477,11 +1586,37 @@ pub async fn send_control_request(
 
 #[tauri::command]
 pub async fn kill_session(
+    app: AppHandle,
     state: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     proxy_mgr: State<'_, crate::commands::anthropic_proxy::ProxyManager>,
     session_id: String,
 ) -> Result<(), String> {
+    // D-N1-B service mode: no process to kill — cancel the running turn
+    // (queue stays intact), then drop the tab's session mapping.
+    if state.get_backend(&session_id).await.as_deref() == Some("deepseek") {
+        if let Some(dsh_sid) = state.get_deepseek_session(&session_id).await {
+            let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+            // M1: use get() (no spawn) — teardown must not start a service
+            // just to delete a route. Also drop the route map entry so no
+            // further mux frames reach this dead tab.
+            if let Some(service) = dsh_mgr.get().await {
+                let _ = crate::commands::dsh_service::unary(
+                    &service.base_url,
+                    "session.cancel",
+                    serde_json::json!({ "sessionId": dsh_sid }),
+                )
+                .await;
+                // D10: drop ALL per-session bookkeeping so the maps don't
+                // grow with every session ever created (translators and
+                // last_seqs used to be append-only).
+                service.session_routes.lock().await.remove(&dsh_sid);
+                service.translators.lock().await.remove(&dsh_sid);
+                service.last_seqs.lock().await.remove(&dsh_sid);
+            }
+        }
+        state.remove_deepseek_session(&session_id).await;
+    }
     stdin_mgr.remove(&session_id).await;
     state.remove(&session_id).await;
     proxy_mgr.stop(&session_id).await;
@@ -2248,7 +2383,6 @@ fn mask_url_userinfo(url: &str) -> String {
 
 #[tauri::command]
 pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
-    use std::io::BufRead;
 
     // Only allow loading sessions inside the canonical ~/.claude/projects tree
     // (the same tree list_sessions scans). This blocks arbitrary-path reads.
@@ -2280,17 +2414,30 @@ pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
         ));
     }
 
-    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
-    let reader = std::io::BufReader::new(file);
-    let mut messages = vec![];
-    for line in reader.lines() {
-        if let Ok(line) = line {
+    // H5: the synchronous read + parse (up to 50 MiB, and a single line can
+    // carry a multi-MB embedded payload whose serde Value tree amplifies
+    // memory 5-10x) used to run directly on the tokio worker, freezing the
+    // UI for seconds. Move it to the blocking pool and cap per-line size.
+    const MAX_LINE_BYTES: usize = 8 * 1024 * 1024; // 8 MiB per JSONL line
+    tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
+        let reader = std::io::BufReader::new(file);
+        let mut messages = vec![];
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
+            if line.len() > MAX_LINE_BYTES {
+                eprintln!("[LITTLECLAUDE] load_session: skipping {}-byte line (> 8 MiB cap)", line.len());
+                continue;
+            }
             if let Ok(json) = serde_json::from_str::<Value>(&line) {
                 messages.push(json);
             }
         }
-    }
-    Ok(messages)
+        Ok(messages)
+    })
+    .await
+    .map_err(|e| format!("load_session task panicked: {}", e))?
 }
 
 /// System-injected user lines the frontend's session-loader filters out
