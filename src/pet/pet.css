@@ -126,6 +126,11 @@
   color: #8fd8ce;
   border: 1px solid rgba(69, 184, 168, 0.5);
 }
+.pet-badge-item.deepseek {
+  background: rgba(77, 107, 254, 0.22);
+  color: #9db1ff;
+  border: 1px solid rgba(77, 107, 254, 0.5);
+}
 
 /* --- Token panel (badge expanded) --- */
 
@@ -168,6 +173,9 @@
 }
 .pet-token-agent.codex {
   background: rgba(69, 184, 168, 0.12);
+}
+.pet-token-agent.deepseek {
+  background: rgba(77, 107, 254, 0.12);
 }
 .pet-token-agent-head {
   display: flex;

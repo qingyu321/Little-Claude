@@ -62,7 +62,11 @@ export async function sendPetNotification(title: string, body: string): Promise<
   }
 }
 
-const AGENT_LABEL: Record<PetAgent, string> = { claude: "Claude", codex: "Codex" };
+const AGENT_LABEL: Record<PetAgent, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  deepseek: "DeepSeek",
+};
 
 /** Localized notification text. Error body may carry a truncated detail. */
 export function buildNotifyText(

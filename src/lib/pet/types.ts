@@ -14,7 +14,7 @@ export type PetPhase =
   | "completed";
 
 /** Which CLI backend owns a session. */
-export type PetAgent = "claude" | "codex";
+export type PetAgent = "claude" | "codex" | "deepseek";
 
 /** Aggregated status of one agent (all its sessions merged). */
 export interface PetAgentStatus {
@@ -52,7 +52,7 @@ export interface PetBubbleMessage {
 export interface PetStatusPayload {
   v: 1;
   ts: number;
-  /** Total active sessions across both agents. */
+  /** Total active sessions across all agents. */
   totalActive: number;
   /** Pet display scale (0.5–1.5) — main-window settings, synced to the pet window. */
   scale: number;
@@ -60,6 +60,9 @@ export interface PetStatusPayload {
   skin: string;
   claude: PetAgentStatus;
   codex: PetAgentStatus;
+  /** DeepSeek Harness sessions (dsh backend) — own slot so DSH activity
+   *  isn't mislabeled as Claude. */
+  deepseek: PetAgentStatus;
   /** Current bubble message, or null when nothing worth showing. */
   message: PetBubbleMessage | null;
 }

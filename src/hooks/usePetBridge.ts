@@ -127,6 +127,7 @@ export function usePetBridge() {
         skin: settings.petSkin,
         claude: computed.claude,
         codex: computed.codex,
+        deepseek: computed.deepseek,
         message: computed.message ? { ...computed.message, ts: 0 } : computed.message,
       });
       if (json === lastJson) return;

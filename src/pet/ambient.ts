@@ -79,13 +79,18 @@ export function drawAmbient(
   switch (ambient.kind) {
     case "dots": {
       if (dedupeProcedural) break;
-      const y = h * 0.24;
+      // 白色圆点 + 深描边，浮在头顶上方留白区（深色身体上不淡化）
+      const y = h * 0.12;
       const act = Math.floor(frame / 2) % 3;
       for (let i = 0; i < 3; i++) {
-        ctx.fillStyle = i === act ? "rgba(43,43,43,0.85)" : "rgba(43,43,43,0.22)";
+        const on = i === act;
+        ctx.fillStyle = on ? "#fff" : "rgba(255,255,255,0.4)";
+        ctx.strokeStyle = "rgba(15,30,60,0.85)";
+        ctx.lineWidth = 1.2 * sf;
         ctx.beginPath();
-        ctx.arc(w / 2 + (i - 1) * 8 * sf, y, 2.2 * sf, 0, Math.PI * 2);
+        ctx.arc(w / 2 + (i - 1) * 8 * sf, y, 2.6 * sf, 0, Math.PI * 2);
         ctx.fill();
+        ctx.stroke();
       }
       break;
     }
@@ -102,13 +107,13 @@ export function drawAmbient(
       break;
     }
     case "scan": {
+      // 单条扫描光带（细亮线 + 柔光晕），语义清晰
       const prog = (now / 1200) % 1;
-      const y = h * 0.12 + prog * h * 0.68;
-      for (let i = 2; i >= 0; i--) {
-        const yy = y - i * 12 * sf;
-        ctx.fillStyle = `rgba(96, 165, 250, ${0.3 - i * 0.08})`;
-        ctx.fillRect(w * 0.08, yy, w * 0.84, 4 * sf);
-      }
+      const y = h * 0.08 + prog * h * 0.6;
+      ctx.fillStyle = "rgba(96, 165, 250, 0.16)";
+      ctx.fillRect(w * 0.08, y - 14 * sf, w * 0.84, 28 * sf);
+      ctx.fillStyle = "rgba(191, 219, 254, 0.95)";
+      ctx.fillRect(w * 0.08, y - 0.8 * sf, w * 0.84, 1.6 * sf);
       break;
     }
     case "confetti": {
@@ -147,12 +152,17 @@ export function drawAmbient(
     }
     case "zzz": {
       if (dedupeProcedural) break;
+      // 白色描边 Z z，浮在右上角头顶留白区（深色身体上不淡化）
       const bob = Math.sin((frame / 6) * Math.PI * 2) * 2;
-      ctx.fillStyle = "rgba(43,43,43,0.7)";
-      ctx.font = `${12 * sf}px sans-serif`;
+      ctx.font = `bold ${12 * sf}px sans-serif`;
       ctx.textAlign = "center";
-      ctx.fillText("Z", w * 0.66, h * 0.28 + bob * sf);
-      ctx.fillText("z", w * 0.74, h * 0.36 + bob * sf);
+      ctx.lineWidth = 2.5 * sf;
+      ctx.strokeStyle = "rgba(15,30,60,0.9)";
+      ctx.fillStyle = "#fff";
+      ctx.strokeText("Z", w * 0.74, h * 0.09 + bob * sf);
+      ctx.fillText("Z", w * 0.74, h * 0.09 + bob * sf);
+      ctx.strokeText("z", w * 0.84, h * 0.16 + bob * sf);
+      ctx.fillText("z", w * 0.84, h * 0.16 + bob * sf);
       ctx.textAlign = "left";
       break;
     }

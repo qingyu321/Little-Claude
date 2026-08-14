@@ -55,6 +55,7 @@ export interface PetStatusComputed {
   totalActive: number;
   claude: PetAgentStatus;
   codex: PetAgentStatus;
+  deepseek: PetAgentStatus;
   message: PetBubbleContent;
 }
 
@@ -80,6 +81,7 @@ interface Candidate {
 export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
   const claude = emptyAgentStatus();
   const codex = emptyAgentStatus();
+  const deepseek = emptyAgentStatus();
   let best: Candidate | null = null;
 
   for (const [tabId, tab] of input.tabs) {
@@ -109,7 +111,9 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
         // report must show the codex dot, not the default backend's.
         const rawBackend = tab.sessionMeta?.snapshotCliBackend;
         const agent: PetAgent =
-          rawBackend === "claude" || rawBackend === "codex" ? rawBackend : input.defaultBackend;
+          rawBackend === "claude" || rawBackend === "codex" || rawBackend === "deepseek"
+            ? rawBackend
+            : input.defaultBackend;
         best = {
           phase: ph,
           toolName: undefined,
@@ -125,9 +129,11 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
     const phase: PetPhase = tab.activityStatus?.phase ?? "idle";
     const rawBackend = tab.sessionMeta?.snapshotCliBackend;
     const agent: PetAgent =
-      rawBackend === "claude" || rawBackend === "codex" ? rawBackend : input.defaultBackend;
+      rawBackend === "claude" || rawBackend === "codex" || rawBackend === "deepseek"
+        ? rawBackend
+        : input.defaultBackend;
 
-    const acc = agent === "codex" ? codex : claude;
+    const acc = agent === "codex" ? codex : agent === "deepseek" ? deepseek : claude;
     acc.active += 1;
     if (PHASE_PRIORITY[phase] > PHASE_PRIORITY[acc.phase]) {
       acc.phase = phase;
@@ -153,7 +159,7 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
     // pet shows the total tokens burned across ALL running tasks of that
     // backend, not just the highest-priority tab's.
     if (phase !== "idle") {
-      const acc = agent === "codex" ? codex : claude;
+      const acc = agent === "codex" ? codex : agent === "deepseek" ? deepseek : claude;
       acc.input = (acc.input ?? 0) + (tab.sessionMeta?.inputTokens ?? 0);
       acc.output = (acc.output ?? 0) + (tab.sessionMeta?.outputTokens ?? 0);
       acc.cacheRead = (acc.cacheRead ?? 0) + (tab.sessionMeta?.cacheReadTokens ?? 0);
@@ -163,9 +169,10 @@ export function computePetStatus(input: PetAggregateInput): PetStatusComputed {
 
   return {
     ts: input.now,
-    totalActive: claude.active + codex.active,
+    totalActive: claude.active + codex.active + deepseek.active,
     claude,
     codex,
+    deepseek,
     message: buildBubbleContent(best, input.templates, input.now),
   };
 }

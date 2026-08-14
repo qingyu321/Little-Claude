@@ -9,6 +9,7 @@ import { usePetStore } from "./petStore";
 const SOURCE_COLORS: Record<string, string> = {
   claude: "#C47252",
   codex: "#45B8A8",
+  deepseek: "#4D6BFE",
 };
 const ERROR_BORDER = "rgba(224, 82, 82, 0.55)";
 
@@ -29,7 +30,10 @@ export function Bubble() {
 
   const dot = bubble.source ? SOURCE_COLORS[bubble.source] : "#8A8A8F";
   // Token line: from the bubble source's agent status (fall back to any active).
-  const agent = bubble.source === "codex" ? status?.codex : status?.claude;
+  const agent =
+    bubble.source === "codex" ? status?.codex
+      : bubble.source === "deepseek" ? status?.deepseek
+        : status?.claude;
   const hasTokens = (agent?.input ?? 0) + (agent?.output ?? 0) + (agent?.cacheRead ?? 0) + (agent?.cacheCreation ?? 0) > 0;
 
   return (

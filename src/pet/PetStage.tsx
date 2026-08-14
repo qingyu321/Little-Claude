@@ -209,15 +209,19 @@ export function PetStage({ config }: { config: PetSheetConfig }) {
         const curPhase = state.status.claude.phase ?? "idle";
         const prevCodex = prev.status?.codex.phase ?? "idle";
         const curCodex = state.status.codex.phase ?? "idle";
+        const prevDeep = prev.status?.deepseek?.phase ?? "idle";
+        const curDeep = state.status.deepseek?.phase ?? "idle";
         const activePhases = ["thinking", "writing", "tool", "awaiting"];
         if (
           (activePhases.includes(prevPhase) && curPhase === "completed") ||
-          (activePhases.includes(prevCodex) && curCodex === "completed")
+          (activePhases.includes(prevCodex) && curCodex === "completed") ||
+          (activePhases.includes(prevDeep) && curDeep === "completed")
         ) {
           engine.playAction("jump");
         } else if (
           (activePhases.includes(prevPhase) && curPhase === "error") ||
-          (activePhases.includes(prevCodex) && curCodex === "error")
+          (activePhases.includes(prevCodex) && curCodex === "error") ||
+          (activePhases.includes(prevDeep) && curDeep === "error")
         ) {
           engine.playAction("failed");
         }

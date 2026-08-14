@@ -29,17 +29,19 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
 from PIL import Image, ImageDraw
 
 SRC = r"C:\桌面\ai吊图\489a90b4c2d94db256eefdd7788394c43546384821127812.png"
-W, H = 320, 300
+W, H = 340, 316
 COLS = 16  # 最大帧数（run 16 帧往返跑，其他行右侧透明补齐）
 NAME = "deepseek-whale-girl"
 DISPLAY = "鲸鱼娘 · DeepSeek"
-ANCHOR = 292  # 锚底（内容底部 y290，压扁贴地）
-ROT_CY = 180  # 旋转中心（内容垂直中心 y68-290）
+ANCHOR = 260  # 锚底（居中后内容底部 y260，压扁贴地）
+ROT_CY = 158  # 旋转中心（内容垂直中心 y55-260）
 
-# 原图 crop 与缩放
-CX0, CY0, CX1, CY1 = 150, 120, 1110, 1020  # 960x900 → 等比 1/3
-SX = W / (CX1 - CX0)  # 320/960 = 1/3
-SY = H / (CY1 - CY0)  # 300/900 = 1/3
+# 原图 crop 与缩放：四周外扩留白——v7 曾因 crop x150 切进身体左缘（x0 列竖条残边）
+# 和发带贴画布顶（待机横条闪烁）；crop (100,96,1120,1044) 角色 x16.7-333.3 y8-308
+# 四周 7-8px 余量，等比 1/3 → 340×316
+CX0, CY0, CX1, CY1 = 100, 96, 1120, 1044
+SX = W / (CX1 - CX0)  # 340/1020 = 1/3
+SY = H / (CY1 - CY0)  # 316/948 = 1/3
 
 # 擦除区（原图坐标）：deepsleep 文字 + Z z（v6 全部误判区已删除，发带/尾巴/腿脚全保留）
 ERASE_ORIG = [
@@ -58,7 +60,7 @@ def to_base(x, y):
 
 
 def build_base():
-    """从原图重建基图：crop → 擦装饰（原图坐标）→ 泛洪抠白 → 缩放 → 白边/连通域清理。"""
+    """从原图重建基图：crop → 擦装饰（原图坐标）→ 泛洪抠白 → 缩放 → 清理 → 居中留白。"""
     img = Image.open(SRC).convert("RGBA")
     img = img.crop((CX0, CY0, CX1, CY1))
     px = img.load()
@@ -77,7 +79,35 @@ def build_base():
     img = img.resize((W, H), Image.LANCZOS)
     img = clean_edges(img)
     img = remove_islands(img)
+    img = center_content(img)
     return img
+
+
+def center_content(img, pad_ratio=0.06):
+    """内容居中留白：按 alpha>128 计算真实内容 bbox（排除半透明幽灵边缘），
+    内容缩放到画布 (1-2*pad_ratio) 以内后居中——解决 crop 切进身体导致的
+    左右缘竖条残边 + 角色贴边（v7 横条/竖条 bug 的根治）。"""
+    px = img.load()
+    xs, ys = [], []
+    for y in range(H):
+        for x in range(W):
+            if px[x, y][3] > 128:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return img
+    bbox = (min(xs), min(ys), max(xs), max(ys))
+    w, h = bbox[2] - bbox[0] + 1, bbox[3] - bbox[1] + 1
+    scale = min(1.0, (W * (1 - 2 * pad_ratio)) / w, (H * (1 - 2 * pad_ratio)) / h)
+    content = img.crop(bbox)
+    if scale < 1:
+        content = content.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                                 Image.LANCZOS)
+    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    out.paste(content, ((W - content.width) // 2, (H - content.height) // 2), content)
+    print(f"  居中: 内容 {w}x{h} → 缩放 {scale:.2f} → {content.width}x{content.height}"
+          f"（四周余量 {(W-content.width)//2}/{ (H-content.height)//2}px）")
+    return out
 
 
 def flood_cut(img):
@@ -168,7 +198,7 @@ STATES = [
     ("sleep",   4, 600, True),
     ("wave",    4, 150, False),
     ("jump",    6, 130, False),
-    ("waiting", 4, 160, True),
+    ("waiting", 4, 200, True),
     ("review",  4, 200, True),
     ("failed",  4, 200, False),
 ]
@@ -221,14 +251,15 @@ def frame_transform(state, frame, n):
     if state == "idle":
         return {"dy": -abs(math.sin((frame / 8) * math.pi * 2)) * 4}
     if state == "run":
-        # 往返跑：16 帧 = 8 帧去程 + 8 帧返程。角色缩小 0.75 后在画布内
-        # 从左跑到右（dx 0→87，全程完整不出框，右缘 87+233=320）
+        # 往返跑：16 帧 = 8 帧去程 + 8 帧返程。不缩放保持 100% 大小
+        # （v7.1：缩到 0.75 会让写作状态与待机切换时"忽大忽小"）。
+        # 居中后角色左缘 x20、宽 299，dx 0→21 全程画布内（20+21+299 = 340）
         i = frame % 8
-        dx = i * (87 / 7)
+        dx = i * (21 / 7)
         if frame >= 8:
-            dx = 87 - i * (87 / 7)
+            dx = 21 - i * (21 / 7)
         return {"dx": dx, "dy": -abs(math.sin((i / 7) * math.pi)) * 10,
-                "scale_x": 0.75, "scale_y": 0.75}
+                "scale_x": 1.0, "scale_y": 1.0}
     if state == "sleep":
         return {"dy": (0, -4, -8, -4)[frame], "scale_y": 0.93}
     if state == "wave":
@@ -239,8 +270,9 @@ def frame_transform(state, frame, n):
             return {"scale_y": 0.78}
         return {"dy": -arc * 24, "scale_y": 0.97}
     if state == "waiting":
-        # 整体旋转歪头（绕头部中心），无区域切割
-        return {"dy": (0, -3, 0, -3)[frame], "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 4}
+        # 整体旋转歪头（绕头部中心），无区域切割；慢摆：200ms×4 帧周期 800ms，
+        # 幅度收窄到 ±2.5°（v8 用户反馈"抖动太快"）
+        return {"dy": (0, -2, 0, -2)[frame], "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 2.5}
     if state == "review":
         # 不画睁眼（用户反馈悬浮感）——纯整体微动，审查感由引擎氛围层扫描线提供
         return {"dy": (0, -2, 0, -2)[frame], "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 2}
@@ -263,6 +295,9 @@ def build_sheet():
                           angle=p.get("angle", 0.0))
             sheet.paste(f, (i * W, row * H))
         states[key] = {"row": row, "frames": frames, "duration": dur, "loop": loop}
+    # 引擎 writing→running 需要 running 键：与 run 共用同一行（写作/输出时左右跑）
+    if "run" in states:
+        states["running"] = dict(states["run"])
     cfg = {
         "name": NAME,
         "sprite": "",
@@ -333,7 +368,7 @@ PREVIEW_HTML = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>🐋 鲸鱼娘 · DeepSeek 皮肤预览</h1>
-  <div class="sub">320×300 原图直用 v7 · 8 状态动画 · 本地文件无联网</div>
+  <div class="sub">340×316 原图直用 v8 · 8 状态动画 + 氛围层模拟（彩纸/爱心/Zzz/扫描线/泪滴）· 本地文件无联网</div>
   <div class="stage">
     <canvas id="main"></canvas>
     <div class="info">
@@ -365,6 +400,109 @@ mctx.imageSmoothingEnabled = false;
 let cur = "idle", autoplay = false, stateStart = 0;
 const counters = {};
 const cells = [];
+
+// —— 氛围层模拟（对应引擎 src/pet/ambient.ts；非皮肤帧的一部分，真实桌宠由引擎实时叠加）——
+const AMBIENT_MAP = {
+  sleep: { kind: "zzz" },
+  waiting: { kind: "dots" },
+  review: { kind: "scan" },
+  running: { kind: "cursor" },
+  jump: { kind: "confetti", until: 3000 },  // 彩纸 3s（jump 只有 780ms，其余时间悬停播放）
+  failed: { kind: "tear", until: 3000 },
+};
+let amb = null, heartAt = 0;
+function setAmbient(kind, until) {
+  amb = kind ? { kind, start: performance.now(),
+    until: until === Infinity ? Infinity : performance.now() + until } : null;
+}
+function drawAmbient(ctx, now, state, frame) {
+  if (!amb || now > amb.until) return;
+  const w = F.w, h = F.h, sf = w / 96;
+  if (amb.kind === "cursor") {
+    if (now % 500 < 250) {
+      ctx.strokeStyle = "rgba(43,43,43,.8)";
+      ctx.lineWidth = 2 * sf;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(w * 0.62, h * 0.24);
+      ctx.lineTo(w * 0.62, h * 0.24 + 10 * sf);
+      ctx.stroke();
+    }
+  } else if (amb.kind === "dots") {
+    // 白色圆点 + 深描边，浮在头顶上方留白区（深色身体上不淡化）
+    const y = h * 0.12;
+    const act = Math.floor(frame / 2) % 3;
+    for (let i = 0; i < 3; i++) {
+      const on = i === act;
+      ctx.fillStyle = on ? "#fff" : "rgba(255,255,255,.4)";
+      ctx.strokeStyle = "rgba(15,30,60,.85)";
+      ctx.lineWidth = 1.2 * sf;
+      ctx.beginPath(); ctx.arc(w / 2 + (i - 1) * 8 * sf, y, 2.6 * sf, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+    }
+  } else if (amb.kind === "scan") {
+    // 单条扫描光带（细亮线 + 柔光晕），语义清晰
+    const prog = (now / 1200) % 1;
+    const y = h * 0.08 + prog * h * 0.6;
+    ctx.fillStyle = "rgba(96,165,250,.16)";
+    ctx.fillRect(w * 0.08, y - 14 * sf, w * 0.84, 28 * sf);
+    ctx.fillStyle = "rgba(191,219,254,.95)";
+    ctx.fillRect(w * 0.08, y - 0.8 * sf, w * 0.84, 1.6 * sf);
+  } else if (amb.kind === "confetti") {
+    const COLORS = ["#F97316", "#FBBF24", "#34D399", "#60A5FA", "#F472B6", "#A78BFA"];
+    const N = 26;
+    for (let i = 0; i < N; i++) {
+      const seed = (i * 2654435761) >>> 0;
+      const dur = 1600 + (seed % 1500);
+      const prog = ((now / dur) + (seed % 1000) / 1000) % 1;
+      const xBase = (((seed >>> 5) % 1000) / 1000) * w;
+      const x = (xBase + Math.sin(now / 400 + i) * 10 * sf) % w;
+      const y = prog * h * 0.72;
+      ctx.fillStyle = COLORS[i % COLORS.length];
+      ctx.globalAlpha = 1 - prog * 0.8;
+      ctx.fillRect(x, y, 2.4 * sf, 6 * sf);
+    }
+    ctx.globalAlpha = 1;
+  } else if (amb.kind === "tear") {
+    const cheekY = h * 0.44;
+    ctx.fillStyle = "rgba(242,169,162,.5)";
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse(w / 2 + side * w * 0.16, cheekY, 5 * sf, 3.4 * sf, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const pulse = 0.55 + Math.sin(now / 300) * 0.25;
+    ctx.fillStyle = `rgba(127,184,232,${pulse})`;
+    ctx.beginPath();
+    ctx.arc(w / 2 - w * 0.16, cheekY + 8 * sf, 2.6 * sf, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (amb.kind === "zzz") {
+    // 白色描边 Z z，浮在右上角头顶留白区（深色身体上不淡化）
+    const bob = Math.sin((frame / 6) * Math.PI * 2) * 2;
+    ctx.font = `bold ${12 * sf}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.lineWidth = 2.5 * sf;
+    ctx.strokeStyle = "rgba(15,30,60,.9)";
+    ctx.fillStyle = "#fff";
+    ctx.strokeText("Z", w * 0.74, h * 0.09 + bob * sf);
+    ctx.fillText("Z", w * 0.74, h * 0.09 + bob * sf);
+    ctx.strokeText("z", w * 0.84, h * 0.16 + bob * sf);
+    ctx.fillText("z", w * 0.84, h * 0.16 + bob * sf);
+    ctx.textAlign = "left";
+  } else if (amb.kind === "hearts") {
+    const el = (now - amb.start) / 1200;
+    if (el < 0 || el > 1) return;
+    const x = w / 2 + Math.sin(now / 300) * 14 * sf + el * 10 * sf;
+    const y = h * 0.34 - el * 34 * sf;
+    ctx.globalAlpha = 1 - el;
+    ctx.fillStyle = "#F472B6";
+    ctx.font = `${11 * sf}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText("♥", x, y);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  }
+}
 
 function mkCell(key, st) {
   const el = document.createElement("div");
@@ -403,11 +541,14 @@ function drawTo(cv, ctx, key, frame) {
 
 function setCur(key) {
   cur = key; stateStart = performance.now();
+  // 进入新状态 → 按引擎 AMBIENT_MAP 挂氛围（idle 无固定氛围，爱心由下方随机调度）
+  const spec = AMBIENT_MAP[key];
+  if (spec) setAmbient(spec.kind, spec.until ?? Infinity);
   document.getElementById("curName").textContent = key;
   const st = CFG.states[key];
   document.getElementById("curMeta").textContent =
     st.frames + " 帧 / " + st.duration + " ms / " + (st.loop ? "循环播放" : "播放一次") +
-    " · sheet 行 " + st.row;
+    " · sheet 行 " + st.row + (spec ? " · 氛围: " + spec.kind : "");
   cells.forEach(c => c.el.classList.toggle("active", c.key === key));
 }
 
@@ -425,7 +566,20 @@ btn.onclick = () => {
 let last = performance.now();
 function loop(now) {
   const dt = Math.min(now - last, 200); last = now;
-  drawTo(main, mctx, cur, advance(cur, dt));
+  const frame = advance(cur, dt);
+  drawTo(main, mctx, cur, frame);
+  // 氛围层叠加在皮肤帧之上（逻辑单位 = 帧像素，与引擎一致）
+  if (amb) {
+    mctx.save();
+    mctx.scale(MAIN_SCALE, MAIN_SCALE);
+    drawAmbient(mctx, now, cur, frame);
+    mctx.restore();
+  }
+  // idle 随机爱心（8–15s 一次，与引擎 maybeScheduleHearts 一致）
+  if (cur === "idle" && (!amb || now > amb.until)) {
+    if (!heartAt) heartAt = now + 8000 + Math.random() * 7000;
+    if (now >= heartAt) { heartAt = now + 8000 + Math.random() * 7000; setAmbient("hearts", 1200); }
+  } else heartAt = 0;
   for (const c of cells) drawTo(c.cv, c.ctx, c.key, advance(c.key, dt));
   if (autoplay && now - stateStart > 2600) {
     stateStart = now;

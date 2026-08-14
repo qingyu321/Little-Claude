@@ -46,7 +46,8 @@ export function Badge() {
   const [expanded, setExpanded] = useState(false);
   const c = status?.claude.active ?? 0;
   const x = status?.codex.active ?? 0;
-  if (c === 0 && x === 0) return null;
+  const d = status?.deepseek?.active ?? 0;
+  if (c === 0 && x === 0 && d === 0) return null;
 
   return (
     <div className="pet-badge-wrap">
@@ -57,11 +58,13 @@ export function Badge() {
       >
         {c > 0 && <span className="pet-badge-item claude">C{c}</span>}
         {x > 0 && <span className="pet-badge-item codex">X{x}</span>}
+        {d > 0 && <span className="pet-badge-item deepseek">D{d}</span>}
       </button>
       {expanded && status && (
         <div className="pet-token-panel">
           <AgentRow label="Claude" className="claude" status={status.claude} />
           <AgentRow label="Codex" className="codex" status={status.codex} />
+          <AgentRow label="DeepSeek" className="deepseek" status={status.deepseek} />
         </div>
       )}
     </div>

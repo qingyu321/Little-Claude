@@ -75,7 +75,9 @@ export const TRANSIENT_FALLBACK: Record<PetStateKey, PetStateKey> = {
 export function resolvePetState(payload: PetStatusPayload): PetStateKey {
   const a = payload.claude.phase;
   const b = payload.codex.phase;
-  const best = PHASE_PRIORITY[a] >= PHASE_PRIORITY[b] ? a : b;
+  const c = payload.deepseek?.phase ?? "idle"; // deepseek slot added 2026-08-14
+  let best = PHASE_PRIORITY[a] >= PHASE_PRIORITY[b] ? a : b;
+  if (PHASE_PRIORITY[c] > PHASE_PRIORITY[best]) best = c;
   return STATE_MAPPING[best] ?? "idle";
 }
 

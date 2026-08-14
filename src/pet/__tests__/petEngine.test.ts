@@ -22,7 +22,7 @@ const states = {
   sleep: { row: 8, frames: 8, duration: 600, loop: true },
 };
 
-function payload(claude: PetPhase, codex: PetPhase = "idle"): PetStatusPayload {
+function payload(claude: PetPhase, codex: PetPhase = "idle", deepseek: PetPhase = "idle"): PetStatusPayload {
   return {
     v: 1,
     ts: 0,
@@ -31,6 +31,7 @@ function payload(claude: PetPhase, codex: PetPhase = "idle"): PetStatusPayload {
     skin: "default",
     claude: { active: claude === "idle" ? 0 : 1, phase: claude },
     codex: { active: codex === "idle" ? 0 : 1, phase: codex },
+    deepseek: { active: deepseek === "idle" ? 0 : 1, phase: deepseek },
     message: null,
   };
 }
@@ -50,6 +51,9 @@ describe("resolvePetState", () => {
     expect(resolvePetState(payload("writing", "awaiting"))).toBe("wave");
     expect(resolvePetState(payload("tool", "thinking"))).toBe("review");
     expect(resolvePetState(payload("idle", "writing"))).toBe("running");
+    // deepseek slot participates like any other agent
+    expect(resolvePetState(payload("idle", "idle", "writing"))).toBe("running");
+    expect(resolvePetState(payload("thinking", "idle", "tool"))).toBe("review");
   });
 
   it("STATE_MAPPING covers every PetPhase", () => {
