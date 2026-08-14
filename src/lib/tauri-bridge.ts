@@ -287,6 +287,8 @@ export interface CliStatus {
   version: string | null;
   version_compatible: boolean;
   git_bash_missing: boolean;
+  /** DSH service mode: `dsh web` answering on the default port (deepseek only) */
+  service_running?: boolean;
 }
 
 export interface CliCandidate {
@@ -380,13 +382,6 @@ export interface ProvidersFile {
     proxyUrl?: string;
     preset?: string;
     cliBackend?: string;
-    webSearchFallback?: {
-      baseUrl: string;
-      apiKey?: string;
-      envVar?: string;
-      model?: string;
-      enabled?: boolean;
-    } | null;
     createdAt: number;
     updatedAt: number;
   }[];
@@ -488,8 +483,8 @@ export const bridge = {
   sendMessage: (sessionId: string, message: string) =>
     invoke<void>('send_message', { sessionId, message }),
 
-  sendStdin: (sessionId: string, message: string) =>
-    invoke<void>('send_stdin', { sessionId, message }),
+  sendStdin: (sessionId: string, message: string, mode?: 'queue' | 'steer') =>
+    invoke<void>('send_stdin', { sessionId, message, mode }),
 
   sendRawStdin: (sessionId: string, message: string) =>
     invoke<void>('send_raw_stdin', { sessionId, message }),
@@ -859,6 +854,14 @@ export const bridge = {
   /** Check if a newer Codex CLI version is available */
   checkCodexUpdate: () =>
     invoke<{ current: string | null; latest: string | null; update_available: boolean }>('check_codex_update'),
+
+  /** DeepSeek Harness CLI: binary + version + service probe (service mode) */
+  checkDshCli: () =>
+    invoke<CliStatus>('check_dsh_cli'),
+
+  /** Install DeepSeek Harness CLI via npm (@deepseek-ai/dsh) */
+  installDshCli: () =>
+    invokeWithTimeout<void>('install_dsh_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
   /** Export Codex session to Claude-compatible JSONL session file.
    *  Takes pre-built JSONL content and cwd, returns the new Claude session UUID. */

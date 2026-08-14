@@ -356,7 +356,6 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             cli_backend: Some("codex".into()),
-            web_search_fallback: None,
         };
 
         let toml = generate_config_toml(&provider, "read-only", None, None, None);
@@ -398,7 +397,6 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             cli_backend: Some("codex".into()),
-            web_search_fallback: None,
         };
 
         // When preferred_model is provided, it takes precedence over provider mapping
@@ -424,7 +422,6 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             cli_backend: Some("codex".into()),
-            web_search_fallback: None,
         };
 
         let toml = generate_config_toml(&provider, "read-only", None, None, None);

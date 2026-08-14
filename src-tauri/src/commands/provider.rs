@@ -12,27 +12,6 @@ pub(crate) struct ModelMapping {
     pub(crate) provider_model: String,
 }
 
-/// 联网搜索兜底端点配置：请求携带 web_search 服务端工具时，由本地代理
-/// 将请求转发到该端点执行搜索（工具名会自动改写为 web_search_20250305）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WebSearchFallback {
-    #[serde(default)]
-    pub(crate) base_url: String,
-    #[serde(default)]
-    pub(crate) api_key: Option<String>,
-    #[serde(default)]
-    pub(crate) env_var: Option<String>,
-    #[serde(default)]
-    pub(crate) model: Option<String>,
-    /// false = 用户关闭开关（内容保留，不路由搜索）；缺省 true 兼容旧数据。
-    #[serde(default = "default_fallback_enabled")]
-    pub(crate) enabled: bool,
-}
-
-fn default_fallback_enabled() -> bool {
-    true
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,9 +30,6 @@ pub(crate) struct ApiProvider {
     /// Which CLI backend this provider uses: "claude" (default) or "codex".
     #[serde(default)]
     pub(crate) cli_backend: Option<String>,
-    /// 联网搜索兜底配置（可空 = 未启用）。
-    #[serde(default)]
-    pub(crate) web_search_fallback: Option<WebSearchFallback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

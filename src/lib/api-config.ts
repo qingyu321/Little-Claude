@@ -16,14 +16,6 @@ export interface ApiConfigFileV2 {
     extra_env?: Record<string, string>;
     /** Which CLI backend this provider uses: "claude" (default) or "codex". */
     cliBackend?: 'claude' | 'codex';
-    /** 联网搜索兜底端点配置（可空）。 */
-    webSearchFallback?: {
-      baseUrl: string;
-      apiKey?: string;
-      envVar?: string;
-      model?: string;
-      enabled?: boolean;
-    };
   };
 }
 
@@ -51,9 +43,6 @@ export function exportProvider(provider: ApiProvider): string {
       ...(provider.proxyUrl ? { proxyUrl: provider.proxyUrl } : {}),
       ...(provider.cliBackend && provider.cliBackend !== 'claude'
         ? { cliBackend: provider.cliBackend }
-        : {}),
-      ...(provider.webSearchFallback?.baseUrl
-        ? { webSearchFallback: provider.webSearchFallback }
         : {}),
     },
   };
@@ -160,27 +149,6 @@ export function parseAndValidate(
     ? p.cliBackend
     : undefined;
 
-  // webSearchFallback (v2 export includes it)
-  let webSearchFallback: ApiProvider['webSearchFallback'];
-  if (version === 2 && p.webSearchFallback && typeof p.webSearchFallback === 'object') {
-    const wsf = p.webSearchFallback as Record<string, unknown>;
-    if (typeof wsf.baseUrl === 'string' && wsf.baseUrl.trim()) {
-      webSearchFallback = {
-        baseUrl: wsf.baseUrl.trim(),
-        ...(typeof wsf.apiKey === 'string' && wsf.apiKey.trim()
-          ? { apiKey: wsf.apiKey.trim() }
-          : {}),
-        ...(typeof wsf.envVar === 'string' && wsf.envVar.trim()
-          ? { envVar: wsf.envVar.trim() }
-          : {}),
-        ...(typeof wsf.model === 'string' && wsf.model.trim()
-          ? { model: wsf.model.trim() }
-          : {}),
-        ...(typeof wsf.enabled === 'boolean' ? { enabled: wsf.enabled } : {}),
-      };
-    }
-  }
-
   return {
     ok: true,
     provider: {
@@ -192,7 +160,6 @@ export function parseAndValidate(
       ...(extra_env ? { extra_env } : {}),
       ...(proxyUrl ? { proxyUrl } : {}),
       ...(cliBackend ? { cliBackend } : {}),
-      ...(webSearchFallback ? { webSearchFallback } : {}),
     },
   };
 }

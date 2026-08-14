@@ -7,9 +7,7 @@ use tokio::process::Command;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::commands::anthropic_proxy::WebSearchFallbackConfig;
 use crate::commands::claude_process::{ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager};
-use crate::commands::provider::ApiProvider;
 use crate::commands::metadata::session_names_path;
 #[cfg(feature = "video-analysis")]
 use crate::commands::video_analysis::inject_video_analysis_multimodal_env;
@@ -73,56 +71,6 @@ fn consume_pending_permission_request(session_id: &str, request_id: &str) {
     map.remove(&permission_key(session_id, request_id));
 }
 
-/// 从 provider 配置解析联网搜索兜底端点（密钥转明文）：
-/// apiKey 非空优先，否则读环境变量 `env_var`（在 Little Claude 进程环境中）。
-/// 停用（enabled=false）、base_url 为空、密钥为空或环境变量未设置 → None（请求继续走主端点）。
-fn build_fallback_config(provider: &ApiProvider) -> Option<WebSearchFallbackConfig> {
-    let fb = provider.web_search_fallback.as_ref()?;
-    if !fb.enabled || fb.base_url.trim().is_empty() {
-        eprintln!(
-            "[LITTLECLAUDE:provider] web-search fallback skipped: enabled={}, base_url='{}'",
-            fb.enabled,
-            fb.base_url.trim()
-        );
-        return None;
-    }
-    let key = fb
-        .api_key
-        .as_deref()
-        .filter(|k| !k.trim().is_empty() && !k.starts_with("TENC1:"))
-        .map(|k| k.trim().to_string())
-        .or_else(|| {
-            let var = fb.env_var.as_deref()?.trim();
-            if var.is_empty() {
-                return None;
-            }
-            match std::env::var(var) {
-                Ok(v) if !v.trim().is_empty() => Some(v),
-                _ => {
-                    eprintln!(
-                        "[LITTLECLAUDE:provider] web-search fallback env var '{}' 未设置，跳过兜底",
-                        var
-                    );
-                    None
-                }
-            }
-        });
-    let key = match key {
-        Some(k) => k,
-        None => {
-            eprintln!(
-                "[LITTLECLAUDE:provider] web-search fallback key missing (api_key={:?} TENC1-filtered or env_var empty), 跳过兜底",
-                fb.api_key.as_deref().map(|k| k.starts_with("TENC1:"))
-            );
-            return None;
-        }
-    };
-    Some(WebSearchFallbackConfig {
-        base_url: fb.base_url.clone(),
-        api_key: key,
-        model: fb.model.clone().unwrap_or_default(),
-    })
-}
 
 #[tauri::command]
 pub async fn start_claude_session(
@@ -279,15 +227,12 @@ pub async fn start_claude_session(
         "ALL_PROXY", "all_proxy",
     ];
 
-    // ─── Local proxy (conversion & web-search fallback) ────────────────
+    // ─── Local proxy (OpenAI-format conversion only) ──────────────────
     // Claude CLI only speaks the Anthropic Messages API. When the provider
     // exposes ONLY an OpenAI-compatible endpoint (api_format = "openai"),
     // start a local proxy that converts Anthropic requests to OpenAI format
     // and forwards them to the real endpoint, then converts the responses
-    // back. When a web-search fallback endpoint is configured, the proxy is
-    // started regardless of format: requests carrying the web_search server
-    // tool are forwarded to the fallback endpoint (Anthropic format),
-    // everything else passes through to the main endpoint untouched.
+    // back. Anthropic-format providers connect directly — no proxy.
     // Point ANTHROPIC_BASE_URL at the proxy.
     if cli_backend == "claude" {
         if let Some(ref provider_id) = params.provider_id {
@@ -297,9 +242,7 @@ pub async fn start_claude_session(
                     .iter()
                     .find(|p| p.id == *provider_id)
                 {
-                    let fallback = build_fallback_config(provider);
-                    let need_proxy = provider.api_format == "openai" || fallback.is_some();
-                    if need_proxy {
+                    if provider.api_format == "openai" {
                         let has_key = provider
                             .api_key
                             .as_ref()
@@ -311,7 +254,6 @@ pub async fn start_claude_session(
                                     provider.base_url.clone(),
                                     provider.api_key.clone().unwrap_or_default(),
                                     provider.api_format.clone(),
-                                    fallback.clone(),
                                 )
                                 .await?;
                             eprintln!(
@@ -320,16 +262,6 @@ pub async fn start_claude_session(
                             );
                             resolved_env
                                 .insert("ANTHROPIC_BASE_URL".to_string(), proxy_url);
-                            // 凭据交换：兜底启用时把 CLI 侧的 ANTHROPIC_API_KEY 换成兜底
-                            // key，保证服务端工具结果的加密内容（encrypted_content）解密
-                            // 密钥与兜底端点收到的凭据一致。代理用自己持有的 key 做上游
-                            // 认证，完全忽略 CLI 发来的 header。
-                            if let Some(fb) = &fallback {
-                                resolved_env.insert(
-                                    "ANTHROPIC_API_KEY".to_string(),
-                                    fb.api_key.clone(),
-                                );
-                            }
                         }
                     }
                 }

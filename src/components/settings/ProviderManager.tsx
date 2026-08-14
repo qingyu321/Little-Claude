@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { useProviderStore, type WebSearchFallbackConfig } from '../../stores/providerStore';
+import { useProviderStore } from '../../stores/providerStore';
 import { bridge } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { type PresetProvider } from '../../lib/provider-presets';
@@ -7,7 +7,7 @@ import { parseAndValidate, importAsProvider, exportProvider } from '../../lib/ap
 import { AddProviderMenu } from './AddProviderMenu';
 import { ProviderCard, type CardTestStatus } from './ProviderCard';
 import { ProviderForm, type TestStatus } from './ProviderForm';
-import { WebSearchFallbackCard } from './WebSearchFallbackCard';
+
 import { normalizeProviderModelName } from '../../lib/model-utils';
 
 export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: boolean } = {}) {
@@ -151,16 +151,6 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
     setDeleteTarget(null);
   }, [deleteTarget, editingId, deleteProvider]);
 
-  /** 兜底配置变更：稳定引用（[] 依赖），内部从 getState 读最新活跃 id。
-   *  注意不能在这里用内联箭头——WebSearchFallbackCard 的 effect 依赖
-   *  onChange（经 push），内联箭头每次渲染新建 → 渲染后 effect 必跑 →
-   *  防抖循环触发 updateProvider（updatedAt 变化 → 重渲染）→ 循环饿死
-   *  debouncedSave，配置永不落盘。 */
-  const handleFallbackChange = useCallback((fb: WebSearchFallbackConfig | null) => {
-    const s = useProviderStore.getState();
-    const id = s.activeProviderPerBackend['claude'] ?? null;
-    if (id) s.updateProvider(id, { webSearchFallback: fb });
-  }, []);
 
   /** Card test button: quick independent test without opening form */
   const handleCardTest = useCallback(async (providerId: string) => {
@@ -394,14 +384,7 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
             onImport={handleImport}
           />
 
-          {/* 联网搜索兜底模型：请求携带 web_search 服务端工具时转发到该端点
-              （仅 claude 后端有意义——codex 无 web_search 工具） */}
-          {activeBackend === 'claude' && (
-            <WebSearchFallbackCard
-              provider={activeProvider}
-              onChange={handleFallbackChange}
-            />
-          )}
+
         </div>
       )}
     </div>
