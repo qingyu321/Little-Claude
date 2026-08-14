@@ -442,7 +442,7 @@ async fn forward_openai_conversion(
                             let out = usage.get("completion_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
                             let cache_read = usage.get("prompt_cache_hit_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
                             let cache_creation = usage.get("prompt_cache_miss_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
-                            if inp + out + cache_read + cache_creation > 0 {
+                            if inp.saturating_add(out).saturating_add(cache_read).saturating_add(cache_creation) > 0 {
                                 let mid = openai
                                     .get("id")
                                     .and_then(|i| i.as_str())
@@ -683,11 +683,13 @@ async fn forward_passthrough(
         // Anthropic 错误格式回传；原始 body 随 ForwardResult 带给调用方做
         // 4xx 语义判定（工具不支持 vs 其他错误）。
         let text = resp.text().await.unwrap_or_default();
+        // Redact the body before logging: an upstream that echoes the API
+        // key in its error message would otherwise persist it to the
+        // on-disk proxy log.
+        let body_for_log = redact_secrets(&text.chars().take(400).collect::<String>());
         proxy_log(&format!(
             "UPSTREAM_ERR {} status={} body={}",
-            target,
-            status,
-            text.chars().take(400).collect::<String>()
+            target, status, body_for_log
         ));
         let message = serde_json::from_str::<Value>(&text)
             .ok()
@@ -1147,8 +1149,8 @@ impl SseConverter {
     /// message_delta fields it doesn't know, so input/cache never reach the
     /// frontend stream). Returns None when no usable usage was seen.
     fn usage_record(&self) -> Option<(String, u64, u64, u64, u64)> {
-        let total = self.input_tokens + self.output_tokens
-            + self.cache_read_tokens + self.cache_creation_tokens;
+        let total = self.input_tokens.saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_tokens).saturating_add(self.cache_creation_tokens);
         if total == 0 || self.msg_id.is_empty() {
             return None;
         }
@@ -1267,6 +1269,13 @@ impl SseConverter {
         if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
                 let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                // Cap the tool-call index: a malicious/malformed upstream could
+                // claim index=1e9 and this loop would allocate a billion
+                // placeholder entries (OOM). Real tool streams have < 100
+                // parallel calls; anything above the cap is dropped.
+                if idx > 4096 {
+                    continue;
+                }
                 while self.tool_calls.len() <= idx {
                     self.tool_calls
                         .push(json!({"id": "", "name": "", "args": ""}));

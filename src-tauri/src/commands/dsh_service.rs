@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, RwLock};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 /// Default port probed first — an externally running `dsh web` wins over spawning.
 const DEFAULT_PORT: u16 = 3080;
@@ -97,6 +99,14 @@ pub struct DshServiceState {
     /// alive so `kill_on_drop` reaps it when the state Arc is released.
     #[allow(dead_code)]
     child: std::sync::Mutex<Option<tokio::process::Child>>,
+    /// Handles of the mux/host reader tasks — aborted on Drop so a
+    /// service replacement (respawn) never leaks reconnect loops pinned
+    /// to a stale ws_url (they would otherwise retry forever).
+    reader_handles: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
+    /// Wall-clock (unix secs) when the spawned child was created — used to
+    /// guard taskkill against PID reuse (kill only if the PID still belongs
+    /// to a process born at that moment).
+    spawned_at: Option<u64>,
     /// Route map: dsh `sessionId` → routed LC tab.
     pub session_routes: Arc<Mutex<HashMap<String, DshRoute>>>,
     /// Highest consumed seq per session (reconnect catch-up baseline).
@@ -115,22 +125,26 @@ impl DshServiceState {
         let (mux_tx, _) = broadcast::channel::<Value>(512);
         let mux_rx2 = mux_tx.subscribe();
         // Route mux frames to the translate task (single consumer).
-        tokio::spawn(read_mux_loop(self.ws_url.clone(), mux_tx.clone()));
-        tokio::spawn(route_mux_frames(
+        let mut handles = Vec::with_capacity(3);
+        handles.push(tokio::spawn(read_mux_loop(self.ws_url.clone(), mux_tx.clone())).abort_handle());
+        handles.push(tokio::spawn(route_mux_frames(
             mux_rx2,
             self.base_url.clone(),
             self.session_routes.clone(),
             self.last_seqs.clone(),
             self.translators.clone(),
-        ));
+        ))
+        .abort_handle());
         // Host stream: keep the socket alive and surface session lifecycle
         // end events to the owning tab (prevents permanent "running" UI).
-        tokio::spawn(read_host_loop(
+        handles.push(tokio::spawn(read_host_loop(
             self.ws_url.clone(),
             self.session_routes.clone(),
             self.translators.clone(),
             self.last_seqs.clone(),
-        ));
+        ))
+        .abort_handle());
+        *self.reader_handles.lock().unwrap() = handles;
     }
 
     /// Best-effort synchronous teardown of a spawned service (app exit or
@@ -145,11 +159,50 @@ impl DshServiceState {
         {
             let pid = self.child.lock().unwrap().as_ref().and_then(|c| c.id());
             if let Some(pid) = pid {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                // PID-reuse guard: taskkill by PID could kill an UNRELATED
+                // process if our child already exited and the OS reused the
+                // PID. Verify the live process at that PID was created at
+                // (approximately) the moment we spawned the service before
+                // killing. PowerShell query is sync and bounded (2s).
+                let guard_ok = self.spawned_at.map(|want| {
+                    // want = unix secs when we spawned the child. The live
+                    // process's StartTime (unix secs) must match within a
+                    // generous ±10s window — a reused PID would show a
+                    // completely different birth time.
+                    let script = format!(
+                        "try {{ $p = Get-Process -Id {} -ErrorAction Stop; [int64]($p.StartTime.ToUniversalTime().Subtract([datetime]::new(1970,1,1,0,0,0,[datetimekind]::Utc)).TotalSeconds) }} catch {{ -1 }}",
+                        pid
+                    );
+                    let out = std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                        .creation_flags(0x08000000)
+                        .output();
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            match s.parse::<i64>() {
+                                Ok(born) => {
+                                    let want_i = want as i64;
+                                    (born - want_i).abs() <= 10
+                                }
+                                Err(_) => false,
+                            }
+                        }
+                        _ => false,
+                    }
+                });
+                if guard_ok.unwrap_or(false) {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                } else {
+                    log::warn!(
+                        "[dsh:service] skip taskkill pid {} — process missing or age mismatch (PID reuse guard)",
+                        pid
+                    );
+                }
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -426,6 +479,19 @@ pub struct DshServiceManager {
     inner: RwLock<Option<Arc<DshServiceState>>>,
 }
 
+impl Drop for DshServiceState {
+    fn drop(&mut self) {
+        // Abort the mux/host reader tasks — without this, a service
+        // replacement (respawn) leaks three reconnect loops pinned to the
+        // stale ws_url, retrying forever against a dead port.
+        if let Ok(handles) = self.reader_handles.lock() {
+            for h in handles.iter() {
+                h.abort();
+            }
+        }
+    }
+}
+
 impl DshServiceManager {
     pub fn new() -> Self {
         Self::default()
@@ -511,6 +577,8 @@ impl DshServiceManager {
                 session_routes: Arc::new(Mutex::new(HashMap::new())),
                 last_seqs: Arc::new(Mutex::new(HashMap::new())),
                 translators: Arc::new(Mutex::new(HashMap::new())),
+                reader_handles: std::sync::Mutex::new(Vec::new()),
+                spawned_at: None,
             }));
         }
 
@@ -518,7 +586,15 @@ impl DshServiceManager {
         let bin = crate::find_deepseek_binary()
             .ok_or_else(|| "dsh CLI (DeepSeek Harness) not found. Install it with: npm install -g @deepseek-ai/dsh --registry=https://registry.npmjs.org/".to_string())?;
 
-        for try_port in DEFAULT_PORT + 1..DEFAULT_PORT + 1 + SPAWN_PORT_TRIES {
+        // Spawn on an UNPREDICTABLE port: fixed low ports (3081..3085) let a
+        // same-machine attacker pre-occupy the range and impersonate our
+        // service (the loopback trust fence has no token). Random high ports
+        // in the dynamic range make pre-occupation impractical.
+        let base = 49_152 + (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u16 % 16_000)
+            .unwrap_or(0));
+        for try_port in base..base + SPAWN_PORT_TRIES {
             let port = if port_free(try_port) { try_port } else { continue };
             // M2: a spawn failure (port race, binary hiccup) should not abort
             // the whole probe — log and try the next port, mirroring the
@@ -536,6 +612,10 @@ impl DshServiceManager {
             for _ in 0..READY_POLLS {
                 if probe_unary(&base_url, "host.describe", json!({})).await.is_ok() {
                     log::info!("[dsh:service] spawned dsh web at :{}", port);
+                    let spawned_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
                     return Ok(Arc::new(DshServiceState {
                         base_url,
                         ws_url: format!("ws://127.0.0.1:{}", port),
@@ -544,6 +624,8 @@ impl DshServiceManager {
                         session_routes: Arc::new(Mutex::new(HashMap::new())),
                         last_seqs: Arc::new(Mutex::new(HashMap::new())),
                         translators: Arc::new(Mutex::new(HashMap::new())),
+                reader_handles: std::sync::Mutex::new(Vec::new()),
+                spawned_at: Some(spawned_at),
                     }));
                 }
                 tokio::time::sleep(READY_INTERVAL).await;

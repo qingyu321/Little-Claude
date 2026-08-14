@@ -705,7 +705,17 @@ impl CodexBackend {
 
     fn translate_approval_request(&self, msg: &Value) -> Option<UnifiedEvent> {
         let _method = msg.get("method")?.as_str()?;
-        let id = msg.get("id").and_then(|v| v.as_u64()).map(|i| i.to_string())?;
+        // Accept BOTH numeric ids (codex's default) and string ids — a
+        // string id (e.g. "req_…") read with as_u64() returns None and the
+        // whole permission request would be silently dropped.
+        let id = match msg.get("id") {
+            Some(v) if v.is_u64() => v.as_u64().unwrap_or(0).to_string(),
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+            _ => return None,
+        };
+        if id.is_empty() {
+            return None;
+        }
         let params = msg.get("params");
 
         let tool_name = params

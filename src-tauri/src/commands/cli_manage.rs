@@ -271,8 +271,22 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                             eprintln!("error 193: removing corrupt binary and re-searching...");
                             if let Some(cli_dir) = cli_download_dir() {
                                 let suspect = cli_dir.join("claude.exe");
-                                if suspect.exists() {
+                                // Only delete when the file is demonstrably NOT a
+                                // valid PE (no MZ magic): error 193 can also fire
+                                // for a healthy native binary that fails to load
+                                // (missing DLL / bad CPU feature), and deleting
+                                // that would lose a working install.
+                                let is_valid_pe = std::fs::read(&suspect)
+                                    .ok()
+                                    .map(|bytes| bytes.len() >= 2 && bytes[0] == 0x4D && bytes[1] == 0x5A)
+                                    .unwrap_or(false);
+                                if suspect.exists() && !is_valid_pe {
                                     let _ = std::fs::remove_file(&suspect);
+                                } else if suspect.exists() {
+                                    eprintln!(
+                                        "error 193 but {} looks like a valid PE — keeping it",
+                                        suspect.display()
+                                    );
                                 }
                             }
                             let alt = find_claude_binary();

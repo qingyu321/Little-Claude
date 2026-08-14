@@ -155,6 +155,16 @@ pub async fn start_claude_session(
         args.push("--include-partial-messages".to_string());
     }
 
+    // cmd /C re-parses the command line: a model/tool/permission value
+    // containing cmd metacharacters (& | < > ^ % " etc.) could inject
+    // extra commands. Model names and tool names are enumerated values —
+    // reject anything outside a safe charset instead of trying to escape.
+    fn cmd_arg_safe(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.:/@[]()".contains(c))
+    }
+
     // Resume an existing CLI session if requested
     eprintln!("[LITTLECLAUDE] resume_session_id={:?}", params.resume_session_id);
     if let Some(ref resume_id) = params.resume_session_id {
@@ -175,6 +185,10 @@ pub async fn start_claude_session(
 
     if let Some(ref tools) = params.allowed_tools {
         for tool in tools {
+            // cmd /C injection guard — see cmd_arg_safe above.
+            if !cmd_arg_safe(tool) {
+                return Err(format!("Invalid tool name: {}", tool));
+            }
             args.push("--allowedTools".to_string());
             args.push(tool.clone());
         }
@@ -185,6 +199,9 @@ pub async fn start_claude_session(
     // In bypassPermissions mode the CLI auto-approves tool permissions internally
     // (zero overhead) but still sends control_requests for user interactions.
     let permission_mode = params.permission_mode.as_deref().unwrap_or("default");
+    if !cmd_arg_safe(permission_mode) {
+        return Err(format!("Invalid permission mode: {}", permission_mode));
+    }
     args.push("--permission-mode".to_string());
     args.push(permission_mode.to_string());
     args.push("--permission-prompt-tool".to_string());
@@ -273,6 +290,10 @@ pub async fn start_claude_session(
     // comes from the provider's model_mappings and should be passed to the
     // CLI regardless of api_format — the endpoint handles model routing.
     if let Some(ref model) = params.model {
+        // cmd /C injection guard — see cmd_arg_safe above.
+        if !cmd_arg_safe(model) {
+            return Err(format!("Invalid model name: {}", model));
+        }
         args.push("--model".to_string());
         args.push(model.clone());
     }

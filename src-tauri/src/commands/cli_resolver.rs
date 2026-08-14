@@ -852,8 +852,11 @@ pub fn cleanup(targets: &[String]) -> CleanupResult {
         let path = Path::new(target);
 
         if !path.exists() {
-            // Already gone (or broken symlink) — try removing anyway
-            if std::fs::symlink_metadata(path).is_ok() {
+            // Already gone (or broken symlink) — only removable when the
+            // TARGET path itself is inside an AppLocal dir. A dangling link
+            // elsewhere (e.g. /tmp/link → deleted CLI) must not be deletable
+            // through cleanup().
+            if is_app_local(target) && std::fs::symlink_metadata(path).is_ok() {
                 let _ = std::fs::remove_file(path);
                 removed.push(target.clone());
             }
@@ -1070,7 +1073,15 @@ pub fn inject_path(cli_path: &str) -> Result<String, String> {
         .to_string();
 
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    let export_line = format!("export PATH=\"{}:$PATH\"", dir);
+    // Escape shell metacharacters in the injected path — a CLI directory
+    // containing " or $() or backticks would otherwise execute when the
+    // user's next shell starts (persistent backdoor via a crafted path).
+    let escaped_dir = dir
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$");
+    let export_line = format!("export PATH=\"{}:$PATH\"", escaped_dir);
     let marker = "# Added by Her";
     let block = format!("\n{}\n{}\n", marker, export_line);
 
@@ -1116,19 +1127,22 @@ pub fn inject_path(cli_path: &str) -> Result<String, String> {
         .to_string_lossy()
         .to_string();
 
-    let ps_script = format!(
-        "$old = [Environment]::GetEnvironmentVariable('Path','User'); \
-         if ($old -and -not $old.Contains('{}')) {{ \
-           [Environment]::SetEnvironmentVariable('Path', '{}' + ';' + $old, 'User') \
-         }} elseif (-not $old) {{ \
-           [Environment]::SetEnvironmentVariable('Path', '{}', 'User') \
-         }}",
-        dir.replace('\'', "''"),
-        dir.replace('\'', "''"),
-        dir.replace('\'', "''"),
-    );
+    // Pass the path via an environment variable instead of embedding it in
+    // the -Command string: a CLI directory containing quotes, $(), backticks
+    // or semicolons would otherwise break out of the single-quoted literal
+    // (only single quotes were escaped before) and execute arbitrary
+    // PowerShell — a persistent backdoor triggered on every inject_path.
+    let ps_script = "
+        $dir = $env:LITTLE_CLAUDE_CLI_DIR; \
+        $old = [Environment]::GetEnvironmentVariable('Path','User'); \
+        if ($old -and -not $old.Contains($dir)) { \
+          [Environment]::SetEnvironmentVariable('Path', $dir + ';' + $old, 'User') \
+        } elseif (-not $old) { \
+          [Environment]::SetEnvironmentVariable('Path', $dir, 'User') \
+        }";
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .env("LITTLE_CLAUDE_CLI_DIR", &dir)
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
         .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("PowerShell failed: {}", e))?;
@@ -1161,10 +1175,28 @@ pub fn delete_cli(path: &str) -> Result<String, String> {
         return Err(format!("File not found: {}", path));
     }
 
-    // Safety: only files whose parent directory is one of the known CLI
-    // directories may be deleted. The parent is canonicalized (not the file
-    // itself) so symlinked binaries inside scanned dirs still pass, while a
-    // path like ~/.ssh/id_rsa resolves to a parent outside the set.
+    // Safety (two independent gates):
+    //  1. The file NAME must be a known CLI binary (claude/codex/dsh) —
+    //     arbitrary filenames inside scanned dirs (e.g. %APPDATA%\npm\*.log)
+    //     must never be deletable, even from a XSS'd webview.
+    //  2. The parent directory must be one of the known non-Dynamic CLI dirs.
+    let file_name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("Invalid path: {}", path))?;
+    let lower = file_name.to_lowercase();
+    let is_cli_name = ["claude", "claude.exe", "claude.cmd", "claude.ps1",
+                       "codex", "codex.exe", "codex.cmd", "codex.ps1",
+                       "dsh", "dsh.exe", "dsh.cmd", "dsh.ps1"]
+        .iter()
+        .any(|n| *n == lower);
+    if !is_cli_name {
+        return Err(format!(
+            "Refusing to delete non-CLI file: {}",
+            path
+        ));
+    }
+
     let parent = p
         .parent()
         .ok_or_else(|| format!("Invalid path: {}", path))?;

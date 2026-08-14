@@ -1247,7 +1247,23 @@ pub(crate) fn extract_node_archive(
                     continue; // skip the top-level dir itself
                 }
 
+                // Windows: a leading drive-letter segment ("C:/evil") makes
+                // Path::join treat the target as absolute — reject any
+                // colon-bearing segment (mirrors the zip branch).
+                if stripped
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .any(|seg| seg.contains(':'))
+                {
+                    return Err(format!("tar entry name not allowed: {}", stripped.display()));
+                }
+
                 let target = install_dir.join(&stripped);
+                // Belt-and-braces: the joined target must stay inside
+                // install_dir (mirrors the zip branch).
+                if !target.starts_with(&install_dir) {
+                    return Err(format!("tar entry escapes install dir: {}", stripped.display()));
+                }
                 if let Some(parent) = target.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }

@@ -186,6 +186,12 @@ pub fn config_path() -> PathBuf {
 ///
 /// Returns the path that was written to.
 pub fn write_config(toml_content: &str) -> Result<PathBuf, String> {
+    // Serialize concurrent writers: the M5 merge is read-merge-write, so two
+    // sessions starting simultaneously could interleave and lose each
+    // other's provider blocks. A static mutex makes the critical section
+    // atomic (std Mutex is fine — the call is sync and short).
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CONFIG_LOCK.lock().map_err(|e| format!("codex config lock poisoned: {}", e))?;
     let dir = config_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create ~/.codex/: {}", e))?;
@@ -216,7 +222,20 @@ pub fn write_config(toml_content: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to write config.toml: {}", e))?;
 
     eprintln!("[codex_config] Written config to {}", path.display());
-    eprintln!("[codex_config] Content:\n{}", toml_content);
+    // Debug print WITHOUT secrets: api_key values (and any credentials
+    // embedded in base_url) must never land in stderr/app logs.
+    let masked: Vec<String> = toml_content
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("api_key") && l.contains('=') {
+                "api_key = \"***\"".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    eprintln!("[codex_config] Content:\n{}", masked.join("\n"));
+    eprintln!("[codex_config] Content:\n{}", masked.join("\n"));
 
     Ok(path)
 }
