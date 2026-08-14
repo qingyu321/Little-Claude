@@ -401,6 +401,8 @@ export function GeneralTab() {
   const contextWindowMode = useSettingsStore((s) => s.contextWindowMode);
   const autoCompactThresholdTokens = useSettingsStore((s) => s.autoCompactThresholdTokens);
   const fontSize = useSettingsStore((s) => s.fontSize);
+  const busyEnter = useSettingsStore((s) => s.busyEnter);
+  const setBusyEnter = useSettingsStore((s) => s.setBusyEnter);
   const fontFamily = useSettingsStore((s) => s.fontFamily);
   const monoFontFollowsInterface = useSettingsStore((s) => s.monoFontFollowsInterface);
   const setTheme = useSettingsStore((s) => s.setTheme);
@@ -635,6 +637,38 @@ export function GeneralTab() {
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Busy-Enter — DSH queue/steer policy */}
+        <div>
+          <h3 className="text-[13px] font-medium text-text-primary mb-2">
+            {t('settings.busyEnter')}
+          </h3>
+          <div className="inline-flex items-center rounded-lg border border-border-subtle
+            overflow-hidden">
+            <button
+              onClick={() => setBusyEnter('queue')}
+              className={`px-3 h-8 text-[12px] font-medium transition-smooth
+                ${busyEnter === 'queue'
+                  ? 'bg-accent/10 text-accent'
+                  : 'text-text-muted hover:bg-bg-secondary'}`}
+            >
+              {t('input.busyEnterQueue')}
+            </button>
+            <button
+              onClick={() => setBusyEnter('steer')}
+              className={`px-3 h-8 text-[12px] font-medium transition-smooth
+                border-l border-border-subtle
+                ${busyEnter === 'steer'
+                  ? 'bg-accent/10 text-accent'
+                  : 'text-text-muted hover:bg-bg-secondary'}`}
+            >
+              {t('input.busyEnterSteer')}
+            </button>
+          </div>
+          <p className="mt-1 text-[11px] text-text-tertiary">
+            {t('settings.busyEnterHint')}
+          </p>
         </div>
 
         {/* Font Size */}

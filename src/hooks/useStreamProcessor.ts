@@ -10,6 +10,9 @@ import {
 import { useSessionStore } from '../stores/sessionStore';
 import { debugLog } from '../lib/debug-log';
 import { useAgentStore, resolveAgentId, getAgentDepth, updatePhaseInSnapshot } from '../stores/agentStore';
+import { useTodoStore } from '../stores/todoStore';
+import { useGoalStore } from '../stores/goalStore';
+import { useFeedbackStore } from '../stores/feedbackStore';
 import { useFileStore } from '../stores/fileStore';
 import { useTokenSpeedStore, estimateTokensFromText } from '../stores/tokenSpeedStore';
 import { bridge, onClaudeStream, onClaudeStderr } from '../lib/tauri-bridge';
@@ -244,7 +247,71 @@ const KNOWN_STREAM_TYPES = new Set([
   'little_claude_permission_request', 'stream_event', 'system', 'assistant',
   'user', 'human', 'tool_result', 'tool_use_summary', 'result', 'process_exit',
   'content_block_delta', 'rate_limit_event',
+  // DSH context alignment (service-mode projections + compaction lifecycle)
+  'context_update', 'compaction_start', 'compaction_summary', 'compaction_end',
 ]);
+
+/**
+ * DSH context-pressure projection (`context_update`) — the token-meter's
+ * authoritative occupancy: `projectedTokens` = last usage anchor + surface
+ * delta re-estimate (host pushes it on usage / request/context events; the
+ * client fixture lacks it, so fall back to `pressureTokens`). Only
+ * contextTokens + dshContextWindow are written — the projection has no
+ * breakdown, so writing contextInputTokens/contextCache* here would trip the
+ * Ctx bar's cache-miss red dot (cachedShare would read 0). Shared by the
+ * foreground and background handlers.
+ */
+function applyDshContextUpdate(tabId: string, msg: any) {
+  const projected = msg.projected_tokens ?? msg.pressure_tokens;
+  if (typeof projected !== 'number' || projected <= 0) return;
+  const store = useChatStore.getState();
+  const updates: Parameters<typeof store.setSessionMeta>[1] = {
+    contextTokens: projected,
+  };
+  if (typeof msg.context_window === 'number') {
+    updates.dshContextWindow = msg.context_window;
+  }
+  store.setSessionMeta(tabId, updates);
+}
+
+/**
+ * DSH compaction lifecycle (`compaction_start|summary|end`). The projection
+ * is NOT pushed on compaction (compaction produces no usage), so without
+ * these the Ctx bar would freeze at the pre-compact ≈100% until the next
+ * request. `compaction/summary` only fires on the success path; its
+ * shadowed_token_count is the token-meter heuristic estimate of the replaced
+ * range → drop the bar immediately (next request corrects to the precise
+ * value). Shared by the foreground and background handlers.
+ */
+function applyDshCompaction(tabId: string, msg: any) {
+  const store = useChatStore.getState();
+  switch (msg.type) {
+    case 'compaction_start':
+      store.setSessionMeta(tabId, { compactionInProgress: true });
+      break;
+    case 'compaction_summary': {
+      const shadowed = typeof msg.shadowed_token_count === 'number'
+        ? msg.shadowed_token_count
+        : 0;
+      if (shadowed > 0) {
+        const meta = store.getTab(tabId)?.sessionMeta ?? {};
+        const old = meta.contextTokens ?? meta.inputTokens ?? 0;
+        store.setSessionMeta(tabId, {
+          contextTokens: Math.max(0, old - shadowed),
+          compactionSavedTokens: shadowed,
+          compactedAt: Date.now(),
+        });
+      }
+      break;
+    }
+    case 'compaction_end':
+      store.setSessionMeta(tabId, { compactionInProgress: false });
+      if (msg.error) {
+        showToast(t('chat.compactFailed'), 'error');
+      }
+      break;
+  }
+}
 
 // Debounce tree refresh to batch rapid tool completions (e.g. parallel agents).
 let _fileRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -990,6 +1057,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           // NOTE: Usage persistence for the proxy path happens in Rust
           // (anthropic_proxy → usage_log). Accumulation above is runtime display.
         }
+        // DSH todo plan (background tabs): mirror the foreground handling so a
+        // background tab's TodoDock stays current and the plan survives the
+        // tab switch back (turn/start clears the standing plan).
+        if (evt.type === 'todo_update' && Array.isArray(evt.todos)) {
+          useTodoStore.getState().update(tabId, evt.todos);
+        }
+        if (evt.type === 'turn_start') {
+          useTodoStore.getState().clear(tabId);
+        }
         break;
       }
       case 'assistant': {
@@ -1472,6 +1548,20 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         }
         break;
       }
+      // DSH context alignment (background tabs): same treatment as foreground —
+      // projections and compaction land in the per-tab sessionMeta cache while
+      // the tab is away, so the Ctx bar is correct on switch-back.
+      case 'context_update':
+      case 'compaction_start':
+      case 'compaction_summary':
+      case 'compaction_end': {
+        if (msg.type === 'context_update') {
+          applyDshContextUpdate(tabId, msg);
+        } else {
+          applyDshCompaction(tabId, msg);
+        }
+        break;
+      }
       case 'rate_limit_event': {
         const bgRli = msg.rate_limit_info;
         if (bgRli && bgRli.rateLimitType) {
@@ -1805,6 +1895,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             useChatStore.setState({ tabs: newTabs, sessionCache: newTabs });
           }
           useSessionStore.getState().promoteDraft(tabId, cliSessionId);
+          // DSH panels key by sessionId: goal/todo/feedback seeded under the
+          // draft tab id must move to the promoted id or they silently vanish
+          // (GoalBar never shows, TodoDock loses the first plan, feedback
+          // entries become unreachable).
+          useGoalStore.getState().moveSession(tabId, cliSessionId);
+          useTodoStore.getState().moveSession(tabId, cliSessionId);
+          useFeedbackStore.getState().moveSession(tabId, cliSessionId);
         }
 
         useSessionStore.getState().fetchSessions();
@@ -1933,6 +2030,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             });
             setActivityStatus({ phase: 'awaiting' });
           }
+        }
+
+        // TodoDock (DSH todo/write): whole-list replacement for the standing
+        // plan — render per-item status (spinner / checkmark) above the composer.
+        if (evt.type === 'todo_update' && Array.isArray(evt.todos)) {
+          useTodoStore.getState().update(tabId, evt.todos);
+        }
+        // DSH lifetime rule: turn/start clears the standing plan (latest
+        // todo/write with no later turn/start).
+        if (evt.type === 'turn_start') {
+          useTodoStore.getState().clear(tabId);
         }
 
         // New assistant turn begins — reset the token speed badge so the
@@ -3041,6 +3149,22 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
 
+        break;
+      }
+
+      // DSH context alignment: live occupancy (context_update projection) and
+      // the compaction lifecycle. The projection pushes on usage / request/
+      // context — so the Ctx bar refreshes mid-turn instead of freezing on the
+      // previous turn's result; compaction events drop it immediately.
+      case 'context_update':
+      case 'compaction_start':
+      case 'compaction_summary':
+      case 'compaction_end': {
+        if (msg.type === 'context_update') {
+          applyDshContextUpdate(tabId, msg);
+        } else {
+          applyDshCompaction(tabId, msg);
+        }
         break;
       }
 

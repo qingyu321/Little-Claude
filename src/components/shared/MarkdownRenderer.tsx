@@ -107,7 +107,7 @@ function AsyncImage({ src, alt }: { src: string; alt?: string }) {
 /* ================================================================
    CopyButton — hover-reveal copy for code blocks
    ================================================================ */
-export function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text, inline = false }: { text: string; inline?: boolean }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
 
@@ -121,14 +121,28 @@ export function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute top-2 right-2 px-2 py-1 rounded-md text-[10px]
-        font-medium opacity-0 group-hover:opacity-100 transition-smooth
+      className={`px-2 py-1 rounded-md text-[10px]
+        font-medium transition-smooth
         bg-bg-tertiary/80 text-text-muted hover:text-text-primary
-        hover:bg-bg-tertiary border border-border-subtle"
+        hover:bg-bg-tertiary border border-border-subtle ${
+          inline ? '' : 'absolute top-2 right-2 opacity-0 group-hover:opacity-100'
+        }`}
     >
       {copied ? t('msg.copied') : t('msg.copyCode')}
     </button>
   );
+}
+
+/** Extract fenced-code language (language-ts) from a <code> child node */
+function extractCodeLang(node: ReactNode): string {
+  if (Array.isArray(node)) return extractCodeLang(node[0]);
+  if (node && typeof node === 'object' && 'props' in node) {
+    const props = (node as { props?: { className?: string; children?: ReactNode } }).props;
+    const m = /language-([\w+-]+)/.exec(props?.className || '');
+    if (m) return m[1];
+    return extractCodeLang(props?.children);
+  }
+  return '';
 }
 
 /** Extract plain text from nested React nodes (for copy button) */
@@ -560,11 +574,20 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
     },
     pre: ({ children }: { children?: ReactNode }) => {
       const codeText = extractText(children);
+      const lang = extractCodeLang(children);
       return (
-        <div className="relative group my-3">
-          <CopyButton text={codeText} />
-          <pre className="bg-bg-secondary rounded-xl p-4
-            border border-border-subtle overflow-x-auto">
+        <div className="my-3 overflow-hidden rounded-xl
+          border border-border-subtle">
+          {/* DSH code-block banner — bluish-850/900 + language label */}
+          <div className="flex items-center justify-between
+            px-3 py-1.5 bg-bg-layer-1 border-b border-border-subtle">
+            <span className="text-[10px] font-medium uppercase tracking-wide
+              text-text-tertiary">
+              {lang || 'code'}
+            </span>
+            <CopyButton text={codeText} inline />
+          </div>
+          <pre className="bg-bg-secondary p-4 overflow-x-auto">
             {children}
           </pre>
         </div>

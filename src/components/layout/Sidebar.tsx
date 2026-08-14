@@ -40,6 +40,15 @@ export function Sidebar() {
   const skillsSidebarVisible = useSettingsStore((s) => s.skillsSidebarVisible);
   const interviewSidebarVisible = useSettingsStore((s) => s.interviewSidebarVisible);
   const t = useT();
+  const activeTab = useSettingsStore((s) => s.secondaryPanelTab);
+
+  /** DSH nav-item three states: hover layer-1, active layer-3 (bluish-100/800) */
+  const navItemClass = (tab: string) =>
+    `w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-smooth ${
+      activeTab === tab
+        ? 'bg-bg-layer-3 text-text-primary'
+        : 'text-text-muted hover:bg-bg-layer-1 hover:text-text-primary'
+    }`;
 
   const startProjectDraft = (folderPath: string) => {
     useSettingsStore.getState().setWorkingDirectory(folderPath);
@@ -91,7 +100,7 @@ export function Sidebar() {
               {backgroundTheme === 'deepseek' ? (
                 <span className="text-[15px] font-bold tracking-tight"
                   style={{
-                    background: 'linear-gradient(135deg, #87CEFA, #F0F8FF)',
+                    background: 'linear-gradient(135deg, #4176E6, #5686FE)',
                     WebkitBackgroundClip: 'text',
                     WebkitTextFillColor: 'transparent',
                   }}>
@@ -231,11 +240,10 @@ export function Sidebar() {
             openConfirm();
           }
         }}
-          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl
-            text-sm transition-smooth
+          className={`${navItemClass('interview')}
             ${interviewActive
-              ? 'bg-red-500/10 text-red-500 hover:bg-red-500/15'
-              : 'text-text-muted hover:bg-bg-secondary hover:text-text-primary'}`}>
+              ? '!bg-red-500/10 !text-red-500 hover:!bg-red-500/15'
+              : ''}`}>
           <div className="relative flex-shrink-0">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
               stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
@@ -254,9 +262,7 @@ export function Sidebar() {
         )}
         {previewSidebarVisible && (
         <button onClick={() => setSecondaryTab('preview')}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl
-            text-sm text-text-muted hover:bg-bg-secondary hover:text-text-primary
-            transition-smooth">
+          className={navItemClass('preview')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
             stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
             <path d="M2 4h12v8H2zM5 14h6" />
@@ -266,9 +272,7 @@ export function Sidebar() {
         )}
         {skillsSidebarVisible && (
         <button onClick={() => setSecondaryTab('skills')}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl
-            text-sm text-text-muted hover:bg-bg-secondary hover:text-text-primary
-            transition-smooth">
+          className={navItemClass('skills')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
             stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
             <path d="M8 1L1 4.5l7 3.5 7-3.5L8 1zM1 11.5l7 3.5 7-3.5M1 8l7 3.5L15 8" />

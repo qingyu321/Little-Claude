@@ -1,6 +1,7 @@
 import { memo, useState, useCallback, type ReactNode } from 'react';
 import { type ChatMessage } from '../../stores/chatStore';
 import { useFileStore } from '../../stores/fileStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useLightboxStore } from '../shared/ImageLightbox';
 import { useT } from '../../lib/i18n';
@@ -12,6 +13,7 @@ import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
 import { AiAvatar } from '../shared/AiAvatar';
 import { UserAvatar } from '../shared/UserAvatar';
+import { MessageFeedback } from './MessageFeedback';
 
 interface Props {
   message: ChatMessage;
@@ -112,9 +114,9 @@ function renderCodeSegment(inner: string, key: number): ReactNode {
         key={key}
         onClick={(e) => { e.stopPropagation(); useFileStore.getState().selectFile(resolved); }}
         className="inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5
-          bg-white/15 border border-white/25 rounded-md
+          bg-bg-layer-1 border border-border-l2 rounded-md
           text-xs font-medium cursor-pointer
-          hover:bg-white/25 hover:border-white/40
+          hover:bg-bg-layer-2 hover:border-border-l3
           transition-all duration-150 select-none
           align-baseline leading-normal whitespace-nowrap inline-block"
         title={resolved}
@@ -188,17 +190,17 @@ function UserMsg({ message, isHighlighted = false }: Props) {
         {copied ? t('msg.copied') : t('msg.copyText')}
       </button>
       <div className={`message-content max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
-        bg-bg-user-msg text-text-inverse
-        text-sm leading-relaxed shadow-md whitespace-pre-wrap
+        bg-bg-user-msg text-text-primary
+        text-sm leading-relaxed shadow-sm whitespace-pre-wrap
         ${isHighlighted ? 'search-highlight-blink' : ''}`}>
         {renderUserContent(displayContent)}
         {!expanded && isLong && (
-          <span className="text-white/60">…</span>
+          <span className="text-text-tertiary">…</span>
         )}
         {isLong && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="block mt-1.5 text-xs text-white/60 hover:text-white/90
+            className="block mt-1.5 text-xs text-text-tertiary hover:text-text-primary
               transition-smooth"
           >
             {expanded ? '▲ 收起' : '▼ 展开全部'}
@@ -217,14 +219,14 @@ function UserMsg({ message, isHighlighted = false }: Props) {
                   }
                 }}
                 className="inline-flex items-center gap-2 px-2.5 py-1.5
-                  bg-white/10 hover:bg-white/20 rounded-lg border border-white/15
+                  bg-bg-layer-1 hover:bg-bg-layer-2 rounded-lg border border-border-l2
                   transition-smooth cursor-pointer text-left"
               >
                 {att.isImage && getCachedThumbnail(att.path) ? (
                   <img src={getCachedThumbnail(att.path)} alt="" className="w-8 h-8 rounded object-cover" />
                 ) : (
                   <span className="flex items-center justify-center w-8 h-8 rounded
-                    bg-white/10 text-[10px] font-mono font-semibold uppercase opacity-80">
+                    bg-bg-layer-1 text-[10px] font-mono font-semibold uppercase opacity-80">
                     {getFileExt(att.name) || (
                       <svg width="14" height="14" viewBox="0 0 12 12" fill="none"
                         stroke="currentColor" strokeWidth="1.2">
@@ -452,8 +454,12 @@ function AssistantMsg({ message, isFirstInGroup = true }: Props) {
       ) : (
         <div className="w-8 flex-shrink-0" />
       )}
-      <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed message-content">
+      {/* group 类必须在此容器上：MessageFeedback 用 group-hover 显隐，
+          若祖先链上无 group，按钮永远 opacity-0（功能不可见）。 */}
+      <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed message-content group">
         <MarkdownRenderer content={safeContent(message.content)} />
+        {/* DSH message feedback — 👍/👎 + note, hover-revealed under assistant text */}
+        <MessageFeedback messageId={message.id} />
       </div>
     </div>
   );
@@ -506,12 +512,13 @@ function shortPath(filePath: string): string {
 }
 
 /** Tool icon mini SVG */
-function ToolIcon({ name }: { name: string }) {
+function ToolIcon({ name, ongoing = false }: { name: string; ongoing?: boolean }) {
+  const iconClass = ongoing ? 'text-ongoing flex-shrink-0' : 'text-text-tertiary flex-shrink-0';
   switch (name) {
     case 'Bash':
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <rect x="1" y="2" width="10" height="8" rx="1.5" />
           <path d="M3.5 5.5L5 7l-1.5 1.5M6.5 8.5h2" />
         </svg>
@@ -519,7 +526,7 @@ function ToolIcon({ name }: { name: string }) {
     case 'Read':
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <path d="M7 1H3a1 1 0 00-1 1v8a1 1 0 001 1h6a1 1 0 001-1V4L7 1z" />
           <path d="M7 1v3h3M4 6.5h4M4 8.5h2" />
         </svg>
@@ -545,7 +552,7 @@ function ToolIcon({ name }: { name: string }) {
     case 'Grep':
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <circle cx="5.5" cy="5.5" r="3" />
           <path d="M8 8l2.5 2.5" />
         </svg>
@@ -554,7 +561,7 @@ function ToolIcon({ name }: { name: string }) {
     case 'Agent':
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <circle cx="6" cy="6" r="4.5" />
           <path d="M6 3.5v5M3.5 6h5" />
         </svg>
@@ -563,7 +570,7 @@ function ToolIcon({ name }: { name: string }) {
     case 'WebSearch':
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <circle cx="6" cy="6" r="4.5" />
           <path d="M1.5 6h9M6 1.5c-1.5 1.5-2 3-2 4.5s.5 3 2 4.5M6 1.5c1.5 1.5 2 3 2 4.5s-.5 3-2 4.5" />
         </svg>
@@ -571,7 +578,7 @@ function ToolIcon({ name }: { name: string }) {
     default:
       return (
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-          stroke="currentColor" strokeWidth="1.2" className="text-text-tertiary flex-shrink-0">
+          stroke="currentColor" strokeWidth="1.2" className={iconClass}>
           <rect x="2" y="2" width="8" height="8" rx="1.5" />
           <path d="M4.5 5l1.5 1.5L7.5 5" />
         </svg>
@@ -597,6 +604,9 @@ function getToolLabel(name: string, t: (key: string) => string): string {
 export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  const selectedSessionId = useSessionStore((s) => s.selectedSessionId);
+  const sessionStatus = useSessionStore((s) =>
+    selectedSessionId ? s.sessionStatuses.get(selectedSessionId) : undefined);
   const toolName = message.toolName || 'Tool';
   const label = getToolLabel(toolName, t);
   const input = message.toolInput;
@@ -711,6 +721,9 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
     ? message.toolResultContent
     : message.toolResultContent ? JSON.stringify(message.toolResultContent) : '';
   const hasResult = resultContent.length > 0;
+
+  // DSH --dsh-state-ongoing: tool call in flight while session is running
+  const isOngoing = sessionStatus === 'running' && !hasResult;
 
   // Render the expanded detail section
   /** Render a side-by-side diff view for Edit tool old_string → new_string */
@@ -881,8 +894,13 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
         ) : (
           <span className="w-[10px] flex-shrink-0" />
         )}
-        <ToolIcon name={toolName} />
-        <span className="text-xs font-medium text-text-muted">{label}</span>
+        <ToolIcon name={toolName} ongoing={isOngoing} />
+        <span className={`text-xs font-medium ${isOngoing ? 'text-ongoing' : 'text-text-muted'}`}>
+          {label}
+        </span>
+        {isOngoing && (
+          <span className="w-1.5 h-1.5 rounded-full bg-ongoing animate-pulse-soft flex-shrink-0" />
+        )}
         {renderPreview()}
         {/* Show a small result indicator when collapsed with result */}
         {!expanded && hasResult && (
@@ -966,11 +984,13 @@ function ThinkingMsg({ message }: Props) {
           </svg>
           {t('msg.thinking')}
         </summary>
-        <pre className="ml-5 mt-0.5 text-[11px] text-text-tertiary
-          whitespace-pre-wrap max-h-48 overflow-y-auto
-          font-mono leading-relaxed">
-          {safeContent(message.content)}
-        </pre>
+        <div className="ml-5 mt-0.5 thinking-fade rounded-md overflow-hidden">
+          <pre className="text-[11px] text-text-tertiary
+            whitespace-pre-wrap max-h-48 overflow-y-auto
+            font-mono leading-relaxed">
+            {safeContent(message.content)}
+          </pre>
+        </div>
       </details>
     </div>
   );

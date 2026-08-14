@@ -10,6 +10,8 @@
 pub mod claude;
 pub mod codex;
 pub mod codex_config;
+pub mod deepseek;
+pub mod dsh_events;
 
 use crate::commands::StartSessionParams;
 use serde::{Deserialize, Serialize};
@@ -307,13 +309,14 @@ pub struct Usage {
 pub fn resolve_backend(name: Option<&str>) -> Arc<dyn CliBackend> {
     match name.unwrap_or("claude") {
         "codex" => Arc::new(codex::CodexBackend::new()),
+        "deepseek" => Arc::new(deepseek::DeepseekBackend::new()),
         _ => Arc::new(claude::ClaudeBackend::new()),
     }
 }
 
 /// List available backend names (for UI).
 pub fn backend_names() -> Vec<&'static str> {
-    vec!["claude", "codex"]
+    vec!["claude", "codex", "deepseek"]
 }
 
 // ─── Helpers for building content blocks ───────────────────────────────────

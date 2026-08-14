@@ -2,54 +2,117 @@
 @plugin "@tailwindcss/typography";
 
 /* ================================================================
-   Default theme (Black) — light mode — clean solid
+   Default theme (DSH DeepSeek Harness) — light mode
+   Token values aligned to @deepseek-ai/dsh web UI:
+   - brand blue: deepseek-500 #4176E6 (accent), deepseek-450 #5686FE (ongoing)
+   - neutral-bluish stack for surfaces, shiki tokens for code
    ================================================================ */
 @theme {
-  --color-bg-primary: #F8F8FA;
-  --color-bg-secondary: #F0F0F2;
-  --color-bg-tertiary: #E8E8EA;
+  /* DSH static palette — brand & neutral-bluish */
+  --color-deepseek-50:  #EDF3FE;
+  --color-deepseek-100: #E4EDFD;
+  --color-deepseek-200: #D3E2FF;
+  --color-deepseek-300: #B7C8FE;
+  --color-deepseek-400: #679EFE;
+  --color-deepseek-450: #5686FE;
+  --color-deepseek-500: #4176E6;
+  --color-deepseek-600: #4868B2;
+  --color-deepseek-800: #34415B;
+  --color-deepseek-900: #283142;
+  --color-bluish-50:  #F9FAFB;
+  --color-bluish-60:  #F5F6F7;
+  --color-bluish-75:  #F1F3F5;
+  --color-bluish-100: #EBEEF2;
+  --color-bluish-150: #E9ECF2;
+  --color-bluish-200: #E1E5EE;
+  --color-bluish-300: #CFD3D6;
+  --color-bluish-400: #ADB2B8;
+  --color-bluish-500: #979DA6;
+  --color-bluish-600: #81858C;
+  --color-bluish-700: #61666B;
+  --color-bluish-750: #43454A;
+  --color-bluish-800: #353638;
+  --color-bluish-850: #2C2C2E;
+  --color-bluish-875: #232324;
+  --color-bluish-900: #1B1B1C;
+  --color-bluish-950: #151517;
+  --color-bluish-1000: #0F1115;
+
+  /* Surfaces — DSH alias bg-* layer stack (light) */
+  --color-bg-primary: #F9FAFB;
+  --color-bg-secondary: #F5F6F7;
+  --color-bg-tertiary: #F1F3F5;
+  --color-bg-layer-1: #F5F6F7;
+  --color-bg-layer-2: #F1F3F5;
+  --color-bg-layer-3: #EBEEF2;
   --color-bg-chat: #FFFFFF;
-  --color-bg-sidebar: #F5F5F7;
+  --color-bg-sidebar: #F9FAFB;
   --color-bg-input: #FFFFFF;
-  --color-bg-user-msg: #333333;
-  --color-bg-assistant-msg: #F8F8FA;
-  --color-bg-tool: #F3F3F5;
-  --color-bg-thinking: #F0F0F2;
+  --color-bg-user-msg: #EDF3FE;
+  --color-bg-assistant-msg: #F9FAFB;
+  --color-bg-tool: #F5F6F7;
+  --color-bg-thinking: #F5F6F7;
   --color-bg-card: #FFFFFF;
-  --color-bg-nav-active: rgba(0, 0, 0, 0.04);
+  --color-bg-nav-active: rgba(38, 49, 72, 0.06);
 
-  --color-text-primary: #1A1A1A;
-  --color-text-secondary: #555555;
-  --color-text-tertiary: #888888;
+  /* Text — DSH alias label-* */
+  --color-text-primary: #0F1115;
+  --color-text-secondary: #61666B;
+  --color-text-tertiary: #81858C;
   --color-text-inverse: #FFFFFF;
-  --color-text-muted: #777777;
+  --color-text-muted: #979DA6;
+  --color-label-primary: #0F1115;
+  --color-label-secondary: #61666B;
+  --color-label-tertiary: #81858C;
+  --color-label-caption: #ADB2B8;
+  --color-label-dimmed: #E1E5EE;
 
-  --color-border: #E5E5EA;
-  --color-border-subtle: #EBEBF0;
-  --color-border-focus: #333333;
+  /* Borders — DSH alias border-l1..l4 (light) */
+  --color-border: rgba(0, 0, 0, 0.10);
+  --color-border-subtle: rgba(0, 0, 0, 0.06);
+  --color-border-focus: #4176E6;
+  --color-border-l1: rgba(0, 0, 0, 0.04);
+  --color-border-l2: rgba(0, 0, 0, 0.10);
+  --color-border-l3: rgba(0, 0, 0, 0.12);
+  --color-border-l4: rgba(0, 0, 0, 0.16);
 
-  --color-accent: #333333;
-  --color-accent-light: #555555;
-  --color-accent-hover: #1A1A1A;
-  --color-accent-glow: rgba(0, 0, 0, 0.06);
-  --color-success: #10b981;
-  --color-error: #ef4444;
-  --color-warning: #f59e0b;
+  /* Accent — DSH brand blue */
+  --color-accent: #4176E6;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #4868B2;
+  --color-accent-glow: rgba(65, 118, 230, 0.10);
+  /* Running/ongoing state — DSH --dsh-state-ongoing */
+  --color-ongoing: #5686FE;
+  --color-success: #22C55E;
+  --color-error: #F25A5A;
+  --color-warning: #F59E0B;
 
-  --color-gradient-start: #333333;
-  --color-gradient-mid: #444444;
-  --color-gradient-end: #555555;
+  --color-gradient-start: #4176E6;
+  --color-gradient-mid: #5686FE;
+  --color-gradient-end: #679EFE;
 
-  /* Syntax highlighting — decoupled from semantic colors */
-  --color-syntax-keyword:  #7C3AED;
-  --color-syntax-string:   #059669;
-  --color-syntax-number:   #D97706;
-  --color-syntax-function: #2563EB;
-  --color-syntax-comment:  #9CA3AF;
-  --color-syntax-type:     #0891B2;
-  --color-syntax-builtin:  #6366F1;
-  --color-syntax-delete:   #DC2626;
-  --color-syntax-meta:     #78716C;
+  /* Interactive hover/active — DSH interactive-bg-* */
+  --color-interactive-hover: rgba(38, 49, 72, 0.06);
+  --color-interactive-active: rgba(38, 49, 72, 0.10);
+  --color-interactive-hover-accent: rgba(38, 49, 72, 0.14);
+
+  /* Scrollbar — DSH alias scrollbar-* (light) */
+  --color-scrollbar-thumb: #E5E5E5;
+  --color-scrollbar-thumb-hover: #D4D4D4;
+
+  /* Thinking fade — DSH --dsw-linear-gradient-think (light) */
+  --color-think-gradient: linear-gradient(180deg, #fff 20.19%, rgba(255, 255, 255, 0) 100%);
+
+  /* Syntax highlighting — DSH shiki tokens (light) */
+  --color-syntax-keyword:  #D6336C;
+  --color-syntax-string:   #2F9E44;
+  --color-syntax-number:   #1C7ED6;
+  --color-syntax-function: #6741D9;
+  --color-syntax-comment:  #868E96;
+  --color-syntax-type:     #1C7ED6;
+  --color-syntax-builtin:  #6741D9;
+  --color-syntax-delete:   #F25A5A;
+  --color-syntax-meta:     #495057;
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04),
     0 1px 2px rgba(0, 0, 0, 0.02);
@@ -66,50 +129,76 @@
 @variant dark (&:where(.dark, .dark *));
 
 /* ================================================================
-   Black — dark mode
+   DSH — dark mode (neutral-bluish stack)
    ================================================================ */
 .dark {
-  --color-bg-primary: #141414;
-  --color-bg-secondary: #1C1C1E;
+  --color-bg-primary: #151517;
+  --color-bg-secondary: #232324;
   --color-bg-tertiary: #2C2C2E;
-  --color-bg-chat: #0A0A0A;
-  --color-bg-sidebar: #1C1C1E;
-  --color-bg-input: #1C1C1E;
-  --color-bg-user-msg: #D0D0D0;
-  --color-bg-assistant-msg: #1A1A1C;
-  --color-bg-tool: #1E1E20;
-  --color-bg-thinking: #1A1A1C;
-  --color-bg-card: #1C1C1E;
+  --color-bg-layer-1: #232324;
+  --color-bg-layer-2: #2C2C2E;
+  --color-bg-layer-3: #353638;
+  --color-bg-chat: #151517;
+  --color-bg-sidebar: #1B1B1C;
+  --color-bg-input: #2C2C2E;
+  --color-bg-user-msg: #2C2C2E;
+  --color-bg-assistant-msg: #232324;
+  --color-bg-tool: #2C2C2E;
+  --color-bg-thinking: #232324;
+  --color-bg-card: #2C2C2E;
 
-  --color-text-primary: #F0F0F0;
-  --color-text-secondary: #B0B0B0;
-  --color-text-tertiary: #8C8C8C;
+  --color-text-primary: #F9FAFB;
+  --color-text-secondary: #CFD3D6;
+  --color-text-tertiary: #ADB2B8;
   --color-text-inverse: #101010;
-  --color-text-muted: #A3A3A3;
+  --color-text-muted: #979DA6;
+  --color-label-primary: #F9FAFB;
+  --color-label-secondary: #CFD3D6;
+  --color-label-tertiary: #ADB2B8;
+  --color-label-caption: #81858C;
+  --color-label-dimmed: #43454A;
 
-  --color-border: #38383A;
-  --color-border-subtle: #2C2C2E;
-  --color-border-focus: #D0D0D0;
+  --color-border: rgba(255, 255, 255, 0.12);
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border-focus: #5686FE;
+  --color-border-l1: rgba(255, 255, 255, 0.06);
+  --color-border-l2: rgba(255, 255, 255, 0.12);
+  --color-border-l3: rgba(255, 255, 255, 0.16);
+  --color-border-l4: rgba(255, 255, 255, 0.20);
 
-  --color-accent: #D0D0D0;
-  --color-accent-light: #E0E0E0;
-  --color-accent-hover: #FFFFFF;
-  --color-accent-glow: rgba(255, 255, 255, 0.08);
+  --color-accent: #5686FE;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #679EFE;
+  --color-accent-glow: rgba(86, 134, 254, 0.15);
+  --color-ongoing: #5686FE;
+  --color-success: #4ED17E;
+  --color-error: #EC1313;
+  --color-warning: #F7AD31;
 
-  --color-gradient-start: #D0D0D0;
-  --color-gradient-mid: #E0E0E0;
-  --color-gradient-end: #F0F0F0;
+  --color-gradient-start: #5686FE;
+  --color-gradient-mid: #679EFE;
+  --color-gradient-end: #8AB2FF;
 
-  /* Syntax highlighting — dark mode */
-  --color-syntax-keyword:  #A78BFA;
-  --color-syntax-string:   #34D399;
-  --color-syntax-number:   #FBBF24;
-  --color-syntax-function: #60A5FA;
-  --color-syntax-comment:  #6B7280;
-  --color-syntax-type:     #22D3EE;
-  --color-syntax-builtin:  #818CF8;
-  --color-syntax-delete:   #F87171;
-  --color-syntax-meta:     #A8A29E;
+  --color-interactive-hover: rgba(255, 255, 255, 0.08);
+  --color-interactive-active: rgba(255, 255, 255, 0.14);
+  --color-interactive-hover-accent: rgba(255, 255, 255, 0.24);
+
+  --color-scrollbar-thumb: #545557;
+  --color-scrollbar-thumb-hover: #65676B;
+
+  /* Thinking fade — DSH --dsw-linear-gradient-think (dark) */
+  --color-think-gradient: linear-gradient(180deg, #151517 20.19%, rgba(21, 21, 23, 0) 100%);
+
+  /* Syntax highlighting — DSH shiki tokens (dark) */
+  --color-syntax-keyword:  #FAA2C1;
+  --color-syntax-string:   #69DB7C;
+  --color-syntax-number:   #4DABF7;
+  --color-syntax-function: #B197FC;
+  --color-syntax-comment:  #ADB5BD;
+  --color-syntax-type:     #4DABF7;
+  --color-syntax-builtin:  #B197FC;
+  --color-syntax-delete:   #F25A5A;
+  --color-syntax-meta:     #CED4DA;
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
@@ -121,29 +210,25 @@
 }
 
 /* ================================================================
-   Blue theme — light mode
+   Blue theme — DSH brand blue (same values as default theme)
    ================================================================ */
 .theme-blue {
-  --color-bg-user-msg: #4E80F7;
-  --color-bg-nav-active: rgba(78, 128, 247, 0.06);
+  --color-bg-user-msg: #EDF3FE;
+  --color-bg-nav-active: rgba(65, 118, 230, 0.06);
 
-  --color-text-secondary: #4E80F7;
-  --color-border-focus: #4E80F7;
+  --color-text-secondary: #4176E6;
+  --color-border-focus: #4176E6;
 
-  --color-accent: #4E80F7;
-  --color-accent-light: #6B9AFF;
-  --color-accent-hover: #3D6FE6;
-  --color-accent-glow: rgba(78, 128, 247, 0.10);
+  --color-accent: #4176E6;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #4868B2;
+  --color-accent-glow: rgba(65, 118, 230, 0.10);
 
-  --color-gradient-start: #4E80F7;
-  --color-gradient-mid: #5C8EFF;
-  --color-gradient-end: #6B9AFF;
+  --color-gradient-start: #4176E6;
+  --color-gradient-mid: #5686FE;
+  --color-gradient-end: #679EFE;
 
-  /* Syntax — blue accent: swap function to avoid blue-on-blue */
-  --color-syntax-keyword:  #9333EA;
-  --color-syntax-function: #0891B2;
-
-  --shadow-glow: 0 0 20px rgba(78, 128, 247, 0.10);
+  --shadow-glow: 0 0 20px rgba(65, 118, 230, 0.10);
 
   --color-icon-slash: var(--color-accent);
 }
@@ -151,25 +236,21 @@
 /* Blue — dark mode */
 .theme-blue.dark,
 .dark.theme-blue {
-  --color-bg-user-msg: #6B9AFF;
+  --color-bg-user-msg: #2C2C2E;
 
-  --color-text-secondary: #6B9AFF;
-  --color-border-focus: #6B9AFF;
+  --color-text-secondary: #5686FE;
+  --color-border-focus: #5686FE;
 
-  --color-accent: #6B9AFF;
-  --color-accent-light: #8AB2FF;
-  --color-accent-hover: #4E80F7;
-  --color-accent-glow: rgba(107, 154, 255, 0.15);
+  --color-accent: #5686FE;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #679EFE;
+  --color-accent-glow: rgba(86, 134, 254, 0.15);
 
-  --color-gradient-start: #4E80F7;
-  --color-gradient-mid: #5C8EFF;
-  --color-gradient-end: #6B9AFF;
+  --color-gradient-start: #5686FE;
+  --color-gradient-mid: #679EFE;
+  --color-gradient-end: #8AB2FF;
 
-  /* Syntax — blue dark */
-  --color-syntax-keyword:  #C084FC;
-  --color-syntax-function: #22D3EE;
-
-  --shadow-glow: 0 0 20px rgba(107, 154, 255, 0.10);
+  --shadow-glow: 0 0 20px rgba(86, 134, 254, 0.10);
 
   --color-icon-slash: var(--color-accent);
 }
@@ -380,18 +461,18 @@ input, textarea, [contenteditable="true"],
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  background: var(--color-scrollbar-thumb);
   border-radius: 4px;
   transition: background 0.2s;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  background: var(--color-scrollbar-thumb-hover);
 }
 
 /* Firefox: thin scrollbar, themed color */
 * {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--color-accent) 12%, transparent) transparent;
+  scrollbar-color: var(--color-scrollbar-thumb) transparent;
 }
 
 /* Accent text (formerly gradient-text) */
@@ -417,6 +498,12 @@ input, textarea, [contenteditable="true"],
 .animate-ping-slow {
   animation: ping-slow 2s cubic-bezier(0, 0, 0.2, 1) infinite;
   will-change: transform, opacity;
+}
+
+/* Thinking block fade — DSH --dsw-linear-gradient-think overlay */
+.thinking-fade {
+  background-color: var(--color-bg-thinking);
+  background-image: var(--color-think-gradient);
 }
 
 /* Indeterminate progress bar */
@@ -1039,37 +1126,56 @@ input, textarea, [contenteditable="true"],
 }
 
 /* ── DeepSeek: identical to minimal, blue accent swapped for black ── */
+/* ── DeepSeek: DSH official palette — neutral-bluish surfaces + deepseek blue accent ── */
 .bg-theme-deepseek {
-  --color-bg-primary: #FFFFFF;
-  --color-bg-secondary: #F7F7F8;
-  --color-bg-tertiary: #EFEFF1;
+  --color-bg-primary: #F9FAFB;
+  --color-bg-secondary: #F5F6F7;
+  --color-bg-tertiary: #F1F3F5;
+  --color-bg-layer-1: #F5F6F7;
+  --color-bg-layer-2: #F1F3F5;
+  --color-bg-layer-3: #EBEEF2;
   --color-bg-chat: #FFFFFF;
-  --color-bg-sidebar: #F7F7F8;
+  --color-bg-sidebar: #F9FAFB;
   --color-bg-input: #FFFFFF;
-  --color-bg-user-msg: #87CEFA;
-  --color-bg-assistant-msg: #FFFFFF;
-  --color-bg-tool: #F7F7F8;
-  --color-bg-thinking: #F7F7F8;
+  --color-bg-user-msg: #EDF3FE;
+  --color-bg-assistant-msg: #F9FAFB;
+  --color-bg-tool: #F5F6F7;
+  --color-bg-thinking: #F5F6F7;
   --color-bg-card: #FFFFFF;
-  --color-bg-nav-active: rgba(135, 206, 250, 0.07);
-  --color-text-primary: #111827;
-  --color-text-secondary: #374151;
-  --color-text-tertiary: #9CA3AF;
+  --color-bg-nav-active: rgba(38, 49, 72, 0.06);
+  --color-text-primary: #0F1115;
+  --color-text-secondary: #61666B;
+  --color-text-tertiary: #81858C;
   --color-text-inverse: #FFFFFF;
-  --color-text-muted: #6B7280;
-  --color-border: #E5E7EB;
-  --color-border-subtle: #ECEEF2;
-  --color-border-focus: #87CEFA;
-  --color-accent: #87CEFA;
-  --color-accent-light: #B8E2F8;
-  --color-accent-hover: #6BAED9;
-  --color-accent-glow: rgba(135, 206, 250, 0.10);
-  --color-success: #059669;
-  --color-error: #DC2626;
-  --color-warning: #D97706;
-  --color-gradient-start: #87CEFA;
-  --color-gradient-mid: #A8D8F0;
-  --color-gradient-end: #C8E8F8;
+  --color-text-muted: #979DA6;
+  --color-label-primary: #0F1115;
+  --color-label-secondary: #61666B;
+  --color-label-tertiary: #81858C;
+  --color-label-caption: #ADB2B8;
+  --color-label-dimmed: #E1E5EE;
+  --color-border: rgba(0, 0, 0, 0.10);
+  --color-border-subtle: rgba(0, 0, 0, 0.06);
+  --color-border-focus: #4176E6;
+  --color-border-l1: rgba(0, 0, 0, 0.04);
+  --color-border-l2: rgba(0, 0, 0, 0.10);
+  --color-border-l3: rgba(0, 0, 0, 0.12);
+  --color-border-l4: rgba(0, 0, 0, 0.16);
+  --color-accent: #4176E6;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #4868B2;
+  --color-accent-glow: rgba(65, 118, 230, 0.10);
+  --color-ongoing: #5686FE;
+  --color-success: #22C55E;
+  --color-error: #F25A5A;
+  --color-warning: #F59E0B;
+  --color-gradient-start: #4176E6;
+  --color-gradient-mid: #5686FE;
+  --color-gradient-end: #679EFE;
+  --color-interactive-hover: rgba(38, 49, 72, 0.06);
+  --color-interactive-active: rgba(38, 49, 72, 0.10);
+  --color-scrollbar-thumb: #E5E5E5;
+  --color-scrollbar-thumb-hover: #D4D4D4;
+  --color-think-gradient: linear-gradient(180deg, #fff 20.19%, rgba(255, 255, 255, 0) 100%);
   --skin-body-background: #FFFFFF;
   --skin-app-background: #FFFFFF;
   --skin-border-strong: #E5E7EB;
@@ -1079,14 +1185,14 @@ input, textarea, [contenteditable="true"],
   --skin-decor-color: transparent;
   --skin-grid-line-a: transparent;
   --skin-grid-line-b: transparent;
-  --skin-accent-gradient: linear-gradient(180deg, #87CEFA 0%, #6BAED9 100%);
-  --skin-accent-border: rgba(135, 206, 250, 0.18);
+  --skin-accent-gradient: linear-gradient(180deg, #4176E6 0%, #5686FE 100%);
+  --skin-accent-border: rgba(65, 118, 230, 0.18);
   --skin-hover-bg: #F3F4F6;
   --skin-table-head: #F9FAFB;
   --skin-resize-bg: #F3F4F6;
   --skin-resize-line: #E5E7EB;
   --skin-scrollbar: #D1D5DB;
-  --skin-accent-text: #6BAED9;
+  --skin-accent-text: #4176E6;
   --skin-warning-text: #D97706;
   --skin-success-text: #059669;
   --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.04);
@@ -1094,6 +1200,72 @@ input, textarea, [contenteditable="true"],
   --shadow-lg: 0 16px 42px rgba(17, 24, 39, 0.08);
   --shadow-glow: none;
   --color-icon-slash: #FFFFFF;
+}
+
+/* DSH dark mode — neutral-bluish stack (alias layer remap, static palette unchanged) */
+.bg-theme-deepseek.dark,
+.dark.bg-theme-deepseek {
+  --color-bg-primary: #151517;
+  --color-bg-secondary: #232324;
+  --color-bg-tertiary: #2C2C2E;
+  --color-bg-layer-1: #232324;
+  --color-bg-layer-2: #2C2C2E;
+  --color-bg-layer-3: #353638;
+  --color-bg-chat: #151517;
+  --color-bg-sidebar: #1B1B1C;
+  --color-bg-input: #2C2C2E;
+  --color-bg-user-msg: #2C2C2E;
+  --color-bg-assistant-msg: #232324;
+  --color-bg-tool: #2C2C2E;
+  --color-bg-thinking: #232324;
+  --color-bg-card: #2C2C2E;
+  --color-bg-nav-active: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #F9FAFB;
+  --color-text-secondary: #CFD3D6;
+  --color-text-tertiary: #ADB2B8;
+  --color-text-inverse: #101010;
+  --color-text-muted: #979DA6;
+  --color-label-primary: #F9FAFB;
+  --color-label-secondary: #CFD3D6;
+  --color-label-tertiary: #ADB2B8;
+  --color-label-caption: #81858C;
+  --color-label-dimmed: #43454A;
+  --color-border: rgba(255, 255, 255, 0.12);
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border-focus: #5686FE;
+  --color-border-l1: rgba(255, 255, 255, 0.06);
+  --color-border-l2: rgba(255, 255, 255, 0.12);
+  --color-border-l3: rgba(255, 255, 255, 0.16);
+  --color-border-l4: rgba(255, 255, 255, 0.20);
+  --color-accent: #5686FE;
+  --color-accent-light: #679EFE;
+  --color-accent-hover: #679EFE;
+  --color-accent-glow: rgba(86, 134, 254, 0.15);
+  --color-ongoing: #5686FE;
+  --color-success: #4ED17E;
+  --color-error: #EC1313;
+  --color-warning: #F7AD31;
+  --color-gradient-start: #5686FE;
+  --color-gradient-mid: #679EFE;
+  --color-gradient-end: #8AB2FF;
+  --color-interactive-hover: rgba(255, 255, 255, 0.08);
+  --color-interactive-active: rgba(255, 255, 255, 0.14);
+  --color-scrollbar-thumb: #545557;
+  --color-scrollbar-thumb-hover: #65676B;
+  --color-think-gradient: linear-gradient(180deg, #151517 20.19%, rgba(21, 21, 23, 0) 100%);
+  --skin-body-background: #151517;
+  --skin-app-background: #151517;
+  --skin-border-strong: rgba(255, 255, 255, 0.12);
+  --skin-border-soft: rgba(255, 255, 255, 0.06);
+  --skin-accent-gradient: linear-gradient(180deg, #5686FE 0%, #679EFE 100%);
+  --skin-accent-border: rgba(86, 134, 254, 0.24);
+  --skin-hover-bg: #2C2C2E;
+  --skin-table-head: #232324;
+  --skin-resize-bg: #232324;
+  --skin-resize-line: rgba(255, 255, 255, 0.12);
+  --skin-scrollbar: #545557;
+  --skin-accent-text: #679EFE;
+  --color-icon-slash: #0F1115;
 }
 
 .bg-theme-deepseek button {
@@ -1233,11 +1405,12 @@ button {
   background-image: none;
 }
 
+/* DSH-aligned radius: 12px unified (--dsl-code-block-border-radius: 12px) */
 .rounded-lg,
 .rounded-xl,
 .rounded-2xl,
 .rounded-\[20px\] {
-  border-radius: 18px;
+  border-radius: 12px;
 }
 
 .shadow-md,

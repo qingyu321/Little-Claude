@@ -36,6 +36,10 @@ pub(crate) struct CliStatus {
     pub(crate) path: Option<String>,
     pub(crate) version: Option<String>,
     pub(crate) git_bash_missing: bool,
+    /// DSH service mode: whether a `dsh web` service answers on the default
+    /// port (only populated by `check_dsh_cli`; None for claude/codex).
+    #[serde(default)]
+    pub(crate) service_running: Option<bool>,
 }
 
 /// Run a safe `claude plugin ...` command and return stdout/stderr.
@@ -185,6 +189,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                                     path: Some(alt_path),
                                     version: None,
                                     git_bash_missing,
+                                    service_running: None,
                                 })
                             }
                             None => Ok(CliStatus {
@@ -192,6 +197,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                                 path: None,
                                 version: None,
                                 git_bash_missing: false,
+                                service_running: None,
                             }),
                         };
                     }
@@ -227,6 +233,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                                 path: Some(alt_path),
                                 version: None,
                                 git_bash_missing,
+                                service_running: None,
                             })
                         }
                         None => Ok(CliStatus {
@@ -234,6 +241,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                             path: None,
                             version: None,
                             git_bash_missing: false,
+                            service_running: None,
                         }),
                     };
                 }
@@ -275,12 +283,14 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                                     path: Some(alt_path),
                                     version: None,
                                     git_bash_missing,
+                                    service_running: None,
                                 }),
                                 None => Ok(CliStatus {
                                     installed: false,
                                     path: None,
                                     version: None,
                                     git_bash_missing: false,
+                                    service_running: None,
                                 }),
                             };
                         }
@@ -295,6 +305,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                         path: Some(path),
                         version: None,
                         git_bash_missing,
+                        service_running: None,
                     });
                 }
             };
@@ -309,6 +320,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
                 path: Some(path),
                 version,
                 git_bash_missing,
+                service_running: None,
             })
         }
         None => Ok(CliStatus {
@@ -316,6 +328,7 @@ pub async fn check_claude_cli() -> Result<CliStatus, String> {
             path: None,
             version: None,
             git_bash_missing: false,
+            service_running: None,
         }),
     }
 }
@@ -359,6 +372,7 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
                             path: Some(path),
                             version: None,
                             git_bash_missing: false,
+                            service_running: None,
                         });
                     }
                 }
@@ -379,6 +393,7 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
                             path: Some(path),
                             version: None,
                             git_bash_missing: false,
+                            service_running: None,
                         });
                     }
                 }
@@ -406,6 +421,7 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
                 version,
                 // Codex doesn't require git-bash on Windows
                 git_bash_missing: false,
+                service_running: None,
             })
         }
         None => Ok(CliStatus {
@@ -413,6 +429,7 @@ pub async fn check_codex_cli() -> Result<CliStatus, String> {
             path: None,
             version: None,
             git_bash_missing: false,
+            service_running: None,
         }),
     }
 }
@@ -673,6 +690,7 @@ pub async fn update_codex_cli(app: AppHandle) -> Result<String, String> {
                     version: None,
                     path: None,
                     git_bash_missing: false,
+                    service_running: None,
                 });
                 let version = check.version.unwrap_or_else(|| "unknown".to_string());
                 eprintln!(
@@ -703,6 +721,269 @@ pub async fn update_codex_cli(app: AppHandle) -> Result<String, String> {
             Err(_) => {
                 last_err = format!("npm install timed out ({})", registry);
                 eprintln!("[update_codex_cli] {}", last_err);
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+// ─── DeepSeek Harness (dsh) Detection & Install ──────────────────────
+// DSH is the npm-distributed `@deepseek-ai/dsh` CLI; service mode (the
+// D-N1-B integration) runs `dsh --profile web` and talks HTTP/WS on 3080.
+
+/// Check the DeepSeek Harness CLI: binary presence + version + whether a
+/// `dsh web` service already answers on the default port (service mode).
+#[tauri::command]
+pub async fn check_dsh_cli() -> Result<CliStatus, String> {
+    let backend = backends::resolve_backend(Some("deepseek"));
+    let binary = backend.find_binary();
+    let service_running = crate::commands::dsh_service::probe_default_service().await;
+    match binary {
+        Some(path) => {
+            let enriched_path = build_enriched_path();
+            eprintln!("[check_dsh_cli] found: {}", path);
+
+            #[cfg(target_os = "windows")]
+            let output_result = {
+                let needs_cmd = path.ends_with(".cmd") || path.ends_with(".bat");
+                let fut = if needs_cmd {
+                    Command::new("cmd")
+                        .args(["/C", &path, "--version"])
+                        .env("PATH", &enriched_path)
+                        .creation_flags(0x08000000)
+                        .kill_on_drop(true)
+                        .output()
+                } else {
+                    Command::new(&path)
+                        .arg("--version")
+                        .env("PATH", &enriched_path)
+                        .creation_flags(0x08000000)
+                        .kill_on_drop(true)
+                        .output()
+                };
+                match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("[check_dsh_cli] --version timed out");
+                        return Ok(CliStatus {
+                            installed: true,
+                            path: Some(path),
+                            version: None,
+                            git_bash_missing: false,
+                            service_running: Some(service_running),
+                        });
+                    }
+                }
+            };
+            #[cfg(not(target_os = "windows"))]
+            let output_result = {
+                let fut = Command::new(&path)
+                    .arg("--version")
+                    .env("PATH", &enriched_path)
+                    .kill_on_drop(true)
+                    .output();
+                match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("[check_dsh_cli] --version timed out");
+                        return Ok(CliStatus {
+                            installed: true,
+                            path: Some(path),
+                            version: None,
+                            git_bash_missing: false,
+                            service_running: Some(service_running),
+                        });
+                    }
+                }
+            };
+
+            let version = match output_result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let trimmed = stdout.trim().to_string();
+                    if !trimmed.is_empty() {
+                        Some(trimmed)
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[check_dsh_cli] --version error: {}", e);
+                    None
+                }
+            };
+
+            Ok(CliStatus {
+                installed: true,
+                path: Some(path),
+                version,
+                git_bash_missing: false,
+                service_running: Some(service_running),
+            })
+        }
+        None => Ok(CliStatus {
+            installed: false,
+            path: None,
+            version: None,
+            git_bash_missing: false,
+            service_running: Some(service_running),
+        }),
+    }
+}
+
+/// Install the DeepSeek Harness CLI via npm (same pattern as Codex: npm-only,
+/// no git-bash dependency).
+#[tauri::command]
+pub async fn install_dsh_cli(app: AppHandle) -> Result<(), String> {
+    let backend = backends::resolve_backend(Some("deepseek"));
+    if backend.find_binary().is_some() {
+        eprintln!("[install_dsh_cli] dsh already installed, skipping");
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
+            }),
+        );
+        return Ok(());
+    }
+
+    let china = is_china_network().await;
+
+    // Ensure npm is available
+    let has_npm = is_system_npm_available().await || get_local_node_bin().is_some();
+    if !has_npm {
+        eprintln!("[install_dsh_cli] npm not available, deploying Node.js locally...");
+        let no_scope = CancelScope::new(None);
+        install_node_env_inner(&app, china, &no_scope).await.map_err(|e| {
+            format!(
+                "Failed to install Node.js runtime: {}. Please install Node.js manually.",
+                e
+            )
+        })?;
+    }
+
+    install_dsh_via_npm(&app, china)
+        .await
+        .map_err(|npm_err| format!("DeepSeek Harness CLI installation failed via npm: {}", npm_err))?;
+
+    eprintln!("[install_dsh_cli] dsh installed via npm");
+    finalize_cli_install_paths(&app);
+    Ok(())
+}
+
+/// npm-install `@deepseek-ai/dsh` with registry fallbacks (mirrors
+/// `install_codex_via_npm`; China-first registries when in China).
+async fn install_dsh_via_npm(app: &AppHandle, china: bool) -> Result<(), String> {
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 0, "phase": "npm_fallback"
+        }),
+    );
+
+    let npm_path = if let Some(local_bin) = get_local_node_bin() {
+        #[cfg(target_os = "windows")]
+        let npm = local_bin.join("npm.cmd");
+        #[cfg(not(target_os = "windows"))]
+        let npm = local_bin.join("npm");
+        npm.to_string_lossy().to_string()
+    } else {
+        #[cfg(target_os = "windows")]
+        let npm = "npm.cmd".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let npm = "npm".to_string();
+        npm
+    };
+
+    let enriched_path = build_enriched_path();
+
+    let prefix_dir = npm_global_dir()?;
+    std::fs::create_dir_all(&prefix_dir)
+        .map_err(|e| format!("Failed to create npm-global dir: {}", e))?;
+
+    let cache_dir = npm_cache_dir()?;
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create npm-cache dir: {}", e))?;
+
+    let registries: Vec<&str> = if china {
+        vec![
+            "https://registry.npmmirror.com",
+            "https://mirrors.huaweicloud.com/repository/npm",
+            "https://mirrors.cloud.tencent.com/npm",
+            "https://registry.npmjs.org",
+        ]
+    } else {
+        vec![
+            "https://registry.npmjs.org",
+            "https://registry.npmmirror.com",
+        ]
+    };
+
+    let mut last_err = String::new();
+    for registry in &registries {
+        eprintln!(
+            "[install_dsh] Trying npm registry: {} (prefix: {}, cache: {})",
+            registry,
+            prefix_dir.display(),
+            cache_dir.display()
+        );
+
+        let args: Vec<String> = vec![
+            "install".to_string(),
+            "-g".to_string(),
+            "@deepseek-ai/dsh".to_string(),
+            format!("--registry={}", registry),
+            format!("--prefix={}", prefix_dir.display()),
+            format!("--cache={}", cache_dir.display()),
+        ];
+        let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        #[cfg(target_os = "windows")]
+        let result = {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(&npm_path);
+            cmd.args(&args_str);
+            cmd.env("PATH", &enriched_path)
+                .stdin(Stdio::null())
+                .creation_flags(0x08000000);
+            cmd.kill_on_drop(true);
+            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+        };
+        #[cfg(not(target_os = "windows"))]
+        let result = {
+            let mut cmd = Command::new(&npm_path);
+            cmd.args(&args_str)
+                .env("PATH", &enriched_path)
+                .stdin(Stdio::null());
+            cmd.kill_on_drop(true);
+            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+        };
+
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                eprintln!("[install_dsh] npm install succeeded via {}", registry);
+                let _ = app.emit(
+                    "setup:download:progress",
+                    serde_json::json!({
+                        "downloaded": 0, "total": 0, "percent": 100, "phase": "installing"
+                    }),
+                );
+                return Ok(());
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last_err = format!("npm install failed ({}): {}", registry, stderr);
+                eprintln!("[install_dsh] {}", last_err);
+            }
+            Ok(Err(e)) => {
+                last_err = format!("npm not found or failed to run: {}", e);
+                eprintln!("[install_dsh] {}", last_err);
+                return Err(last_err);
+            }
+            Err(_) => {
+                last_err = format!("npm install timed out ({})", registry);
+                eprintln!("[install_dsh] {}", last_err);
             }
         }
     }

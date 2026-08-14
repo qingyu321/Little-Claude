@@ -479,8 +479,181 @@ export function CliTab() {
 
       <div className="border-t border-border-subtle" />
 
+      {/* DeepSeek Harness (dsh) Section — the preferred backend */}
+      <DshSection />
+
+      <div className="border-t border-border-subtle" />
+
       {/* CLI Environment Diagnostics (scans both Claude + Codex) */}
       <CliDiagnostics />
+    </div>
+  );
+}
+
+// ─── DeepSeek Harness (dsh) Section ───────────────────────────────
+// Service-mode backend (D-N1-B): npm-distributed CLI, web service on 3080.
+// Simpler than CliSection: no update channel, no git-bash, but surfaces the
+// service probe (whether `dsh web` answers on the default port).
+
+type DshStatus = 'idle' | 'checking' | 'found' | 'not_found' | 'installing' | 'installed' | 'install_failed';
+
+function DshSection() {
+  const t = useT();
+  const [status, setStatus] = useState<DshStatus>('idle');
+  const [version, setVersion] = useState<string | null>(null);
+  const [path, setPath] = useState<string | null>(null);
+  const [serviceRunning, setServiceRunning] = useState<boolean | undefined>(undefined);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [downloadPercent, setDownloadPercent] = useState(0);
+  const [phase, setPhase] = useState<InstallPhase>('idle');
+
+  const doCheck = useCallback(async () => {
+    setStatus('checking');
+    setErrorMsg('');
+    try {
+      const result = await bridge.checkDshCli();
+      if (result.installed) {
+        setVersion(result.version ?? null);
+        setPath(result.path ?? null);
+        setServiceRunning(result.service_running);
+        setStatus('found');
+      } else {
+        setServiceRunning(result.service_running);
+        setStatus('not_found');
+      }
+    } catch (e) {
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
+      setStatus('not_found');
+    }
+  }, []);
+
+  useEffect(() => { doCheck(); }, [doCheck]);
+
+  const handleInstall = useCallback(async () => {
+    setStatus('installing');
+    setErrorMsg('');
+    setDownloadPercent(0);
+    setPhase('idle');
+
+    const { onDownloadProgress } = await import('../../lib/tauri-bridge');
+    const unlisten = await onDownloadProgress((event) => {
+      setDownloadPercent(event.percent);
+      if (event.phase === 'npm_fallback') setPhase('npm_fallback');
+      if (event.phase === 'complete' || event.percent >= 100) setPhase('configuring');
+    });
+
+    try {
+      await bridge.installDshCli();
+      setStatus('installed');
+      await doCheck();
+    } catch (e) {
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
+      setStatus('install_failed');
+    } finally {
+      unlisten();
+    }
+  }, [bridge, doCheck]);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] font-medium text-text-primary">
+          DeepSeek Harness CLI <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">首选</span>
+        </span>
+        {version && status !== 'not_found' && status !== 'install_failed' && (
+          <span className="text-xs text-text-tertiary">v{version}</span>
+        )}
+      </div>
+
+      {(status === 'found' || status === 'idle') && path && (
+        <div className="py-1 space-y-1">
+          <span className="text-[13px] font-medium text-green-500">
+            ✓ {t('cli.installed')}
+          </span>
+          <p className="text-xs text-text-tertiary truncate" title={path}>{path}</p>
+          {/* Service probe: dsh web answering on the default port? */}
+          <p className={`text-xs flex items-center gap-1 ${
+            serviceRunning ? 'text-green-500' : 'text-text-tertiary'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${
+              serviceRunning ? 'bg-green-500' : 'bg-text-tertiary/40'
+            }`} />
+            {serviceRunning ? t('cli.dshServiceRunning') : t('cli.dshServiceStopped')}
+          </p>
+        </div>
+      )}
+
+      {status === 'not_found' && (
+        <p className="text-[13px] text-amber-500">{t('cli.notFound')}</p>
+      )}
+
+      {(status === 'idle' || status === 'found' || status === 'not_found') && (
+        <div className="flex gap-3">
+          <button
+            onClick={doCheck}
+            className="flex-1 py-2 text-[13px] font-medium rounded-lg
+              border border-border-subtle text-text-muted
+              hover:bg-bg-secondary hover:text-text-primary transition-smooth"
+          >
+            {t('cli.check')}
+          </button>
+          <button
+            onClick={handleInstall}
+            className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-smooth
+              ${status === 'not_found'
+                ? 'bg-accent text-text-inverse hover:bg-accent-hover'
+                : 'border border-border-subtle text-text-muted hover:bg-bg-secondary hover:text-text-primary'
+              }`}
+          >
+            {status === 'not_found' ? t('cli.install') : t('cli.reinstall')}
+          </button>
+        </div>
+      )}
+
+      {status === 'checking' && (
+        <div className="flex items-center justify-center gap-2 py-2">
+          <div className="w-4 h-4 border-2 border-text-tertiary/30
+            border-t-text-tertiary rounded-full animate-spin" />
+          <span className="text-[13px] text-text-muted">{t('cli.checking')}</span>
+        </div>
+      )}
+
+      {status === 'installing' && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] text-text-muted">
+              {phase === 'npm_fallback' ? t('setup.npmFallback') : t('cli.installing')}
+            </span>
+            {downloadPercent > 0 && downloadPercent < 100 && (
+              <span className="text-[13px] text-text-tertiary">{downloadPercent}%</span>
+            )}
+          </div>
+          <div className="w-full h-2 rounded-full bg-bg-tertiary overflow-hidden">
+            {downloadPercent > 0 ? (
+              <div
+                className="h-full bg-accent rounded-full transition-all duration-300"
+                style={{ width: `${downloadPercent}%` }}
+              />
+            ) : (
+              <div className="h-full bg-accent/60 rounded-full animate-pulse w-full" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {(status === 'installed') && (
+        <div className="py-2 text-center">
+          <span className="text-[13px] text-green-500 font-medium">
+            ✓ {t('cli.installDone')} {version && `v${version}`}
+          </span>
+        </div>
+      )}
+
+      {status === 'install_failed' && errorMsg && (
+        <div className="py-2 px-3 rounded-lg bg-red-500/10">
+          <p className="text-[13px] text-red-500 truncate" title={errorMsg}>{errorMsg}</p>
+        </div>
+      )}
     </div>
   );
 }

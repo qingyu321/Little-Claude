@@ -1,6 +1,7 @@
 import { useState, useMemo, memo } from 'react';
 import { type ChatMessage } from '../../stores/chatStore';
 import { ToolUseMsg } from './MessageBubble';
+import { useSessionStore } from '../../stores/sessionStore';
 import { useT } from '../../lib/i18n';
 
 interface Props {
@@ -35,6 +36,12 @@ export const ToolGroup = memo(function ToolGroup({ messages }: Props) {
     [messages],
   );
 
+  // DSH ongoing: session running with at least one unfinished tool in group
+  const selectedSessionId = useSessionStore((s) => s.selectedSessionId);
+  const sessionRunning = useSessionStore((s) =>
+    selectedSessionId ? s.sessionStatuses.get(selectedSessionId) === 'running' : false);
+  const hasRunning = sessionRunning && !allHaveResults;
+
   const [expanded, setExpanded] = useState(false);
 
   const summary = useMemo(() => buildToolSummary(messages), [messages]);
@@ -62,9 +69,12 @@ export const ToolGroup = memo(function ToolGroup({ messages }: Props) {
           <rect x="2" y="2" width="7" height="7" rx="1.5" />
           <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" opacity="0.5" />
         </svg>
-        <span className="text-xs font-medium text-text-muted">
+        <span className={`text-xs font-medium ${hasRunning ? 'text-ongoing' : 'text-text-muted'}`}>
           {t('msg.toolGroup').replace('{n}', String(count))}
         </span>
+        {hasRunning && (
+          <span className="w-1.5 h-1.5 rounded-full bg-ongoing animate-pulse-soft flex-shrink-0" />
+        )}
         <span className="text-[11px] text-text-tertiary truncate max-w-[300px]">
           ({summary})
         </span>

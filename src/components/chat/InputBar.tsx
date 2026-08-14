@@ -25,6 +25,9 @@ import { useT } from '../../lib/i18n';
 import { useTokenSpeedStore } from '../../stores/tokenSpeedStore';
 import { SlashCommandPopover, getFilteredCommandList } from './SlashCommandPopover';
 import { useCommandStore } from '../../stores/commandStore';
+import { useGoalStore } from '../../stores/goalStore';
+import { GoalBar } from './GoalBar';
+import { TodoDock } from './TodoDock';
 import { cleanupStreamListener, registerStreamListener } from '../../lib/stream-cleanup';
 import { envFingerprint, resolveModelForProvider, resolveModelOrError, resolveThinkingLevelForProvider } from '../../lib/api-provider';
 import { useProviderStore } from '../../stores/providerStore';
@@ -769,7 +772,7 @@ export function InputBar() {
 
   // --- Submit ---
   const handleSubmit = useCallback(
-    async (submitText?: string, opts?: { preserveDraft?: boolean }) => {
+    async (submitText?: string, opts?: { preserveDraft?: boolean; forceMode?: 'queue' | 'steer' | 'auto' }) => {
     // Capture tabId at the start of submission
     let tabId = useSessionStore.getState().selectedSessionId;
     if (!tabId) {
@@ -831,6 +834,13 @@ export function InputBar() {
     }
 
     if (!text) return;
+
+    // DSH goal: seed from the session's first user message (before command
+    // interception, so /cmd submissions don't seed goals)
+    const hadMessages = getActiveTabState().messages.length > 0;
+    if (!hadMessages && !text.startsWith('/')) {
+      useGoalStore.getState().seedGoal(tabId, text);
+    }
 
     // Intercept immediate (built-in) commands even when submitted directly
     // (e.g. user types "/help" and presses Enter without using the popover)
@@ -922,6 +932,30 @@ export function InputBar() {
     const currentStatus = currentTabState.sessionStatus;
 
     if (currentStatus === 'running') {
+      // DSH busy-Enter: 'queue' (default) or 'steer' (interrupt & send live).
+      // Ctrl/Cmd+Enter flips the preference at submit time (forceMode).
+      const pref = useSettingsStore.getState().busyEnter;
+      const mode = opts?.forceMode && opts.forceMode !== 'auto' ? opts.forceMode : pref;
+      if (mode === 'steer') {
+        const meta = getActiveTabState().sessionMeta;
+        // steer 是 DSH 专用交互（Rust 端 mode 参数只对 deepseek 后端生效）。
+        // claude/codex 后端是 stream-json 输入模式，直接写 stdin 的裸文本
+        // 会被 CLI 丢弃——回退为 queue 排队（等待当前轮次结束）。
+        if (useSettingsStore.getState().cliBackend === 'deepseek' && meta.stdinId) {
+          addMessage(tabId, {
+            id: generateMessageId(),
+            role: 'user',
+            type: 'text',
+            content: text,
+            timestamp: Date.now(),
+          });
+          bridge.sendStdin(meta.stdinId, text, 'steer').catch((err: unknown) => {
+            console.warn('[busy-enter] steer sendStdin failed, queuing:', err);
+            useChatStore.getState().addPendingMessage(tabId, text);
+          });
+          return;
+        }
+      }
       useChatStore.getState().addPendingMessage(tabId, text);
       return;
     }
@@ -1416,6 +1450,36 @@ export function InputBar() {
   //     decision to re-send or not)
   //   · load error          → 'error' — stays manual
   const pendingCount = useActiveTab((t) => t.pendingUserMessages.length);
+  const pendingMessages = useActiveTab((t) => t.pendingUserMessages);
+  const [queueOpen, setQueueOpen] = useState(false);
+
+  /** QueueDock: delete one queued message */
+  const removeQueued = useCallback((index: number) => {
+    const tabId = useSessionStore.getState().selectedSessionId;
+    if (tabId) useChatStore.getState().removePendingMessage(tabId, index);
+  }, []);
+
+  /** QueueDock: steer — send one queued message live to the running turn */
+  const steerQueued = useCallback((text: string, index: number) => {
+    const tabId = useSessionStore.getState().selectedSessionId;
+    if (!tabId) return;
+    const meta = getActiveTabState().sessionMeta;
+    if (!meta.stdinId) return;
+    useChatStore.getState().removePendingMessage(tabId, index);
+    addMessage(tabId, {
+      id: generateMessageId(),
+      role: 'user',
+      type: 'text',
+      content: text,
+      timestamp: Date.now(),
+    });
+    // 必须显式传 'steer'：Rust 端 mode 缺省是 queue，不传的话"插话"实际
+    // 会排到当前轮次后面才送达，与按钮语义（中断当前轮次）矛盾。
+    bridge.sendStdin(meta.stdinId, text, 'steer').catch((err: unknown) => {
+      console.warn('[queue-dock] steer failed:', err);
+      useChatStore.getState().addPendingMessage(tabId, text);
+    });
+  }, []);
   const hasLiveStdin = useActiveTab((t) => !!t.sessionMeta.stdinId);
   useEffect(() => {
     if (sessionStatus === 'completed' && !hasLiveStdin && pendingCount > 0) {
@@ -1600,8 +1664,24 @@ export function InputBar() {
     }
 
     if (e.metaKey || e.ctrlKey) {
-      // Cmd+Enter / Ctrl+Enter → let tiptap insert newline (default behavior)
-      return false;
+      // 计划审批卡打开时 Cmd/Ctrl+Enter 只换行——上面的 pendingInteraction
+      // 拦截放行了 isEmptyPlanApproval（plan_review 且无输入），若此处把
+      // 空 Ctrl+Enter 送去 handleSubmit，会被当成"批准并执行计划"误触发。
+      if (pendingInteraction?.type === 'plan_review') {
+        return false;
+      }
+      // DSH busy-Enter: Ctrl/Cmd+Enter 以翻转的 queue/steer 模式强制提交。
+      // 仅 deepseek 后端支持（Rust 端 mode 参数只对 deepseek 生效）；其他
+      // 后端 mode 被忽略、强发会绕过 busy 排队直写 stdin（忙时消息被静默
+      // 丢弃）——回退为换行（macOS 用户习惯 Cmd+Enter 换行）。
+      if (useSettingsStore.getState().cliBackend !== 'deepseek') {
+        return false;
+      }
+      e.preventDefault();
+      handleSubmit(undefined, {
+        forceMode: useSettingsStore.getState().busyEnter === 'steer' ? 'queue' : 'steer',
+      });
+      return true;
     } else if (!e.shiftKey) {
       // Plain Enter → send message
       e.preventDefault();
@@ -1719,27 +1799,75 @@ export function InputBar() {
           </div>
         ) : null}
 
-        {/* Pending queue indicator — B15: 运行中发送的消息会静默排队，
-            必须让用户看到数量并可取消 */}
+        {/* GoalBar — DSH session goal dock above the composer */}
+        <GoalBar />
+
+        {/* TodoDock — DSH standing task list: total steps + spinner/checkmark
+            per item (todo/write events from the DeepSeek backend) */}
+        <TodoDock />
+
+        {/* QueueDock — DSH busy-Enter queue: count bar + expandable items
+            with per-message steer (插话) and delete */}
         {pendingCount > 0 && (
-          <div className="mb-1.5 px-3 py-1.5 rounded-lg
-            bg-warning/10 border border-warning/20
-            flex items-center gap-2 animate-fade-in">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
-              stroke="currentColor" strokeWidth="1.5" className="text-warning flex-shrink-0">
-              <rect x="3" y="2" width="6" height="6" rx="1" />
-              <path d="M6 8v2M4.5 10h3" />
-            </svg>
-            <span className="flex-1 text-[11px] text-warning">
-              {t('input.pendingQueued', { n: String(pendingCount) })}
-            </span>
-            <button
-              onClick={cancelPending}
-              className="flex-shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium
-                bg-warning/10 text-warning hover:bg-warning/20 transition-smooth"
+          <div className="mb-1.5 rounded-lg
+            bg-warning/10 border border-warning/20 animate-fade-in overflow-hidden">
+            <div
+              className="flex items-center gap-2 px-3 py-1.5 cursor-pointer select-none"
+              onClick={() => setQueueOpen(!queueOpen)}
             >
-              {t('input.pendingCancel')}
-            </button>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+                stroke="currentColor" strokeWidth="1.5" className="text-warning flex-shrink-0">
+                <rect x="3" y="2" width="6" height="6" rx="1" />
+                <path d="M6 8v2M4.5 10h3" />
+              </svg>
+              <span className="flex-1 text-[11px] text-warning">
+                {t('input.pendingQueued', { n: String(pendingCount) })}
+              </span>
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none"
+                stroke="currentColor" strokeWidth="1.5"
+                className={`text-warning/70 transition-transform duration-150 ${queueOpen ? 'rotate-90' : ''}`}>
+                <path d="M3 2l4 3-4 3" />
+              </svg>
+              <button
+                onClick={(e) => { e.stopPropagation(); cancelPending(); }}
+                className="flex-shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium
+                  bg-warning/10 text-warning hover:bg-warning/20 transition-smooth"
+              >
+                {t('input.pendingCancel')}
+              </button>
+            </div>
+            {queueOpen && pendingMessages.length > 0 && (
+              <div className="border-t border-warning/15 px-3 py-1.5 space-y-1 max-h-40 overflow-y-auto">
+                {pendingMessages.map((m, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[11px] group/queue">
+                    <span className="flex-1 truncate text-text-secondary">{m}</span>
+                    {/* Steer: interrupt the running turn and send this queued message live */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); void steerQueued(m, i); }}
+                      title={t('input.pendingSteer')}
+                      className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center
+                        text-text-tertiary hover:text-ongoing hover:bg-bg-layer-2 transition-smooth"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+                        stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+                        <path d="M2 6l8 0M6.5 2.5L10 6l-3.5 3.5" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); removeQueued(i); }}
+                      title={t('input.pendingRemove')}
+                      className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center
+                        text-text-tertiary hover:text-error hover:bg-bg-layer-2 transition-smooth"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+                        stroke="currentColor" strokeWidth="1.5">
+                        <path d="M3 3l6 6M9 3l-6 6" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

@@ -37,6 +37,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 tauri-plugin-process = "2"
 reqwest = { version = "0.12", features = ["stream", "json"] }
+tokio-tungstenite = "0.26"
 futures-util = { version = "0.3", features = ["channel"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

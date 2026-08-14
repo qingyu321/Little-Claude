@@ -320,3 +320,47 @@ src-tauri/src/backends/mod.rs
 | D3 | 会话存储方案 (a) 重建 JSONL vs (b) 参数化目录 | 方案 (a)，codex 已示范，生命周期零改动 |
 | D4 | 官方发布前是否先集成社区候选 | **不建议**——翻译层大概率重写；可考虑 DeepSeekCode（协议兼容）作为临时过渡 |
 | D5 | rewind 无原生 checkpoint 时的降级范围 | 仅对话回退起步，文件快照后补 |
+
+---
+
+## 十一、v2 批次（2026-08-14）：首选化 + TodoDock + 安装适配
+
+D-N1-B 服务集成（上一轮）完成后，本轮按用户要求收尾三项：
+
+### 11.1 字体大小修复（persist v30）
+
+- 根因：代码默认 `fontSize: 14`（与注释 "default 18" 长期不符）；dev 隔离数据目录
+  （`.dev`）初建时把默认 14 落进磁盘快照，此后每次启动灌回 14，用户看到"字体变小"。
+- 修复：默认值 14→18；persist version 29→30，migrate 把存量 `fontSize === 14` 一律升 18。
+- 正式目录快照本就是 18，不受影响。
+
+### 11.2 DeepSeek Harness 首选化
+
+- `settingsStore` 默认 `cliBackend: 'claude'` → `'deepseek'`（服务模式 = 真流式 + 真上下文延续）。
+- 存量用户已持久化的 cliBackend 不被 migrate 改写（尊重既有选择，聊天头部 CliBackendToggle 可随时切）。
+
+### 11.3 TodoDock 步骤面板（转圈/打勾）
+
+- 排查结论：DSH webui 的"总步骤完成情况"= `dsh-tool-todo` 的 `todo_write` 工具 + `todo/write`
+  事件（整表替换、last-write-wins）+ `todos` projection（`turn/start` 清空），web 端由
+  ui-conversation 的 TodoDock 渲染（折叠头部 + `N 完成 · N 进行中 · N 待办` 计数）。
+- LC 此前只有 Claude 风格的树状 TodoMsg（消息流内），缺 DSH 风格常驻面板。
+- 落地：
+  - Rust `dsh_events.rs`：`todo/write` → `stream_event.todo_update`（透传 3 态列表）；
+    `turn/start` → `stream_event.turn_start`（standing plan 清空标记）。+2 单测（真实帧形状）。
+  - 前端 `todoStore.ts`（会话内内存）+ `TodoDock.tsx`（GoalBar 旁：折叠头部计数、
+    行状态 pending 空圆 / in_progress 旋转环 / completed 打勾）+ `useStreamProcessor`
+    消费 `todo_update`/`turn_start` + i18n zh/en。
+
+### 11.4 dsh 依赖安装适配
+
+- Rust：`check_dsh_cli`（二进制 + `--version` + **默认端口 3080 服务探测**
+  `dsh_service::probe_default_service`）；`install_dsh_cli`（npm `@deepseek-ai/dsh`，
+  中国 registry 优先、npm 缺失时先装 Node，复用 Codex 安装管线）。`CliStatus` 增
+  `service_running: Option<bool>`。
+- 前端：`tauri-bridge` 增 `checkDshCli`/`installDshCli`；`CliTab` 增 DeepSeek Harness
+  卡片（版本 + 服务运行状态点 + 检测/安装按钮，标注"首选"）。
+
+### 11.5 验证
+
+- cargo test **107 passed**（+2 todo 翻译单测）；tsc 0 错误；`vite build` 成功。

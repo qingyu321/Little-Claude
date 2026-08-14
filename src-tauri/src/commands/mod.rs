@@ -2,6 +2,7 @@ pub mod anthropic_proxy;
 pub mod auth;
 pub mod claude_process;
 pub mod cli_resolver;
+pub mod dsh_service;
 pub mod download_cancel;
 pub mod export;
 pub mod external;
