@@ -2,7 +2,7 @@ import type { ChatMessage } from '../stores/chatStore';
 import { generateMessageId } from '../stores/chatStore';
 import type { AgentPhase } from '../stores/agentStore';
 import { isSystemText } from './system-text';
-import { semanticContextTokens } from './context-tokens';
+import { normalizeCacheCreation, semanticContextTokens } from './context-tokens';
 
 // 报告B9 复查: session reload used to inject full tool results straight into
 // memory, bypassing the 256 KiB cap that bounds live streams — reopening a
@@ -196,9 +196,14 @@ export function parseSessionMessages(rawMessages: any[]): LoadedSession {
           const output = u.output_tokens || 0;
           const cacheRead = u.cache_read_input_tokens || 0;
           const ccNested = u.cache_creation || {};
-          const cacheCreation = (u.cache_creation_input_tokens || 0)
-            + (ccNested.ephemeral_1h_input_tokens || 0)
-            + (ccNested.ephemeral_5m_input_tokens || 0);
+          // Same normalization as the live path: the CLI writes the SAME
+          // cache-creation value at the top level AND inside the nested
+          // object; summing them double-counts (inflated restored Ctx bar).
+          const cacheCreation = normalizeCacheCreation(
+            u.cache_creation_input_tokens,
+            ccNested.ephemeral_1h_input_tokens,
+            ccNested.ephemeral_5m_input_tokens,
+          );
           // E3: same semantics-aware metric as the live path (see
           // context-tokens.ts) — DeepSeek-style usage (input already includes
           // the cached share) uses input alone; Anthropic-style usage must sum

@@ -38,3 +38,19 @@ export function semanticContextTokens(b: ContextUsageParts): number {
   if (cached > 0 && b.input >= cached) return b.input;
   return b.input + b.cacheRead + b.cacheCreation;
 }
+
+/** Normalize cache-creation tokens: the Claude CLI reports the same value
+ *  both at the top level (usage.cache_creation_input_tokens) and inside the
+ *  nested usage.cache_creation object (ephemeral_1h/5m). Summing them
+ *  double-counts — prefer the top-level value; use the nested form only when
+ *  the top level is absent (older CLI snapshots). Mirrors the Rust
+ *  profile.rs cache_creation_tokens rule. */
+export function normalizeCacheCreation(
+  topLevel: number | undefined,
+  ephemeral1h: number | undefined,
+  ephemeral5m: number | undefined,
+): number {
+  const top = topLevel || 0;
+  if (top > 0) return top;
+  return (ephemeral1h || 0) + (ephemeral5m || 0);
+}

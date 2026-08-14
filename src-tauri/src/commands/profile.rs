@@ -31,7 +31,18 @@ fn cache_creation_tokens(usage: &Value) -> u64 {
             usage_u64(v, "ephemeral_1h_input_tokens") + usage_u64(v, "ephemeral_5m_input_tokens")
         })
         .unwrap_or(0);
-    top_level + nested
+    // The Claude CLI reports cache-creation tokens BOTH at the top level
+    // (usage.cache_creation_input_tokens) and inside the nested
+    // usage.cache_creation object — they are the same value in two
+    // representations, so summing them double-counts (observed: identical
+    // numbers in both slots on real sessions). Prefer the top-level value;
+    // fall back to the nested object only for older CLI snapshots that wrote
+    // only the nested form.
+    if top_level > 0 {
+        top_level
+    } else {
+        nested
+    }
 }
 
 /// Convert an RFC3339 timestamp (UTC or with offset, optional fractional
@@ -134,7 +145,6 @@ pub fn append_usage_record_impl(
 /// input tokens were 0 (OpenAI-compat proxy path: message_start carried no
 /// input). Records there SUPPLEMENT input + cache (output already counted).
 fn merge_usage_log_into(
-    tracked: &HashSet<String>,
     jsonl_counted_uuids: &HashSet<String>,
     jsonl_zero_input_ids: &HashSet<String>,
     daily: &mut HashMap<String, ProfileDailyStats>,
@@ -155,13 +165,11 @@ fn merge_usage_log_into(
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let session_id = value
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !tracked.contains(session_id) {
-            continue;
-        }
+        // No session filter: the usage log is this machine's own append-only
+        // record of every turn's authoritative token counts (session ids in
+        // the log are Little Claude's internal desk_* ids — they are NOT the
+        // CLI jsonl filenames, so a tracked-session filter would drop every
+        // record). Dedup happens by (message_id) against the JSONL scan.
         let message_id = value
             .get("message_id")
             .and_then(|v| v.as_str())
@@ -171,10 +179,10 @@ fn merge_usage_log_into(
             continue; // dedup within the usage log itself
         }
         // Skip turns the JSONL scan already counted with full (non-zero) input.
-        // The frontend persists `msg.uuid` as `message_id`, which equals the
-        // JSONL `value.uuid`; the JSONL scan's primary dedup key (`message.id`)
-        // is a different ID, so without this check the same turn would be
-        // counted twice.
+        // The frontend persists the assistant message id (msg_*) as
+        // `message_id`, which matches the JSONL `message.id` dedup key used
+        // by the scan — without this check the same turn would be counted
+        // twice.
         if jsonl_counted_uuids.contains(&message_id) {
             continue;
         }
@@ -247,8 +255,6 @@ fn merge_usage_log_into(
 
 #[tauri::command]
 pub async fn get_profile_stats() -> Result<Value, String> {
-    use std::io::BufRead;
-
     let home = dirs::home_dir().ok_or("Cannot find home dir")?;
     let claude_dir = home.join(".claude").join("projects");
     if !claude_dir.exists() {
@@ -266,7 +272,136 @@ pub async fn get_profile_stats() -> Result<Value, String> {
         }));
     }
 
-    let tracked = crate::commands::session::load_tracked_sessions();
+    // The full scan now covers EVERY session jsonl under ~/.claude/projects
+    // (cc-switch style: all machine-wide Claude Code usage, including CLI
+    // sessions started in a terminal), so it can be thousands of files and
+    // hundreds of MB — never run that on the async executor. spawn_blocking
+    // keeps the Tauri main thread responsive while the scan runs.
+    tokio::task::spawn_blocking(move || scan_profile_stats(&claude_dir))
+        .await
+        .map_err(|e| format!("Profile stats task failed: {}", e))?
+}
+
+/// One representative assistant message (deduped by message.id across all
+/// files, stop_reason/output-max selection — mirrors cc-switch).
+#[derive(Clone)]
+struct ParsedAssistantUsage {
+    message_id: String,
+    uuid: String,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_tokens: u64,
+    stop_reason: Option<String>,
+    timestamp: Option<String>,
+}
+
+/// Recursively collect every jsonl under `dir` (main sessions, subagents,
+/// workflows) and merge assistant usage rows into `msgs`, deduped by
+/// message.id with cc-switch's representative-row rule. `counted_sessions`
+/// gets the file stem of top-level (project-dir) jsonl files only.
+fn collect_jsonl_files_recursive(
+    dir: &std::path::Path,
+    counted_sessions: &mut HashSet<String>,
+    msgs: &mut HashMap<String, ParsedAssistantUsage>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_jsonl_files_recursive(&p, counted_sessions, msgs);
+            continue;
+        }
+        if !p.extension().map_or(false, |e| e == "jsonl") {
+            continue;
+        }
+        // Top-level (project dir directly) jsonl files are main sessions.
+        if p.parent().and_then(|pp| pp.parent()) == Some(dir) {
+            if let Some(stem) = p.file_stem() {
+                counted_sessions.insert(stem.to_string_lossy().to_string());
+            }
+        }
+        scan_jsonl_file(&p, msgs);
+    }
+}
+
+/// Parse one jsonl file, merging each assistant message into `msgs` with the
+/// representative-row rule: a row with stop_reason beats one without; among
+/// equal stop-reason status, the larger output_tokens wins.
+fn scan_jsonl_file(path: &std::path::Path, msgs: &mut HashMap<String, ParsedAssistantUsage>) {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let Some(message_id) = message.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if message_id.is_empty() {
+            continue;
+        }
+        let parsed = ParsedAssistantUsage {
+            message_id: message_id.to_string(),
+            uuid: value
+                .get("uuid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            model: message
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            input_tokens: usage_u64(usage, "input_tokens"),
+            output_tokens: usage_u64(usage, "output_tokens"),
+            cache_tokens: usage_u64(usage, "cache_read_input_tokens")
+                + cache_creation_tokens(usage),
+            stop_reason: message
+                .get("stop_reason")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            timestamp: value
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        };
+        let should_replace = match msgs.get(message_id) {
+            None => true,
+            Some(existing) => {
+                if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
+                    true
+                } else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
+                    parsed.output_tokens > existing.output_tokens
+                } else {
+                    false
+                }
+            }
+        };
+        if should_replace {
+            msgs.insert(message_id.to_string(), parsed);
+        }
+    }
+}
+
+/// Scan ~/.claude/projects/**/*.jsonl + Little Claude's usage log and
+/// aggregate per-day / per-model token statistics. Runs on the blocking
+/// pool (see get_profile_stats).
+fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
     let mut daily: HashMap<String, ProfileDailyStats> = HashMap::new();
     let mut models: HashMap<String, ProfileModelStats> = HashMap::new();
     let mut counted_sessions: HashSet<String> = HashSet::new();
@@ -284,144 +419,79 @@ pub async fn get_profile_stats() -> Result<Value, String> {
     // records for these ids SUPPLEMENT input + cache instead of being skipped.
     let mut jsonl_zero_input_ids: HashSet<String> = HashSet::new();
 
-    if let Ok(entries) = std::fs::read_dir(&claude_dir) {
-        for entry in entries.flatten() {
-            if !entry.path().is_dir() {
-                continue;
+    // ─── JSONL scan (cc-switch compatible) ─────────────────────────────
+    // Walk EVERY jsonl under ~/.claude/projects recursively — main session
+    // files, Task/subagent files (SESSION_ID/subagents/*.jsonl) and workflow
+    // files (subagents/workflows/wf_*/*.jsonl) — so machine-wide Claude Code
+    // usage is counted (terminal CLI sessions included, same as cc-switch).
+    //
+    // Dedup: the CLI can write the SAME assistant message.id multiple times
+    // (message_start snapshot vs final record, replay/rewind copies, and
+    // subagent duplicates of a parent turn). Keep ONE representative row per
+    // message.id across all files, preferring a row with a stop_reason and,
+    // among equal-stop rows, the largest output_tokens (the message_start
+    // snapshot carries partial usage — issue anthropics/claude-code#22671).
+    let mut msgs: HashMap<String, ParsedAssistantUsage> = HashMap::new();
+    collect_jsonl_files_recursive(&claude_dir, &mut counted_sessions, &mut msgs);
+
+    for msg in msgs.values() {
+        let total_tokens = msg.input_tokens + msg.output_tokens + msg.cache_tokens;
+        if total_tokens == 0 {
+            continue;
+        }
+        // Record the turn-level identifiers so the usage-log merge can decide
+        // whether to skip or supplement this turn. Same split as before:
+        //  - input > 0 → JSONL counted the full turn → usage-log SKIPPED.
+        //  - input == 0 but total > 0 → proxy path: JSONL only counted output,
+        //    usage-log SUPPLEMENTS input + cache.
+        // Record BOTH dedup keys so the usage-log merge matches whichever
+        // identifier the frontend persisted: `message.id` (msg_* — the
+        // common case) and `value.uuid` (older frontend builds / proxy
+        // paths persisted msg.uuid, which equals the JSONL value.uuid).
+        if msg.input_tokens > 0 {
+            jsonl_counted_uuids.insert(msg.message_id.clone());
+            if !msg.uuid.is_empty() {
+                jsonl_counted_uuids.insert(msg.uuid.clone());
             }
-            let Ok(files) = std::fs::read_dir(entry.path()) else {
-                continue;
-            };
-            for file in files.flatten() {
-                let path = file.path();
-                if !path.extension().map_or(false, |e| e == "jsonl") {
-                    continue;
-                }
-                let Some(name) = path.file_stem() else {
-                    continue;
-                };
-                let session_id = name.to_string_lossy().to_string();
-                if !tracked.contains(&session_id) {
-                    continue;
-                }
-                counted_sessions.insert(session_id.clone());
-
-                let Ok(file) = std::fs::File::open(&path) else {
-                    continue;
-                };
-                let reader = std::io::BufReader::new(file);
-                let mut seen_message_ids: HashSet<String> = HashSet::new();
-
-                for line in reader.lines().map_while(Result::ok) {
-                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if value.get("type").and_then(|v| v.as_str()) != Some("assistant") {
-                        continue;
-                    }
-                    let Some(message) = value.get("message") else {
-                        continue;
-                    };
-                    let Some(usage) = message.get("usage") else {
-                        continue;
-                    };
-
-                    let message_key = message
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| value.get("uuid").and_then(|v| v.as_str()))
-                        .unwrap_or("");
-                    if !message_key.is_empty() && !seen_message_ids.insert(message_key.to_string())
-                    {
-                        continue;
-                    }
-
-                    let input_tokens = usage_u64(usage, "input_tokens");
-                    let output_tokens = usage_u64(usage, "output_tokens");
-                    let cache_tokens =
-                        usage_u64(usage, "cache_read_input_tokens") + cache_creation_tokens(usage);
-                    let total_tokens = input_tokens + output_tokens + cache_tokens;
-                    if total_tokens == 0 {
-                        continue;
-                    }
-
-                    // Record the turn-level identifiers so the usage-log merge
-                    // can decide whether to skip or supplement this turn. Store
-                    // BOTH the top-level `uuid` (official path persists msg.uuid)
-                    // AND `message.id` (OpenAI-compat proxy path persists
-                    // message_start's message.id).
-                    //
-                    // Split by input reliability:
-                    //  - input_tokens > 0 → JSONL counted the full turn (input +
-                    //    output + cache) → usage-log record for this id is SKIPPED.
-                    //  - input_tokens == 0 but total > 0 → the proxy path sent the
-                    //    CLI an Anthropic response whose message_start carried no
-                    //    input (OpenAI usage arrives on the tail chunk), so the
-                    //    JSONL only counted output. The usage-log record must
-                    //    SUPPLEMENT input + cache for this id.
-                    if input_tokens > 0 {
-                        if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
-                            if !uuid.is_empty() {
-                                jsonl_counted_uuids.insert(uuid.to_string());
-                            }
-                        }
-                        if let Some(mid) = message.get("id").and_then(|v| v.as_str()) {
-                            if !mid.is_empty() {
-                                jsonl_counted_uuids.insert(mid.to_string());
-                            }
-                        }
-                    } else {
-                        if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
-                            if !uuid.is_empty() {
-                                jsonl_zero_input_ids.insert(uuid.to_string());
-                            }
-                        }
-                        if let Some(mid) = message.get("id").and_then(|v| v.as_str()) {
-                            if !mid.is_empty() {
-                                jsonl_zero_input_ids.insert(mid.to_string());
-                            }
-                        }
-                    }
-
-                    total_input += input_tokens;
-                    total_output += output_tokens;
-                    total_cache += cache_tokens;
-                    message_count += 1;
-
-                    // Local calendar date: the JSONL timestamp is UTC (RFC3339
-                    // with Z); slicing the first 10 chars yields the UTC day,
-                    // which misbuckets 00:00–02:00 local requests onto the
-                    // previous day (the UI groups by local date).
-                    let date = value
-                        .get("timestamp")
-                        .and_then(|v| v.as_str())
-                        .map(local_date_from_timestamp)
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let entry = daily
-                        .entry(date.clone())
-                        .or_insert_with(|| ProfileDailyStats {
-                            date,
-                            ..Default::default()
-                        });
-                    entry.input_tokens += input_tokens;
-                    entry.output_tokens += output_tokens;
-                    entry.cache_tokens += cache_tokens;
-                    entry.total_tokens += total_tokens;
-                    entry.message_count += 1;
-
-                    if let Some(model) = message.get("model").and_then(|v| v.as_str()) {
-                        let model_entry =
-                            models
-                                .entry(model.to_string())
-                                .or_insert_with(|| ProfileModelStats {
-                                    model: model.to_string(),
-                                    ..Default::default()
-                                });
-                        model_entry.total_tokens += total_tokens;
-                        model_entry.message_count += 1;
-                    }
-                }
+        } else {
+            jsonl_zero_input_ids.insert(msg.message_id.clone());
+            if !msg.uuid.is_empty() {
+                jsonl_zero_input_ids.insert(msg.uuid.clone());
             }
+        }
+
+        total_input += msg.input_tokens;
+        total_output += msg.output_tokens;
+        total_cache += msg.cache_tokens;
+        message_count += 1;
+
+        let date = msg
+            .timestamp
+            .as_deref()
+            .map(local_date_from_timestamp)
+            .unwrap_or_else(|| "unknown".to_string());
+        let entry = daily
+            .entry(date.clone())
+            .or_insert_with(|| ProfileDailyStats {
+                date,
+                ..Default::default()
+            });
+        entry.input_tokens += msg.input_tokens;
+        entry.output_tokens += msg.output_tokens;
+        entry.cache_tokens += msg.cache_tokens;
+        entry.total_tokens += total_tokens;
+        entry.message_count += 1;
+
+        if !msg.model.is_empty() {
+            let model_entry =
+                models
+                    .entry(msg.model.clone())
+                    .or_insert_with(|| ProfileModelStats {
+                        model: msg.model.clone(),
+                        ..Default::default()
+                    });
+            model_entry.total_tokens += total_tokens;
+            model_entry.message_count += 1;
         }
     }
 
@@ -430,7 +500,6 @@ pub async fn get_profile_stats() -> Result<Value, String> {
     // wrote zero/missing usage to its JSONL. Dedup is by (session_id, message_id),
     // so records whose JSONL message already contributed are skipped.
     merge_usage_log_into(
-        &tracked,
         &jsonl_counted_uuids,
         &jsonl_zero_input_ids,
         &mut daily,

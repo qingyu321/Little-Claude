@@ -105,6 +105,19 @@ impl CliBackend for CodexBackend {
                 return Some(npm_bin.to_string_lossy().into_owned());
             }
         }
+        // App-managed npm-global (where install_codex_via_npm installs codex).
+        // cli_resolver's tiered scan covers claude.cmd there, but CodexBackend
+        // has its own PATH-based lookup — without this, an app-installed codex
+        // is invisible ("codex not found") while claude resolves fine.
+        if let Some(npm_bin) = crate::commands::cli_manage::get_npm_global_bin() {
+            #[cfg(target_os = "windows")]
+            let codex_bin = npm_bin.join("codex.cmd");
+            #[cfg(not(target_os = "windows"))]
+            let codex_bin = npm_bin.join("codex");
+            if codex_bin.exists() {
+                return Some(codex_bin.to_string_lossy().into_owned());
+            }
+        }
         None
     }
 

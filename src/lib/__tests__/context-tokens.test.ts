@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { semanticContextTokens } from "../context-tokens";
+import { normalizeCacheCreation, semanticContextTokens } from "../context-tokens";
 
 describe("semanticContextTokens", () => {
   it("returns input alone under DeepSeek semantics (input already includes the cached share)", () => {
@@ -37,5 +37,25 @@ describe("semanticContextTokens", () => {
     const b = { input: 6, cacheRead: 85163, cacheCreation: 0 };
     expect(semanticContextTokens(b)).toBe(85169); // old formula value
     expect(semanticContextTokens(b)).toBe(b.input + b.cacheRead + b.cacheCreation);
+  });
+});
+
+describe("normalizeCacheCreation", () => {
+  it("uses the top-level value when present (nested is the same value in another slot)", () => {
+    // Real CLI shape: cache_creation_input_tokens === ephemeral_5m_input_tokens.
+    expect(normalizeCacheCreation(24213, 0, 24213)).toBe(24213);
+  });
+
+  it("sums nested ephemeral buckets only when the top level is absent", () => {
+    expect(normalizeCacheCreation(undefined, 100, 200)).toBe(300);
+  });
+
+  it("returns zero when nothing is present", () => {
+    expect(normalizeCacheCreation(undefined, 0, 0)).toBe(0);
+  });
+
+  it("never double-counts top + nested", () => {
+    expect(normalizeCacheCreation(24213, 24213, 0)).toBe(24213);
+    expect(normalizeCacheCreation(500, 500, 500)).toBe(500);
   });
 });

@@ -109,6 +109,17 @@ function renderCodeSegment(inner: string, key: number): ReactNode {
       ? inner
       : wd ? `${wd.replace(/\/$/, '')}/${inner}` : inner;
     const fileName = inner.split(/[\\/]/).pop() || inner;
+    // Security: out-of-workspace paths must not become clickable chips —
+    // a single click would read arbitrary local files into the preview
+    // (e.g. C:\\Users\\...\\.ssh\\config from untrusted model output).
+    const inWorkspace = inner.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(inner)
+      ? (() => {
+          const base = wd.replace(/\\/g, '/').replace(/\/+$/, '');
+          const p = resolved.replace(/\\/g, '/');
+          return !!base && (p === base || p.startsWith(base + '/'));
+        })()
+      : true;
+    if (!inWorkspace) return <code key={key}>{inner}</code>;
     return (
       <button
         key={key}

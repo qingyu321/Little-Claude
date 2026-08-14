@@ -428,7 +428,7 @@ export const useSettingsStore = create<SettingsState>()(
       agentPanelOpen: false,
       workingDirectory: '',
       selectedModel: 'claude-sonnet-4-6',
-      sessionMode: 'bypass',
+      sessionMode: 'code',
       busyEnter: 'queue',
       locale: 'zh',
       fontSize: 18,
@@ -870,8 +870,13 @@ export const useSettingsStore = create<SettingsState>()(
           delete persisted.thinkingEnabled;
         }
         if (version < 5) {
-          // Force default mode to bypass — old versions may have persisted 'code'/'ask'
-          persisted.sessionMode = 'bypass';
+          // v5 historically force-set bypass; that made every tool call
+          // auto-approved (--dangerously-skip-permissions). Keep the
+          // user's stored mode when present; only fresh installs (no
+          // stored value) get the app default (see sessionMode initial).
+          if (persisted.sessionMode === undefined) {
+            persisted.sessionMode = 'code';
+          }
         }
         if (version < 6) {
           // Fix Haiku model ID: claude-haiku-4-5 → claude-haiku-4-5-20251001

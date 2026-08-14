@@ -21,7 +21,7 @@ import { useProviderStore } from '../stores/providerStore';
 import { t } from '../lib/i18n';
 import { cleanupStreamListener, registerStreamListener, clearLegacyListener } from '../lib/stream-cleanup';
 import { isSystemText } from '../lib/system-text';
-import { semanticContextTokens } from '../lib/context-tokens';
+import { normalizeCacheCreation, semanticContextTokens } from '../lib/context-tokens';
 import { showToast } from '../components/shared/Toast';
 
 // --- Error classification for user-facing messages ---
@@ -497,12 +497,17 @@ function fullInputContextBreakdown(usage: StreamUsage | undefined): {
 } {
   const u = usage || {};
   const cc = u.cache_creation || {};
+  // Same normalization as profile.rs: the CLI writes the SAME cache-creation
+  // value at the top level AND inside usage.cache_creation (ephemeral_*);
+  // summing them double-counts (inflated Ctx bar + premature auto-compact).
   return {
     input: u.input_tokens || 0,
     cacheRead: u.cache_read_input_tokens || 0,
-    cacheCreation: (u.cache_creation_input_tokens || 0)
-      + (cc.ephemeral_1h_input_tokens || 0)
-      + (cc.ephemeral_5m_input_tokens || 0),
+    cacheCreation: normalizeCacheCreation(
+      u.cache_creation_input_tokens,
+      cc.ephemeral_1h_input_tokens,
+      cc.ephemeral_5m_input_tokens,
+    ),
   };
 }
 
@@ -515,10 +520,11 @@ function persistTurnUsage(
   if (!sessionId || !messageId) return;
   const u = usage || {};
   const cacheCreation = u.cache_creation || {};
-  const cacheCreationTokens =
-    (u.cache_creation_input_tokens || 0) +
-    (cacheCreation.ephemeral_1h_input_tokens || 0) +
-    (cacheCreation.ephemeral_5m_input_tokens || 0);
+  const cacheCreationTokens = normalizeCacheCreation(
+    u.cache_creation_input_tokens,
+    cacheCreation.ephemeral_1h_input_tokens,
+    cacheCreation.ephemeral_5m_input_tokens,
+  );
   bridge.appendUsageRecord({
     session_id: sessionId,
     message_id: messageId,

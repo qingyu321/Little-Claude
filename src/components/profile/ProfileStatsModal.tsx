@@ -169,11 +169,11 @@ export function ProfileStatsModal({ open, onClose }: Props) {
               )}
             </div>
             <h2 className="mt-4 text-[28px] font-semibold text-text-primary">{displayName}</h2>
-            <p className="mt-1 text-sm text-text-muted">本机 Little Claude 使用汇总</p>
+            <p className="mt-1 text-sm text-text-muted">本机所有 Claude Code 会话汇总（含终端 CLI 使用）</p>
           </div>
 
           {loading && (
-            <div className="mt-10 text-center text-sm text-text-muted">正在读取本机会话统计...</div>
+            <div className="mt-10 text-center text-sm text-text-muted">正在读取本机所有会话统计...</div>
           )}
 
           {error && (

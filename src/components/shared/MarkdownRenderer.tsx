@@ -291,7 +291,7 @@ const SANITIZE_SCHEMA = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    src: [...(defaultSchema.protocols?.src || []), 'data'],
+    src: [...(defaultSchema.protocols?.src || []), 'data:image'],
   },
 };
 
@@ -607,6 +607,18 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
               return base ? `${base.replace(/\/$/, '')}/${text}` : text;
             })();
         const fileName = text.split(/[\\/]/).pop() || text;
+        // Security: never turn an out-of-workspace path into a clickable
+        // file chip — a malicious/accidental model output could otherwise
+        // point at C:\Users\...\.ssh\config and read secrets into the
+        // preview pane on a single click. Absolute paths and paths outside
+        // the current working directory render as plain text instead.
+        const wd = basePath || useSettingsStore.getState().workingDirectory || '';
+        const inWorkspace = resolved.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(text)
+          ? isPathInsideWorkspace(resolved, wd)
+          : true; // relative path (resolved against the workspace base) is fine
+        if (!inWorkspace) {
+          return <code>{text}</code>;
+        }
         return (
           <button
             onClick={() => useFileStore.getState().selectFile(resolved)}

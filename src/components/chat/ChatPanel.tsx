@@ -550,9 +550,13 @@ function ContextMeter({ sessionMeta, tabId, sessionStatus }: {
   // DSH alignment: the harness declares its own window via the request/context
   // projection — prefer it over the local model-window guess when present
   // (display only; the auto-compact threshold logic is unchanged).
-  const contextWindow = sessionMeta.dshContextWindow && sessionMeta.dshContextWindow > 0
-    ? sessionMeta.dshContextWindow
-    : getContextWindowForModel(modelForContext, effectiveContextMode);
+  // Floor the window at 200K: a zero/NaN window (bad model-table entry or
+  // DSH projection) would make the percent math divide by zero → Infinity.
+  const contextWindow = Math.max(200_000,
+    sessionMeta.dshContextWindow && sessionMeta.dshContextWindow > 0
+      ? sessionMeta.dshContextWindow
+      : getContextWindowForModel(modelForContext, effectiveContextMode),
+  );
   const compactThreshold = getAutoCompactThreshold(
     modelForContext,
     effectiveContextMode,
