@@ -854,7 +854,8 @@ export function ConversationList() {
       )}
 
       {/* Empty state — fetchError 时由上方错误行接管，不再显示误导性的"暂无任务" */}
-      {!isLoading && !fetchError && filtered.length === 0 && contentOnlyMatches.length === 0 && !isContentSearching && (
+      {/* searchError 时同样由错误行接管，避免"错误 + 无结果"同时显示（U2） */}
+      {!isLoading && !fetchError && !searchError && filtered.length === 0 && contentOnlyMatches.length === 0 && !isContentSearching && (
         <div className="text-center py-8 px-4">
           <div className="text-text-tertiary text-xs">
             {searchQuery ? t('conv.noMatch') : t('conv.noConv')}

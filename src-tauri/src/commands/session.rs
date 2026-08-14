@@ -1308,7 +1308,7 @@ pub async fn send_stdin(
             Some("steer") => "steer",
             _ => "queue",
         };
-        crate::commands::dsh_service::unary(
+        let result = crate::commands::dsh_service::unary(
             &service.base_url,
             "session.prompt",
             serde_json::json!({
@@ -1317,8 +1317,15 @@ pub async fn send_stdin(
                 "content": [{ "type": "text", "text": message }],
             }),
         )
-        .await
-        .map(|_| ())
+        .await;
+        if result.is_err() {
+            // The service may have been restarted under us (H1 respawn),
+            // orphaning this tab's DSH session on the new service. Drop the
+            // mapping so the next start_deepseek_session creates a fresh
+            // session instead of erroring forever.
+            process_mgr.remove_deepseek_session(&session_id).await;
+        }
+        result.map(|_| ())
     } else {
         // Claude: wrap user text in stream-json NDJSON format
         let json_msg = serde_json::json!({
@@ -1391,7 +1398,7 @@ pub async fn respond_permission(
             .await
             .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
         let outcome = if allow { "allowed-once" } else { "denied" };
-        crate::commands::dsh_service::unary(
+        let result = crate::commands::dsh_service::unary(
             &service.base_url,
             "respond",
             serde_json::json!({
@@ -1404,8 +1411,14 @@ pub async fn respond_permission(
                 } },
             }),
         )
-        .await
-        .map(|_| ())
+        .await;
+        if result.is_err() {
+            // Same orphaned-session recovery as send_stdin: the service may
+            // have been respawned (H1), so this tab's DSH session no longer
+            // exists on it. Drop the mapping to allow a fresh session.
+            process_mgr.remove_deepseek_session(&session_id).await;
+        }
+        result.map(|_| ())
     } else if backend_name.as_deref() == Some("codex") {
         // M4: codex permission requests are registered in start_codex_session
         // (lib.rs, out of scope for this module's registry). Their request_ids
@@ -1507,13 +1520,17 @@ pub async fn send_control_request(
                     .get_deepseek_session(&session_id)
                     .await
                     .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
-                crate::commands::dsh_service::unary(
+                let result = crate::commands::dsh_service::unary(
                     &service.base_url,
                     "session.cancel",
                     serde_json::json!({ "sessionId": dsh_sid }),
                 )
-                .await
-                .map(|_| ())
+                .await;
+                if result.is_err() {
+                    // Same orphaned-session recovery as send_stdin.
+                    process_mgr.remove_deepseek_session(&session_id).await;
+                }
+                result.map(|_| ())
             }
             _ => Ok(()),
         }
@@ -2383,7 +2400,6 @@ fn mask_url_userinfo(url: &str) -> String {
 
 #[tauri::command]
 pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
-
     // Only allow loading sessions inside the canonical ~/.claude/projects tree
     // (the same tree list_sessions scans). This blocks arbitrary-path reads.
     let p = std::path::Path::new(&path);

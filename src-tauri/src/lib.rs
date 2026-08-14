@@ -1995,7 +1995,7 @@ async fn start_deepseek_session(
     );
 
     // Prompt (queue mode — steer/interrupts go through send_stdin/kill).
-    let _ = unary(
+    if let Err(e) = unary(
         &service.base_url,
         "session.prompt",
         json!({
@@ -2005,7 +2005,16 @@ async fn start_deepseek_session(
         }),
     )
     .await
-    .map_err(|e| format!("dsh session.prompt failed: {}", e))?;
+    {
+        // Prompt failed (service respawned, model misconfig, …) — the
+        // created DSH session and its route are now useless. Drop both so
+        // the next attempt starts clean instead of retrying a dead session.
+        state.remove_deepseek_session(&stdin_id).await;
+        service.session_routes.lock().await.remove(&dsh_session_id);
+        service.translators.lock().await.remove(&dsh_session_id);
+        service.last_seqs.lock().await.remove(&dsh_session_id);
+        return Err(format!("dsh session.prompt failed: {}", e));
+    }
 
     let dsh_bin = crate::find_deepseek_binary().unwrap_or_default();
     let _ = stdin_mgr; // service mode has no stdin pipe

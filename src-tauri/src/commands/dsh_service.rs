@@ -319,10 +319,12 @@ async fn route_mux_frames(
                             }
                             seqs.insert(sid.clone(), seq);
                         }
-                        // New turn: clear the translator's per-turn state so
-                        // stale block indices can't leak. turn/end is NOT reset
-                        // here — translate_turn_end reads state.usage, so it
-                        // must run before the next turn/start clears it.
+                        // Per-turn translator state: reset BEFORE translating
+                        // turn/start (new turn — stale block indices must not
+                        // leak in), and AFTER translating turn/end (translate_
+                        // turn_end reads state.usage first, then the state is
+                        // cleared so a following turn that emits no turn/start
+                        // cannot inherit stale indices — see reset_for_turn).
                         let ev_type = payload.pointer("/event/type").and_then(|v| v.as_str());
                         let events = {
                             let mut ts = translators.lock().await;
@@ -330,7 +332,11 @@ async fn route_mux_frames(
                             if ev_type == Some("turn/start") {
                                 t.reset_for_turn();
                             }
-                            dsh_events::translate_session_event(t, &payload)
+                            let evs = dsh_events::translate_session_event(t, &payload);
+                            if ev_type == Some("turn/end") {
+                                t.reset_for_turn();
+                            }
+                            evs
                         };
                         for ev in events {
                             let _ = crate::emit_stream_event(&route.stdin_id, ev);
