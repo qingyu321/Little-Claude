@@ -310,7 +310,7 @@ interface SettingsState {
   includePartialMessages: boolean;
   /** 桌面宠物 — 是否启用 */
   petEnabled: boolean;
-  /** 桌面宠物 — 显示缩放 (0.5–1.5) */
+  /** 桌面宠物 — 显示缩放 (0.25–3.0，PetTab 滑块 + 预设) */
   petScale: number;
   /** 桌面宠物 — 当前皮肤 id（"default" 或已导入宠物 id） */
   petSkin: string;

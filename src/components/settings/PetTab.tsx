@@ -201,9 +201,9 @@ export function PetTab() {
           </span>
           <input
             type="range"
-            min="0.5"
-            max="1.5"
-            step="0.1"
+            min="0.25"
+            max="3"
+            step="0.05"
             value={petScale}
             onChange={(e) => setPetScale(Number(e.target.value))}
             className="flex-1 h-1.5 rounded-full appearance-none bg-bg-tertiary
@@ -212,9 +212,31 @@ export function PetTab() {
               [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full
               [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:shadow-sm"
           />
-          <span className="text-[12px] text-text-secondary w-12 text-right tabular-nums">
+          <span className="text-[12px] text-text-secondary w-14 text-right tabular-nums">
             {Math.round(petScale * 100)}%
           </span>
+        </div>
+        {/* Preset quick buttons — snap to common sizes */}
+        <div className="mt-3 flex items-center gap-1.5 flex-wrap">
+          {[
+            { label: '迷你', v: 0.35 },
+            { label: '小', v: 0.6 },
+            { label: '中', v: 1 },
+            { label: '大', v: 1.6 },
+            { label: '超大', v: 2.4 },
+            { label: '巨兽', v: 3 },
+          ].map(({ label, v }) => (
+            <button
+              key={label}
+              onClick={() => setPetScale(v)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-smooth border
+                ${Math.abs(petScale - v) < 0.03
+                  ? 'bg-accent text-text-inverse border-accent'
+                  : 'border-border-subtle text-text-muted hover:bg-bg-secondary hover:text-text-primary'}`}
+            >
+              {label} {Math.round(v * 100)}%
+            </button>
+          ))}
         </div>
       </div>
 
