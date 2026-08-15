@@ -20,6 +20,7 @@ const states = {
   running: { row: 6, frames: 8, duration: 100, loop: true },
   review: { row: 7, frames: 8, duration: 120, loop: true },
   sleep: { row: 8, frames: 8, duration: 600, loop: true },
+  happy: { row: 9, frames: 8, duration: 120, loop: true },
 };
 
 function payload(claude: PetPhase, codex: PetPhase = "idle", deepseek: PetPhase = "idle"): PetStatusPayload {
@@ -44,7 +45,7 @@ describe("resolvePetState", () => {
     expect(resolvePetState(payload("tool"))).toBe("review");
     expect(resolvePetState(payload("awaiting"))).toBe("wave");
     expect(resolvePetState(payload("error"))).toBe("failed");
-    expect(resolvePetState(payload("completed"))).toBe("jump");
+    expect(resolvePetState(payload("completed"))).toBe("happy");
   });
 
   it("prefers the higher-priority phase across agents", () => {

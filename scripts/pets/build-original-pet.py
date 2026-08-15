@@ -193,14 +193,15 @@ def remove_islands(img, min_size=1500):
 
 
 STATES = [
-    ("idle",    8, 150, True),
-    ("run",    16, 240, True),
+    ("idle",    12, 160, True),
+    ("run",     16, 240, True),
     ("sleep",   4, 600, True),
-    ("wave",    4, 150, False),
+    ("wave",    6, 140, False),
     ("jump",    6, 130, False),
     ("waiting", 4, 200, True),
     ("review",  4, 200, True),
     ("failed",  4, 200, False),
+    ("happy",   8, 120, True),
 ]
 
 
@@ -249,7 +250,9 @@ def transform(img, dx=0, dy=0, scale_x=1.0, scale_y=1.0, angle=0.0):
 
 def frame_transform(state, frame, n):
     if state == "idle":
-        return {"dy": -abs(math.sin((frame / 8) * math.pi * 2)) * 4}
+        # 完整呼吸正弦（先吸后呼，比单向下压自然）+ 轻微左右摇摆
+        return {"dy": math.sin((frame / 12) * math.pi * 2) * 3,
+                "angle": math.sin((frame / 6) * math.pi * 2) * 1.2}
     if state == "run":
         # 往返跑：16 帧 = 8 帧去程 + 8 帧返程。不缩放保持 100% 大小
         # （v7.1：缩到 0.75 会让写作状态与待机切换时"忽大忽小"）。
@@ -263,12 +266,15 @@ def frame_transform(state, frame, n):
     if state == "sleep":
         return {"dy": (0, -4, -8, -4)[frame], "scale_y": 0.93}
     if state == "wave":
-        return {"dy": -4, "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 6}
+        # 幅度加大 + 身体轻摆，更欢快
+        return {"dy": -4 - abs(math.sin((frame / (n - 1)) * math.pi * 2)) * 3,
+                "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 8}
     if state == "jump":
         arc = math.sin((frame / (n - 1)) * math.pi)
         if frame == n - 1:
             return {"scale_y": 0.78}
-        return {"dy": -arc * 24, "scale_y": 0.97}
+        return {"dy": -arc * 26, "scale_y": 0.97,
+                "angle": math.sin((frame / (n - 1)) * math.pi * 2) * 2}
     if state == "waiting":
         # 整体旋转歪头（绕头部中心），无区域切割；慢摆：200ms×4 帧周期 800ms，
         # 幅度收窄到 ±2.5°（v8 用户反馈"抖动太快"）
@@ -279,6 +285,12 @@ def frame_transform(state, frame, n):
     if state == "failed":
         # 低头：整体旋转 -3°（绕头颈），无撇嘴（原图趴睡无可见嘴）
         return {"dy": (0, -2, -3, -2)[frame], "angle": -3}
+    if state == "happy":
+        # 开心：轻跳（每 2 帧一个起伏）+ 左右摇摆 + 轻微放大（欢呼感）
+        i = frame % 4
+        return {"dy": (0, -6, -2, 0)[i],
+                "angle": math.sin((frame / 4) * math.pi * 2) * 3,
+                "scale_x": 1.02, "scale_y": 0.98}
     return {}
 
 

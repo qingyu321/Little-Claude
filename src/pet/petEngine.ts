@@ -29,7 +29,8 @@ export type PetStateKey =
   | "waiting"
   | "running"
   | "review"
-  | "sleep";
+  | "sleep"
+  | "happy";
 
 export interface PetStateCfg {
   row: number;
@@ -55,7 +56,7 @@ export const STATE_MAPPING: Record<string, PetStateKey> = {
   tool: "review",
   awaiting: "wave",
   error: "failed",
-  completed: "jump",
+  completed: "happy",
 };
 
 /** Transient states play once, then fall back. Loop states fall back to themselves. */
@@ -69,6 +70,7 @@ export const TRANSIENT_FALLBACK: Record<PetStateKey, PetStateKey> = {
   running: "running",
   review: "review",
   sleep: "sleep",
+  happy: "happy",
 };
 
 /** Pick the single best animation state for an aggregated status payload. */
