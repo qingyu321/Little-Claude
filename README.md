@@ -45,6 +45,13 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 版本历程
 
+### v1.1.6 (2026-08-14) — 全面检修：上下文对齐 DSH + 安全加固
+
+- **上下文计算修复**：修复 cache-creation 双算（Ctx 条虚高最多 28 倍、auto-compact 提前触发），与 DeepSeek Harness 的 1M 窗口口径完全对齐
+- **token 统计对齐 cc-switch**：递归扫描含 subagent/workflow 会话、全局去重、缓存归一，统计误差 <50 tokens
+- **安全加固**：默认模式改为 code（不再默认 --dangerously-skip-permissions）、file-chip 工作区校验、CLI 删除白名单、注入防护、PID 复用防护、task 泄漏修复等
+- **性能**：统计扫描移入 spawn_blocking，不再阻塞 UI
+
 ### v1.1.5 (2026-08-13) — 闪退修复 + 面试系统语音识别
 
 - **修复 v1.1.4 启动闪退** — 模型窗口预取在事件循环线程裸启 Tokio 协程触发 "there is no reactor running" panic，部分环境点开即闪退；改走 Tauri 异步运行时，启动不阻塞也不再崩溃。**v1.1.4 用户请立即升级**

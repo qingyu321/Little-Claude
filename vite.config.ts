@@ -1,7 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import JavaScriptObfuscator from "javascript-obfuscator";
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -14,47 +13,10 @@ const pkgVersion = (JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf-8'),
 )).version as string;
 
-/** Production-only JS obfuscation: makes extracted frontend code unreadable. */
-function obfuscatePlugin(): import('vite').Plugin {
-  return {
-    name: 'obfuscate',
-    apply: 'build',
-    enforce: 'post',
-    generateBundle(_options, bundle) {
-      for (const key in bundle) {
-        const chunk = bundle[key];
-        if (chunk.type === 'chunk') {
-          // Skip vendor chunks: they are public third-party code (no secrecy
-          // value), and control-flow flattening + base64 string arrays on the
-          // biggest chunks measurably slows startup parsing and the render
-          // hot path for every user. Obfuscate business code only.
-          if (chunk.name.startsWith('vendor-')) continue;
-          const result = JavaScriptObfuscator.obfuscate(chunk.code, {
-            compact: true,
-            controlFlowFlattening: true,
-            controlFlowFlatteningThreshold: 0.75,
-            deadCodeInjection: true,
-            deadCodeInjectionThreshold: 0.3,
-            stringArray: true,
-            stringArrayEncoding: ['base64'],
-            stringArrayThreshold: 0.75,
-            // Preserve: don't break React component names for DevTools
-            renameGlobals: false,
-            // Reduce size impact
-            simplify: true,
-            splitStrings: true,
-            splitStringsChunkLength: 20,
-          });
-          chunk.code = result.getObfuscatedCode();
-        }
-      }
-    },
-  };
-}
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), obfuscatePlugin()],
+  plugins: [react(), tailwindcss()],
 
   define: {
     __APP_EDITION__: JSON.stringify(edition),
