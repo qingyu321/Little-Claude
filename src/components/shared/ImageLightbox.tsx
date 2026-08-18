@@ -2,6 +2,9 @@ import { useEffect, useCallback } from 'react';
 import { create } from 'zustand';
 import { bridge } from '../../lib/tauri-bridge';
 
+/** B3c: monotonically increasing token for openFile/open/close races. */
+let _openFileSeq = 0;
+
 /* ================================================================
    Lightbox store — global state for the image lightbox overlay
    ================================================================ */
@@ -27,21 +30,32 @@ export const useLightboxStore = create<LightboxState>()((set) => ({
   filePath: null,
   alt: '',
 
-  open: (src, filePath, alt) =>
-    set({ isOpen: true, imageSrc: src, filePath: filePath || null, alt: alt || '' }),
+  open: (src, filePath, alt) => {
+    // B3c: a plain open() supersedes any in-flight openFile read.
+    _openFileSeq++;
+    set({ isOpen: true, imageSrc: src, filePath: filePath || null, alt: alt || '' });
+  },
 
   openFile: async (path, alt) => {
     set({ isOpen: true, imageSrc: null, filePath: path, alt: alt || '' });
+    // B3c: rapid open A→B or close-while-loading must not let a stale slow
+    // read overwrite the newer state. Track a request sequence.
+    const seq = ++_openFileSeq;
     try {
       const dataUrl = await bridge.readFileBase64(path);
+      if (seq !== _openFileSeq) return; // superseded by a newer open/close
       set({ imageSrc: dataUrl });
     } catch {
+      if (seq !== _openFileSeq) return;
       set({ isOpen: false, imageSrc: null });
     }
   },
 
-  close: () =>
-    set({ isOpen: false, imageSrc: null, filePath: null, alt: '' }),
+  close: () => {
+    // B3c: closing supersedes any in-flight openFile read.
+    _openFileSeq++;
+    set({ isOpen: false, imageSrc: null, filePath: null, alt: '' });
+  },
 }));
 
 /* ================================================================

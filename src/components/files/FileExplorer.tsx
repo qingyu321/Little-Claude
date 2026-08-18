@@ -1,4 +1,5 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+// F16: memo 用于 TreeNode，阻断无关重渲
+import { useState, useCallback, useMemo, useEffect, useRef, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { FileNode } from '../../lib/tauri-bridge';
 import { useFileStore, FileChangeKind } from '../../stores/fileStore';
@@ -212,9 +213,11 @@ interface FlatMatch {
   relDir: string;
 }
 
-function collectMatches(nodes: FileNode[], query: string, rootPrefix: string): FlatMatch[] {
+// F14: limit 参数——达到上限即停止遍历（调用方显示"精确关键词"提示）
+function collectMatches(nodes: FileNode[], query: string, rootPrefix: string, limit = Infinity): FlatMatch[] {
   const results: FlatMatch[] = [];
-  function walk(node: FileNode) {
+  /** returns true when the cap is hit (abort traversal) */
+  function walk(node: FileNode): boolean {
     if (node.name.toLowerCase().includes(query)) {
       // Compute relative directory (parent path minus root prefix)
       const lastSep = node.path.lastIndexOf('/');
@@ -223,14 +226,23 @@ function collectMatches(nodes: FileNode[], query: string, rootPrefix: string): F
         ? parentPath.slice(rootPrefix.length).replace(/^\//, '')
         : parentPath;
       results.push({ node, relDir });
+      if (results.length >= limit) return true;
     }
     if (node.children) {
-      for (const child of node.children) walk(child);
+      for (const child of node.children) {
+        if (walk(child)) return true;
+      }
     }
+    return false;
   }
-  for (const n of nodes) walk(n);
+  for (const n of nodes) {
+    if (walk(n)) break;
+  }
   return results;
 }
+
+/** F14: 搜索结果条数上限（超出截断 + 提示精确关键词） */
+const SEARCH_MATCH_LIMIT = 500;
 
 function SearchResultItem({
   match,
@@ -271,7 +283,8 @@ function SearchResultItem({
 
 // --- Tree Node ---
 
-function TreeNode({
+// F16: React.memo —— 树更新时未变化的子树不再重渲（props 浅比较）
+const TreeNode = memo(function TreeNode({
   node,
   depth,
   onContextMenu,
@@ -316,19 +329,23 @@ function TreeNode({
   // is stale; expanded stale dirs refetch in place (children are preserved so
   // the subtree never collapses).
   const isStale = useFileStore((s) => (node.is_dir ? s.staleDirs.has(node.path) : false));
-  const childrenVersion = useFileStore((s) => s.childrenVersion);
   const loadDirChildren = useFileStore((s) => s.loadDirChildren);
+  // F18: 隐藏文件过滤下推到渲染条件（不再整树深拷贝）
+  const showHiddenFiles = useSettingsStore((s) => s.showHiddenFiles);
   const isSelected = selectedFile === node.path;
 
   // R1: fetch a directory's children on first expand, and refetch whenever it
-  // turns stale (or an invalidation bumped childrenVersion while a fetch was
-  // in flight, discarding it). Children live in the store tree — this effect
-  // is the only place that triggers a load.
+  // turns stale. Children live in the store tree — this effect is the only
+  // place that triggers a load.
+  // F16: 不再订阅 childrenVersion —— 失效语义不变：markStale 总是把受影响
+  // 目录加入 staleDirs（isStale 翻转即重跑本 effect），而 in-flight 结果的
+  // 作废仍由 loadDirChildren 内部的 childrenVersion get() 比对完成；此前每个
+  // 目录节点都订阅全局 version，任何失效都触发全树 effect 重跑。
   useEffect(() => {
     if (node.is_dir && expanded && (isStale || !node.children)) {
       loadDirChildren(node.path, isStale);
     }
-  }, [expanded, isStale, childrenVersion, node.is_dir, node.path, node.children, loadDirChildren]);
+  }, [expanded, isStale, node.is_dir, node.path, node.children, loadDirChildren]);
 
   // Track active drag listeners for cleanup on unmount
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -490,29 +507,34 @@ function TreeNode({
               />
             </div>
           )}
-          {node.children.map((child) => (
-            <TreeNode
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              onContextMenu={onContextMenu}
-              renamingPath={renamingPath}
-              renameValue={renameValue}
-              onRenameChange={onRenameChange}
-              onRenameSubmit={onRenameSubmit}
-              onRenameCancel={onRenameCancel}
-              creatingIn={creatingIn}
-              createName={createName}
-              onCreateNameChange={onCreateNameChange}
-              onCreateSubmit={onCreateSubmit}
-              onCreateCancel={onCreateCancel}
-            />
-          ))}
+          {node.children.map((child) => {
+            // F18: 隐藏文件可见性下推到渲染条件——不显示隐藏文件时跳过，
+            // 替代此前对整树的递归深拷贝（filteredTree）
+            if (!showHiddenFiles && child.name.startsWith('.')) return null;
+            return (
+              <TreeNode
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                onContextMenu={onContextMenu}
+                renamingPath={renamingPath}
+                renameValue={renameValue}
+                onRenameChange={onRenameChange}
+                onRenameSubmit={onRenameSubmit}
+                onRenameCancel={onRenameCancel}
+                creatingIn={creatingIn}
+                createName={createName}
+                onCreateNameChange={onCreateNameChange}
+                onCreateSubmit={onCreateSubmit}
+                onCreateCancel={onCreateCancel}
+              />
+            );
+          })}
         </div>
       )}
     </div>
   );
-}
+});
 
 // --- Main Component ---
 export function FileExplorer() {
@@ -527,6 +549,9 @@ export function FileExplorer() {
   const searchTree = useFileStore((s) => s.searchTree);
   const isSearchLoading = useFileStore((s) => s.isSearchLoading);
   const loadSearchTree = useFileStore((s) => s.loadSearchTree);
+  // F13: 过期标记 + 查询清空时的回收
+  const searchTreeStale = useFileStore((s) => s.searchTreeStale);
+  const clearSearchTree = useFileStore((s) => s.clearSearchTree);
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
 
   const refreshTree = useFileStore((s) => s.refreshTree);
@@ -537,15 +562,37 @@ export function FileExplorer() {
   const toggleHiddenFiles = useSettingsStore((s) => s.toggleHiddenFiles);
 
   const [searchQuery, setSearchQuery] = useState('');
+  // F14: 搜索输入 150ms 防抖——按键过程中不反复扫全深树
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const searchActive = searchQuery.trim().length > 0;
-
-  // R1: load the full-depth search tree when a query starts (once per session)
   useEffect(() => {
-    if (searchActive && searchTree.length === 0) loadSearchTree();
-  }, [searchActive, searchTree.length, loadSearchTree]);
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 150);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const searchActive = debouncedQuery.trim().length > 0;
+
+  // R1: load the full-depth search tree when a query starts.
+  // F13: 树过期（结构变更只打标不重建）时也在真正搜索时重建
+  useEffect(() => {
+    if (searchActive && (searchTree.length === 0 || searchTreeStale)) loadSearchTree();
+  }, [searchActive, searchTree.length, searchTreeStale, loadSearchTree]);
+
+  // F13: 查询清空即清 searchTree（释放全深树内存）
+  useEffect(() => {
+    if (!searchActive && searchTree.length > 0) clearSearchTree();
+  }, [searchActive, searchTree.length, clearSearchTree]);
+
+  // F14: useMemo 缓存匹配结果（query/searchTree 不变不重扫）+ 500 条截断
+  const matches = useMemo(
+    () => (searchActive
+      ? collectMatches(searchTree, debouncedQuery.trim().toLowerCase(), rootPath || '', SEARCH_MATCH_LIMIT)
+      : []),
+    [searchActive, searchTree, debouncedQuery, rootPath],
+  );
+  const matchesTruncated = matches.length >= SEARCH_MATCH_LIMIT;
 
   // Right-click menu state
   const [clipboardPath, setClipboardPath] = useState<string | null>(null);
@@ -557,15 +604,8 @@ export function FileExplorer() {
   const [creatingIn, setCreatingIn] = useState<{ dir: string; type: 'file' | 'folder' } | null>(null);
   const [createName, setCreateName] = useState('');
 
-  const filteredTree = useMemo(() => {
-    if (showHiddenFiles) return tree;
-    function filterNodes(nodes: FileNode[]): FileNode[] {
-      return nodes
-        .filter((n) => !n.name.startsWith('.'))
-        .map((n) => n.children ? { ...n, children: filterNodes(n.children) } : n);
-    }
-    return filterNodes(tree);
-  }, [tree, showHiddenFiles]);
+  // F18: filteredTree 移除——不再递归深拷贝整树；showHiddenFiles 下推到
+  // TreeNode 渲染条件（见下方根级 map 与 TreeNode 内部 children 过滤）
 
   const changedCount = changedFiles.size;
 
@@ -859,7 +899,7 @@ export function FileExplorer() {
           </div>
         )}
         <div className="h-full overflow-y-auto py-1">
-        {(isLoading && (searchActive ? searchTree.length === 0 : filteredTree.length === 0)) ||
+        {(isLoading && (searchActive ? searchTree.length === 0 : tree.length === 0)) ||
           (searchActive && isSearchLoading && searchTree.length === 0) ? (
           <div className="flex items-center justify-center py-8">
             <div className="w-5 h-5 border-2 border-accent/30
@@ -867,25 +907,28 @@ export function FileExplorer() {
           </div>
         ) : searchActive ? (
           // --- Flat search results (full-depth tree, loaded on demand) ---
-          (() => {
-            const matches = collectMatches(searchTree, searchQuery.toLowerCase(), rootPath || '');
-            return matches.length > 0 ? (
-              <div className="py-1">
-                {matches.map((m) => (
-                  <SearchResultItem
-                    key={m.node.path}
-                    match={m}
-                    onContextMenu={handleContextMenu}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-8 text-xs text-text-tertiary">
-                {t('files.noFiles')}
-              </div>
-            );
-          })()
-        ) : filteredTree.length > 0 ? (
+          // F14: 结果来自上方 useMemo（防抖 + 缓存 + 500 条截断）
+          matches.length > 0 ? (
+            <div className="py-1">
+              {matches.map((m) => (
+                <SearchResultItem
+                  key={m.node.path}
+                  match={m}
+                  onContextMenu={handleContextMenu}
+                />
+              ))}
+              {matchesTruncated && (
+                <div className="text-center py-2 px-3 text-[11px] text-text-tertiary">
+                  {t('files.searchTruncated')}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-center py-8 text-xs text-text-tertiary">
+              {t('files.noFiles')}
+            </div>
+          )
+        ) : tree.length > 0 ? (
             // --- Normal tree view ---
             <>
               {/* Inline creation input at root level */}
@@ -912,24 +955,28 @@ export function FileExplorer() {
                   />
                 </div>
               )}
-              {filteredTree.map((node) => (
-                <TreeNode
-                  key={node.path}
-                  node={node}
-                  depth={0}
-                  onContextMenu={handleContextMenu}
-                  renamingPath={renamingPath}
-                  renameValue={renameValue}
-                  onRenameChange={setRenameValue}
-                  onRenameSubmit={handleRenameSubmit}
-                  onRenameCancel={handleRenameCancel}
-                  creatingIn={creatingIn}
-                  createName={createName}
-                  onCreateNameChange={setCreateName}
-                  onCreateSubmit={handleCreateSubmit}
-                  onCreateCancel={handleCreateCancel}
-                />
-              ))}
+              {tree.map((node) => {
+                // F18: 根级隐藏节点按 showHiddenFiles 渲染条件跳过（免深拷贝）
+                if (!showHiddenFiles && node.name.startsWith('.')) return null;
+                return (
+                  <TreeNode
+                    key={node.path}
+                    node={node}
+                    depth={0}
+                    onContextMenu={handleContextMenu}
+                    renamingPath={renamingPath}
+                    renameValue={renameValue}
+                    onRenameChange={setRenameValue}
+                    onRenameSubmit={handleRenameSubmit}
+                    onRenameCancel={handleRenameCancel}
+                    creatingIn={creatingIn}
+                    createName={createName}
+                    onCreateNameChange={setCreateName}
+                    onCreateSubmit={handleCreateSubmit}
+                    onCreateCancel={handleCreateCancel}
+                  />
+                );
+              })}
             </>
           )
         : (

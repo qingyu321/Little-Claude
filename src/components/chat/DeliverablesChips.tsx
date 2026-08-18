@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import { type ChatMessage } from '../../stores/chatStore';
 import { useFileStore } from '../../stores/fileStore';
+import { useSettingsStore } from '../../stores/settingsStore';
+import { isPathInsideWorkspace } from '../../lib/path-safety';
 import { useT } from '../../lib/i18n';
 
 /**
@@ -47,6 +49,29 @@ export function DeliverablesChips({ paths }: { paths: string[] }) {
       </span>
       {shown.map((p) => {
         const name = p.split(/[\\/]/).pop() || p;
+        // Paths come from Edit/Write tool input (model output) — only paths
+        // that resolve inside the working directory are clickable.
+        const wd = useSettingsStore.getState().workingDirectory || '';
+        const safe = isPathInsideWorkspace(p, wd);
+        if (!safe) {
+          return (
+            <span
+              key={p}
+              title={p}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md
+                bg-bg-layer-1 border border-border-l2
+                text-[10px] font-mono text-text-tertiary
+                max-w-[220px]"
+            >
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none"
+                stroke="currentColor" strokeWidth="1.2" className="flex-shrink-0">
+                <path d="M7 1H3a1 1 0 00-1 1v8a1 1 0 001 1h6a1 1 0 001-1V4L7 1z" />
+                <path d="M7 1v3h3" />
+              </svg>
+              <span className="truncate">{name}</span>
+            </span>
+          );
+        }
         return (
           <button
             key={p}

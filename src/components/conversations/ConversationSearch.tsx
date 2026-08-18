@@ -7,14 +7,14 @@ import { useChatStore } from '../../stores/chatStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { parseSessionMessages } from '../../lib/session-loader';
-import { showToast } from '../shared/Toast';
-import { friendlyError } from '../../lib/error-format';
+// F7: 磁盘加载复用共享实现（含批量入库与状态复位）
+import { loadSessionFromDisk } from '../../lib/session-disk-load';
 import { t } from '../../lib/i18n';
 
 type SearchMode = 'questions-only' | 'questions-first' | 'all';
 type DateFilter = 'all' | 'today' | '3days' | 'week' | 'month';
-type BackendFilter = 'all' | 'claude' | 'codex';
+// F23: 后端筛选补 deepseek（按会话 origin 字段过滤）
+type BackendFilter = 'all' | 'claude' | 'codex' | 'deepseek';
 
 interface ConversationSearchProps {
   open: boolean;
@@ -134,19 +134,24 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
     return () => document.removeEventListener('mousedown', handler);
   }, [showFilters]);
 
-  // Perform search
+  // Perform search — B3c: a stale (slow) response must not overwrite a newer
+  // one; guard with a monotonically increasing request id.
+  const searchSeqRef = useRef(0);
   const doSearch = useCallback(async (q: string, m: SearchMode) => {
     if (q.trim().length < 2) {
       setResults([]);
       return;
     }
+    const seq = ++searchSeqRef.current;
     setSearching(true);
     try {
       const roleFilter = m === 'questions-only' ? 'user' : null;
       const r = await bridge.searchSessions(q, roleFilter);
+      if (seq !== searchSeqRef.current) return; // superseded by a newer query
       setResults(r);
       setSearchFailed(false);
     } catch (err) {
+      if (seq !== searchSeqRef.current) return;
       // A6: 失败不能伪装成"无结果" —— 置失败态，UI 提供重试入口
       console.error('Content search failed:', err);
       setResults([]);
@@ -297,45 +302,17 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
     }
 
     // Load from disk
-    useChatStore.getState().ensureTab(sessionId);
+    // F7: 复用共享的 loadSessionFromDisk（一次 batchAddMessages 入库，
+    // 替代此前逐条 addMessage 的 O(N²) 旧实现），错误也由其统一处理
     useSettingsStore.getState().setWorkingDirectory(session.project);
-    const { clearMessages, addMessage, setSessionStatus, setSessionMeta } = useChatStore.getState();
-    const agentActions = useAgentStore.getState();
-    clearMessages(sessionId);
-    agentActions.clearAgents();
-    setSessionStatus(sessionId, 'running');
-    setSessionMeta(sessionId, {
-      sessionId,
-      stdinId: undefined,
-      sessionOrigin: session.origin || 'claude',
-    });
+    await loadSessionFromDisk(sessionId, meta.path, session.origin || 'claude');
+    if (useSessionStore.getState().selectedSessionId !== sessionId) return;
 
-    try {
-      const rawMessages = await bridge.loadSession(meta.path);
-      if (useSessionStore.getState().selectedSessionId !== sessionId) return;
-      const { messages, agents } = parseSessionMessages(rawMessages);
-
-      for (const agent of agents) {
-        agentActions.upsertAgent(agent);
-      }
-
-      for (const msg of messages) {
-        addMessage(sessionId, msg);
-      }
-
-      setSessionStatus(sessionId, 'idle');
-
-      // Apply highlight after all messages are loaded
-      if (turnNumber != null) {
-        applyHighlight(turnNumber);
-        setTimeout(() => onClose(), 150); // delay so ChatPanel can render + scroll
-      } else {
-        onClose();
-      }
-    } catch (err) {
-      // A6: 跳转失败不再静默关闭 —— 保留错误信息并提示
-      setSessionStatus(sessionId, 'idle');
-      showToast(friendlyError(String(err)), 'error');
+    // Apply highlight after all messages are loaded
+    if (turnNumber != null) {
+      applyHighlight(turnNumber);
+      setTimeout(() => onClose(), 150); // delay so ChatPanel can render + scroll
+    } else {
       onClose();
     }
   }, [onClose]);
@@ -400,6 +377,7 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
     { key: 'all', label: t('search.filterBackendAll') },
     { key: 'claude', label: 'Claude' },
     { key: 'codex', label: 'Codex' },
+    { key: 'deepseek', label: 'DeepSeek' }, // F23
   ];
 
   return createPortal(

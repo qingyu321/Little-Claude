@@ -81,6 +81,22 @@ pub async fn run_claude_plugin_command(
     }
 
     let binary = find_claude_binary().ok_or_else(|| "Claude CLI not found".to_string())?;
+    // H2 (security): on Windows a .cmd CLI runs through `cmd /C`, which
+    // re-parses the whole command line — plugin names / marketplace URLs
+    // containing `& | ^ < > " %` (shareable, attacker-influenceable strings)
+    // would inject extra commands. Reject anything not cmd-safe; legit
+    // registry/repo identifiers never need those characters.
+    #[cfg(target_os = "windows")]
+    if claude_needs_cmd_wrapper(&binary) {
+        for arg in &args {
+            if !crate::commands::session::cmd_arg_safe(arg) {
+                return Err(format!(
+                    "Plugin argument contains shell metacharacters and is rejected: {}",
+                    arg
+                ));
+            }
+        }
+    }
     let enriched_path = build_enriched_path();
     #[cfg(target_os = "windows")]
     let mut cmd = if claude_needs_cmd_wrapper(&binary) {
@@ -1135,12 +1151,21 @@ pub async fn export_codex_to_claude(
     let origin_path = dir_canonical.join(format!("{}.codex-origin", session_uuid));
     std::fs::write(&origin_path, "codex").ok();
 
-    // Register in tracked_sessions.txt
+    // Register in tracked_sessions.txt.
+    // R9 (bug): atomic tmp+rename — the old direct overwrite raced with
+    // concurrent track_session appends (a stale snapshot could erase fresh
+    // entries) and a crash mid-write truncated the file.
     let track_path = tracked_sessions_path();
     let mut sessions = load_tracked_sessions();
     sessions.insert(session_uuid.clone());
     let content: Vec<String> = sessions.into_iter().collect();
-    std::fs::write(&track_path, content.join("\n")).map_err(|e| format!("注册会话失败: {}", e))?;
+    let tmp_path = track_path.with_extension("txt.tmp");
+    std::fs::write(&tmp_path, content.join("\n"))
+        .map_err(|e| format!("注册会话失败: {}", e))?;
+    std::fs::rename(&tmp_path, &track_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("注册会话失败(替换): {}", e)
+    })?;
 
     Ok(session_uuid)
 }
@@ -1470,12 +1495,37 @@ async fn await_command_with_cancel(
     timeout_secs: u64,
     scope: &CancelScope,
 ) -> Result<std::process::Output, String> {
+    // #21 (bug): stdout/stderr used to be null, so callers building user-
+    // visible errors from output.stderr always got "" — npm install failures
+    // showed up as "npm install failed (registry): " with no reason. Capture
+    // stderr with a bounded drain task (child must never block on a full pipe).
     let mut child = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to run command: {}", e))?;
     let pid = child.id();
+    const STDERR_CAPTURE_CAP: usize = 64 * 1024;
+    let stderr_task = child.stderr.take().map(|mut s| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match s.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf.len() < STDERR_CAPTURE_CAP {
+                            let take = n.min(STDERR_CAPTURE_CAP - buf.len());
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            buf
+        })
+    });
 
     let wait = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait());
     tokio::pin!(wait);
@@ -1495,11 +1545,26 @@ async fn await_command_with_cancel(
             }
             res = &mut wait => {
                 return match res {
-                    Ok(Ok(status)) => Ok(std::process::Output {
-                        status,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                    }),
+                    Ok(Ok(status)) => {
+                        // Child exited — pipe hits EOF; bounded wait for the
+                        // drain task so stderr lands in the returned Output.
+                        let stderr = match stderr_task {
+                            Some(h) => tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                h,
+                            )
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        Ok(std::process::Output {
+                            status,
+                            stdout: Vec::new(),
+                            stderr,
+                        })
+                    }
                     Ok(Err(e)) => Err(format!("Failed to wait for command: {}", e)),
                     Err(_) => {
                         // L3: 超时路径同样连杀进程树（与取消路径一致）——
@@ -1887,7 +1952,27 @@ async fn try_native_cli_update(china: bool, scope: &CancelScope) -> Result<Strin
                         expected_checksum = cs.to_string();
                     }
                     if let Some(bn) = info.get("binary").and_then(|v| v.as_str()) {
-                        binary_name = bn.to_string();
+                        // #8/L4 (security): the remote manifest is not trusted
+                        // input — a filename carrying `..` or separators would
+                        // let PathBuf::join write OUTSIDE ~/.claude/local.
+                        // Accept only a flat, boring filename.
+                        let bn = bn.trim();
+                        let safe = !bn.is_empty()
+                            && bn.len() <= 64
+                            && !bn.contains('/')
+                            && !bn.contains('\\')
+                            && !bn.contains("..")
+                            && bn
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+                        if safe {
+                            binary_name = bn.to_string();
+                        } else {
+                            eprintln!(
+                                "[native_update] manifest binary name rejected as unsafe: {}",
+                                bn
+                            );
+                        }
                     }
                     break;
                 }
@@ -1934,6 +2019,11 @@ async fn try_native_cli_update(china: bool, scope: &CancelScope) -> Result<Strin
         let mut stream = resp.bytes_stream();
         // 写盘期间周期检查取消令牌（块结束时 file 关闭，之后才能删临时文件）
         let mut download_err: Option<String> = None;
+        // #10 (security): cumulative size cap — a hostile/broken mirror on a
+        // fast line could otherwise fill the disk within the 600s timeout
+        // (every other download path already has MAX_DOWNLOAD_BYTES).
+        const MAX_NATIVE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+        let mut total_bytes: u64 = 0;
         {
             use std::io::Write;
             let mut file = std::fs::File::create(&tmp_path)
@@ -1944,6 +2034,13 @@ async fn try_native_cli_update(china: bool, scope: &CancelScope) -> Result<Strin
                     break;
                 }
                 let chunk = chunk.map_err(|e| format!("Download stream error: {e}"))?;
+                total_bytes += chunk.len() as u64;
+                if total_bytes > MAX_NATIVE_DOWNLOAD_BYTES {
+                    download_err = Some(
+                        "Download exceeds the 512MiB size limit — aborting".to_string(),
+                    );
+                    break;
+                }
                 if let Err(e) = file.write_all(&chunk) {
                     download_err = Some(format!("Write error: {e}"));
                     break;
@@ -2552,14 +2649,37 @@ fn node_download_dir() -> Result<std::path::PathBuf, String> {
     app_data_dir().map(|d| d.join("node"))
 }
 
+/// R7 (security): these paths become `--prefix=`/`--cache=` arguments on a
+/// `cmd /C` command line (npm install/update chains). The data dir embeds the
+/// Windows username — cmd metacharacters in it (& | < > ^ % " or newlines)
+/// would truncate or inject the command line. Spaces/backslashes stay
+/// allowed (Rust quotes args; cmd only re-splits on metacharacters).
+fn cmd_path_arg_safe(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(|c| "&|<>^%\"\n\r\0".contains(c))
+}
+
 /// Directory for npm global installs (--prefix target).
 pub(crate) fn npm_global_dir() -> Result<std::path::PathBuf, String> {
-    app_data_dir().map(|d| d.join("npm-global"))
+    let d = app_data_dir()?.join("npm-global");
+    if !cmd_path_arg_safe(&d.to_string_lossy()) {
+        return Err(format!(
+            "npm prefix path contains shell metacharacters and cannot be used safely: {}",
+            d.display()
+        ));
+    }
+    Ok(d)
 }
 
 /// Directory for npm cache (avoids system cache EPERM on Windows).
 fn npm_cache_dir() -> Result<std::path::PathBuf, String> {
-    app_data_dir().map(|d| d.join("npm-cache"))
+    let d = app_data_dir()?.join("npm-cache");
+    if !cmd_path_arg_safe(&d.to_string_lossy()) {
+        return Err(format!(
+            "npm cache path contains shell metacharacters and cannot be used safely: {}",
+            d.display()
+        ));
+    }
+    Ok(d)
 }
 
 /// Get the bin directory of the local Node.js installation, if it exists.

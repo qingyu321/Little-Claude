@@ -142,6 +142,9 @@ export function FilePreview() {
   const isSaving = useFileStore((s) => s.isSaving);
   const changedFiles = useFileStore((s) => s.changedFiles);
   const reloadContent = useFileStore((s) => s.reloadContent);
+  // F17: 大文件截断态 + "加载完整文件"
+  const fileTruncated = useFileStore((s) => s.fileTruncated);
+  const loadFullFileContent = useFileStore((s) => s.loadFullFileContent);
   const showUnsavedDialog = useFileStore((s) => s.showUnsavedDialog);
   const confirmDiscard = useFileStore((s) => s.confirmDiscard);
   const confirmSaveAndSwitch = useFileStore((s) => s.confirmSaveAndSwitch);
@@ -157,9 +160,11 @@ export function FilePreview() {
   useEffect(() => {
     if (!selectedFile) return;
     const change = changedFiles.get(selectedFile);
-    if (change === 'modified') {
-      reloadRef.current();
-    }
+    if (change !== 'modified') return;
+    // F17: 500ms 防抖——watcher 密集事件（保存中途的多次 modified）
+    // 此前每次都触发整文件重读
+    const timer = setTimeout(() => reloadRef.current(), 500);
+    return () => clearTimeout(timer);
   }, [selectedFile, changedFiles]);
 
   const ext = useMemo(() => selectedFile ? getExt(selectedFile) : '', [selectedFile]);
@@ -208,6 +213,12 @@ export function FilePreview() {
     setSkillTranslationError(null);
     if (translatedSkillContent[selectedFile]) return;
 
+    // B3d: capture the file this translation is FOR. If the user switches
+    // files while the request is in flight, the result must not land under
+    // the NEW file's key (or flip the new file's toggle state).
+    const targetFile = selectedFile;
+    const targetContent = fileContent;
+
     const config = await loadSkillTranslationConfigAsync();
     const normalizedConfig: SkillTranslationConfig = {
       ...config,
@@ -223,11 +234,15 @@ export function FilePreview() {
 
     setIsTranslatingSkill(true);
     try {
-      const translated = await bridge.translateSkillMarkdown(fileContent, normalizedConfig);
-      const next = { ...translatedSkillContent, [selectedFile]: translated };
+      const translated = await bridge.translateSkillMarkdown(targetContent, normalizedConfig);
+      if (useFileStore.getState().selectedFile !== targetFile) {
+        return; // user switched files mid-translation — discard the result
+      }
+      const next = { ...translatedSkillContent, [targetFile]: translated };
       setTranslatedSkillContent(next);
       saveMarkdownTranslationCache(next);
     } catch (e) {
+      if (useFileStore.getState().selectedFile !== targetFile) return;
       setSkillTranslationError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsTranslatingSkill(false);
@@ -241,11 +256,13 @@ export function FilePreview() {
 
   /* Mode tabs for the header */
   const modeTabs = useMemo(() => {
+    // F17: 截断态禁止进入 edit——编辑截断内容再保存会截掉文件尾部
+    const editTab = fileTruncated ? [] : [{ id: 'edit' as const, label: t('files.edit') }];
     if (isMarkdown) {
       // Markdown — preview + edit only
       return [
         { id: 'preview' as const, label: t('files.preview') },
-        { id: 'edit' as const, label: t('files.edit') },
+        ...editTab,
       ];
     }
     if (hasPreview) {
@@ -253,17 +270,17 @@ export function FilePreview() {
       return [
         { id: 'preview' as const, label: t('files.preview') },
         { id: 'source' as const, label: t('files.source') },
-        { id: 'edit' as const, label: t('files.edit') },
+        ...editTab,
       ];
     }
     if (!isBinary && !isImage && !isPdf && !isVideo && !isAudio) {
       return [
         { id: 'source' as const, label: t('files.source') },
-        { id: 'edit' as const, label: t('files.edit') },
+        ...editTab,
       ];
     }
     return [];
-  }, [hasPreview, isMarkdown, isBinary, isImage, t]);
+  }, [hasPreview, isMarkdown, isBinary, isImage, isPdf, isVideo, isAudio, fileTruncated, t]);
 
   if (!selectedFile) return null;
 
@@ -372,6 +389,22 @@ export function FilePreview() {
           </button>
         </div>
       </div>
+
+      {/* F17: 大文件截断提示 —— >1MB 只加载前 512KB，可按需加载完整文件 */}
+      {fileTruncated && (
+        <div className="flex items-center gap-2 px-3 py-1.5
+          border-b border-border-subtle bg-warning/10
+          text-xs text-text-muted flex-shrink-0">
+          <span className="flex-1 truncate">{t('files.largeFileTruncated')}</span>
+          <button
+            onClick={loadFullFileContent}
+            className="px-2 py-0.5 rounded-md text-[11px] font-medium flex-shrink-0
+              bg-accent/10 text-accent hover:bg-accent/20 transition-smooth cursor-pointer"
+          >
+            {t('files.loadFullFile')}
+          </button>
+        </div>
+      )}
 
       {/* Content area */}
       <div className="flex-1 overflow-hidden">

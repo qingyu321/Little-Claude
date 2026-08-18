@@ -114,7 +114,11 @@ export const useAgentStore = create<AgentState>()((set, get) => ({
   updateAgentsForTab: (tabId, updater) => {
     const nextCache = new Map(get().agentCache);
     const snapshot = nextCache.get(tabId);
-    const working = snapshot ? new Map(snapshot) : new Map<string, AgentNode>();
+    // B3d: without a snapshot this is a stale background event for a tab
+    // whose cache was removed (session deleted/ended) — writing a fresh
+    // empty map back would resurrect the entry and grow agentCache forever.
+    if (!snapshot) return;
+    const working = new Map(snapshot);
     updater(working);
     nextCache.set(tabId, working);
     set({ agentCache: nextCache });

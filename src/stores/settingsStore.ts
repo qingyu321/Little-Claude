@@ -196,6 +196,8 @@ interface SettingsState {
   sidebarWidth: number;
   /** Whether the CLI setup wizard has been completed or skipped */
   setupCompleted: boolean;
+  /** F22: 用户在 SetupWizard 选择了跳过（CLI 可能未安装）——聊天区顶部横幅提示 */
+  setupSkipped: boolean;
   /** Whether the user has finished the onboarding tutorial (persisted) */
   onboardingCompleted: boolean;
   /** Whether the onboarding wizard is currently open (transient, not persisted) */
@@ -346,6 +348,8 @@ interface SettingsState {
   decreaseFontSize: () => void;
   setSidebarWidth: (width: number) => void;
   setSetupCompleted: (completed: boolean) => void;
+  /** F22: 设置 SetupWizard 跳过标记 */
+  setSetupSkipped: (skipped: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setOnboardingOpen: (open: boolean) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
@@ -436,6 +440,7 @@ export const useSettingsStore = create<SettingsState>()(
       monoFontFollowsInterface: true,
       sidebarWidth: 280,
       setupCompleted: false,
+      setupSkipped: false, // F22
       onboardingCompleted: false,
       onboardingOpen: false,
       thinkingLevel: 'medium' as ThinkingLevel,
@@ -495,7 +500,9 @@ export const useSettingsStore = create<SettingsState>()(
       interviewMaxTokens: 512,
       interviewTemperature: 0,
       interviewAsrBackend: 'mimo' as 'mimo' | 'local' | 'hybrid',
-      includePartialMessages: true, // A2: default on for backward compat
+      // F25: 默认改 false（与 Rust 侧同步）——partial messages 产生 10-50× 流事件量；
+      // 设置项保留可手动开启。字段在 persist partialize 中，已存用户值不受影响。
+      includePartialMessages: false,
 
       toggleTheme: () =>
         set((state) => ({ theme: nextTheme(state.theme) })),
@@ -533,8 +540,18 @@ export const useSettingsStore = create<SettingsState>()(
           ...(!state.settingsOpen && state.updateAvailable ? { updateAvailable: false } : {}),
         })),
 
-      setWorkingDirectory: (dir) =>
-        set(() => ({ workingDirectory: dir })),
+      setWorkingDirectory: (dir) => {
+        // B1: keep the backend's authorized-path gate in sync — the user
+        // picked this folder as the workspace; without registration, file
+        // browsing/preview would be rejected before the first session spawns
+        // (the session start registers it too, belt-and-braces).
+        if (dir) {
+          import('../lib/tauri-bridge').then(({ bridge }) => {
+            bridge.registerWorkspaceRoot(dir).catch(() => {});
+          });
+        }
+        set(() => ({ workingDirectory: dir }));
+      },
 
       setSelectedModel: (model) =>
         set(() => ({ selectedModel: model })),
@@ -571,6 +588,10 @@ export const useSettingsStore = create<SettingsState>()(
 
       setSetupCompleted: (completed) =>
         set(() => ({ setupCompleted: completed })),
+
+      // F22: SetupWizard 跳过标记（聊天区 CLI 缺失常驻横幅据此显示）
+      setSetupSkipped: (skipped) =>
+        set(() => ({ setupSkipped: skipped })),
 
       setOnboardingCompleted: (completed) =>
         set(() => ({ onboardingCompleted: completed })),
@@ -1000,6 +1021,7 @@ export const useSettingsStore = create<SettingsState>()(
         monoFontFollowsInterface: state.monoFontFollowsInterface,
         sidebarWidth: state.sidebarWidth,
         setupCompleted: state.setupCompleted,
+        setupSkipped: state.setupSkipped, // F22
         onboardingCompleted: state.onboardingCompleted,
         thinkingLevel: state.thinkingLevel,
         contextWindowMode: state.contextWindowMode,

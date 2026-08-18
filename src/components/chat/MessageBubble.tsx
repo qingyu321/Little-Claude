@@ -5,6 +5,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useLightboxStore } from '../shared/ImageLightbox';
 import { useT } from '../../lib/i18n';
+import { isPathInsideWorkspace } from '../../lib/path-safety';
 import { getCachedThumbnail } from '../../hooks/useFileAttachments';
 import { MarkdownRenderer } from '../shared/MarkdownRenderer';
 import { CommandProcessingCard } from './CommandProcessingCard';
@@ -112,13 +113,9 @@ function renderCodeSegment(inner: string, key: number): ReactNode {
     // Security: out-of-workspace paths must not become clickable chips —
     // a single click would read arbitrary local files into the preview
     // (e.g. C:\\Users\\...\\.ssh\\config from untrusted model output).
-    const inWorkspace = inner.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(inner)
-      ? (() => {
-          const base = wd.replace(/\\/g, '/').replace(/\/+$/, '');
-          const p = resolved.replace(/\\/g, '/');
-          return !!base && (p === base || p.startsWith(base + '/'));
-        })()
-      : true;
+    // isPathInsideWorkspace folds `..` in relative paths and never passes
+    // when no working directory is configured.
+    const inWorkspace = isPathInsideWorkspace(resolved, wd);
     if (!inWorkspace) return <code key={key}>{inner}</code>;
     return (
       <button
@@ -644,7 +641,18 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              useFileStore.getState().selectFile(input.file_path);
+              // Security: the file_path comes from model output (tool_use.input)
+              // and may be injected/untrusted. Only open files that resolve
+              // inside the current working directory — never ~/.ssh etc.
+              const wd = useSettingsStore.getState().workingDirectory || '';
+              if (isPathInsideWorkspace(input.file_path, wd)) {
+                useFileStore.getState().selectFile(input.file_path);
+              } else {
+                console.warn(
+                  '[MessageBubble] refusing out-of-workspace file_path:',
+                  input.file_path,
+                );
+              }
             }}
             className="text-[11px] text-accent/70 hover:text-accent font-mono
               truncate max-w-[280px] hover:underline cursor-pointer transition-smooth"

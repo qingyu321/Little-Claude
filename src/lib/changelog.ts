@@ -19,6 +19,183 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.1.8',
+    date: '2026-08-16',
+    highlights: {
+      zh: ['第三轮全面修复：权限/问题卡过期体验重做 + DSH 会话自动重建 + 30 余项 bug/性能/体验修复'],
+      en: ['Third full fix round: permission/question expiry UX + DSH session auto-rebuild + 30+ bug/perf/UX fixes'],
+    },
+    categories: [
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '权限/问题卡等待时限放宽至 60 分钟；过期后明确提示"请停止并重发"，不再显示无信息的"出了点问题"；中文错误（超时/限流/余额等）全部正确分类',
+            'DSH（DeepSeek）服务重启后会话自动重建并重发本条消息，明确提示上下文已重置，不再静默失忆',
+            '修复后台流路径 draft 不升级导致的幽灵会话与双进程写同一文件风险',
+            '修复面试助手：中文流式答案乱码、长答案 30 秒被掐断、停止后 239MB 模型复活常驻、启动/转写卡界面、畸形音频可致崩溃',
+            '修复非流式代理回合 token 统计双算；插话（steer）仅 DeepSeek 后端可用并明确提示；中文输入法组合态切 tab 不再串草稿',
+            '修复 LRU 淘汰/prewarm 泄漏 CLI 进程、磁盘加载卡"运行中"、429 限流时排队消息逐条撞墙等',
+          ],
+          en: [
+            'Permission/question cards now wait up to 60 minutes; expired cards say exactly what to do (stop & re-send) instead of a generic error; Chinese errors (timeout/rate-limit/balance) are classified properly',
+            'After a DSH (DeepSeek) service restart, the session is rebuilt and the current message auto-resends, with a clear "context was reset" notice instead of silent amnesia',
+            'Fixed ghost sessions and dual-process file writes caused by the background stream path never promoting drafts',
+            'Interview helper fixes: garbled Chinese streaming answers, long answers cut at 30s, 239MB model resurrecting after stop, UI freezes on start/transcribe, malformed audio crash',
+            'Fixed double-counted tokens for non-streaming proxy turns; steer (interrupt) is now clearly DeepSeek-only; IME composition + tab switching no longer swaps drafts',
+            'Fixed leaked CLI processes from LRU eviction/prewarm, sessions stuck "running" after disk-load navigation, queued messages hammering a 429 rate limit, and more',
+          ],
+        },
+      },
+      {
+        label: { zh: '性能', en: 'Performance' },
+        items: {
+          zh: [
+            '文件命令（树扫描/读取/复制）移入后台线程，大项目扫描不再卡住整个应用',
+            '掐断文件搜索树深度重扫链（清空搜索即释放、变更只标脏）；搜索结果 memo + 防抖 + 上限',
+            '逐 token 流式事件默认关闭（设置可重新打开），IPC 事件量降 10-50 倍',
+            '大文件预览护栏（先加载前 512KB）、文件树节点 memo、changedFiles 上限',
+          ],
+          en: [
+            'File commands (tree scan/read/copy) moved off the async executor — big project scans no longer stall the whole app',
+            'Broke the file-search deep-rescan chain (clearing the query releases the tree; changes only mark it stale); memoized + debounced + capped search results',
+            'Per-token partial streaming is now off by default (re-enable in Settings) — 10-50× fewer IPC events',
+            'Large file preview guard (first 512KB), file tree node memoization, changedFiles cap',
+          ],
+        },
+      },
+      {
+        label: { zh: '体验', en: 'UX' },
+        items: {
+          zh: [
+            '新会话空状态提供起步示例提示，点击即填入输入框',
+            'CLI 未安装时聊天区常驻横幅，一键直达安装',
+            '会话高级搜索支持按 DeepSeek 后端筛选；若干硬编码文案国际化',
+          ],
+          en: [
+            'Empty new sessions show clickable starter prompts',
+            'A persistent banner with one-click install when the CLI is missing',
+            'Advanced session search can filter by the DeepSeek backend; hardcoded strings moved to i18n',
+          ],
+        },
+      },
+    ],
+  },
+  {
+    version: '1.1.7',
+    date: '2026-08-16',
+    highlights: {
+      zh: ['全面审计修复批次：1 个严重命令注入 + 18 处安全加固 + 32 处 bug 修复 + 7 处性能优化'],
+      en: ['Full-audit fix batch: 1 critical command injection + 18 security hardenings + 32 bug fixes + 7 performance wins'],
+    },
+    categories: [
+      {
+        label: { zh: '安全', en: 'Security' },
+        items: {
+          zh: [
+            '修复标题生成在 Windows 上的命令注入（每会话自动触发、可经恶意项目内容达 RCE）— 提示词改走 stdin、API 配置改走临时文件',
+            'API key 不再出现在进程命令行（临时文件传递 + Unix 0600）',
+            'git 命令全面收紧：仅限授权工作区、禁用外部 diff/textconv、压制恶意仓库的 fsmonitor/hooks 配置、stdout 流式限量读取',
+            '外部打开（VS Code/资源管理器/默认应用）接入路径授权，拒绝 UNC 与 - 开头路径',
+            '热更防降级（版本单调性）+ 下载主机白名单 + 随机临时文件名',
+            '敏感目录黑名单补齐 Windows/macOS 浏览器与编辑器凭据库；temp 白名单收窄到应用子目录',
+            'CLI pin 限已知二进制名、原生更新 manifest 文件名校验、下载累计上限、恢复 SmartScreen',
+          ],
+          en: [
+            'Fixed a Windows command injection in session title generation (auto-triggered per session, RCE-reachable via malicious project content) — prompt now goes through stdin, API config through a temp file',
+            'API keys no longer appear on process command lines (temp-file handoff + Unix 0600)',
+            'git commands hardened: authorized workspaces only, external diff/textconv disabled, malicious-repo fsmonitor/hooks config neutralized, bounded streaming reads',
+            'Open-in-VS Code / reveal / open-with-default-app now path-authorized; UNC and dash-prefixed paths rejected',
+            'Web update: downgrade protection (version monotonicity) + host allowlist + random temp filenames',
+            'Sensitive-dir blacklist extended to Windows/macOS browser & editor credential stores; temp whitelist narrowed to the app subdir',
+            'CLI pin restricted to known binaries, manifest filename validation, download caps, SmartScreen restored',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '修复发消息期间切换会话导致的消息串会话/监听器丢失（提交全程使用提交时快照）',
+            '修复多标签缓存淘汰可能清掉当前会话、Ctrl+Tab 切回出现空白对话（真 LRU + 磁盘回退）',
+            '修复 Codex 后端 resume 失败后会话永久卡死、权限请求（字符串 id）无法应答、错误静默无提示',
+            '修复进程退出后权限卡片点击无反应、排队消息静默丢失、手动停止后误发"任务完成"通知',
+            '修复切换模型会删除整个会话的思考过程、模型输出中的问题卡后台重复出现',
+            '修复 SSE 转换在高负载下随机丢帧、文件监视器在目录删除后永久泄漏、会话历史截断非原子写可能损坏文件',
+            '修复 stderr 一行乱码即永久静默、未登录误报已认证、删除会话后残留元数据',
+            '修复权限/问题卡未及时回应（超过 5 分钟）后再点击报"出了点问题"——等待时限放宽到 60 分钟，过期时给出明确提示；中文错误（超时/限流/余额等）不再落入无信息兜底文案；失败的对话回合现在会显示具体原因',
+          ],
+          en: [
+            'Fixed messages being routed to the wrong session / listeners lost when switching sessions mid-send (submit now uses a snapshot taken at submit time)',
+            'Fixed tab-cache eviction clearing the active session and Ctrl+Tab showing an empty conversation (true LRU + disk fallback)',
+            'Fixed Codex sessions hanging permanently after a failed resume, unanswerable string-id permission requests, and silently dropped errors',
+            'Fixed unresponsive permission cards after process exit, queued messages vanishing, and a bogus "task completed" notification after a manual stop',
+            'Fixed model switching deleting the conversation\'s thinking history, and duplicate question cards in background sessions',
+            'Fixed SSE conversion dropping frames under load, watcher leaks after directory deletion, and non-atomic history truncation that could corrupt a session file',
+            'Fixed a single garbled stderr line silencing all further stderr, false "authenticated" for logged-out users, leftover metadata after deleting sessions',
+            'Fixed permission/question cards answered after the old 5-minute window failing with a generic error — the window is now 60 minutes, expiry shows a clear message, Chinese errors (timeout/rate-limit/balance) are classified properly, and failed turns display their actual reason',
+          ],
+        },
+      },
+      {
+        label: { zh: '性能', en: 'Performance' },
+        items: {
+          zh: [
+            '统计弹窗打开速度大幅提升（DSH 同步移入后台 + 逐行解析预过滤）',
+            '大工具结果在 IPC 前截断（原近 2MB 全量传输后丢弃）',
+            '右侧面板（文件/技能/插件/预览/面试）懒加载，首屏主包减小约 100KB',
+            '会话列表轮询 30s→5min；流式首段渲染节流 60fps→20fps；历史会话加载 O(N²)→O(N)',
+          ],
+          en: [
+            'Profile stats modal opens much faster (DSH sync moved off the async executor + line prefiltering)',
+            'Large tool results are truncated before IPC instead of shipping ~2MB and discarding most of it',
+            'Side panels (files/skills/plugins/preview/interview) are now lazy-loaded; main bundle ~100KB smaller',
+            'Session-list polling 30s→5min; first-chunk stream rendering throttled 60fps→20fps; history loading O(N²)→O(N)',
+          ],
+        },
+      },
+    ],
+  },
+  {
+    version: '1.1.6',
+    date: '2026-08-15',
+    highlights: {
+      zh: ['Token 统计修复（DSH/DeepSeek 后端用量漏计 + 缓存双计）+ 安全修复批次（路径校验、敏感目录黑名单、下载上限、代理 token 校验）+ 内存泄漏与性能修复批次'],
+      en: ['Token stats fixes (DSH/DeepSeek usage was lost entirely + cache double-counting) + security batch (path validation, sensitive-dir blacklist, download caps, proxy token matching) + memory-leak & performance fixes'],
+    },
+    categories: [
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '修复 DSH（DeepSeek）后端 token 用量完全不计入统计 — result 事件缺 uuid 导致前端跳过记账，且 DSH 会话不在 ~/.claude/projects 的 JSONL 扫描范围内；现已随 result 事件透传消息 id，用量进入 usage_log',
+            '修复 DeepSeek/OpenAI 兼容端点缓存双计 — 此类端点的 input_tokens 已包含缓存命中，统计改为与前端一致的语义规则（input 覆盖缓存份额时不再重复相加），totalTokens/每日/模型聚合全部修正',
+            '安全：模型输出中的文件路径点击前强制工作区校验（相对路径 ../ 折叠 + 绝对路径越界拒绝），产物 chip 同步防护',
+            '安全：文件命令新增敏感用户目录黑名单（~/.ssh、~/.aws、~/.gnupg、~/.kube、~/.docker、~/.npmrc 等凭证目录不可读写删除）',
+            '安全：热更下载 256MiB 上限、Node 安装包解压 2GiB 总量上限、壁纸文件 512MiB 上限（防磁盘/内存耗尽）',
+            '安全：本地转换代理 token 改为完整路径段匹配（防前缀猜解）；标题生成模型名过 cmd 注入字符集校验',
+            '安全：远程图片 no-referrer + lazy 加载（防路径泄露与追踪）',
+            '修复 Toast 通知数组无限增长、会话流缓冲残留导致后台定时器常驻、拖拽面板逐帧写盘等内存/性能问题',
+            '修复语音识别组件卸载后麦克风不释放',
+            '构建链统一为 pnpm（消除 npm/pnpm 双锁漂移与发布时双重前端构建）',
+          ],
+          en: [
+            'Fixed DSH (DeepSeek) backend token usage being entirely absent from stats — the result event lacked a uuid so the frontend skipped persistence, and DSH sessions live outside the ~/.claude/projects JSONL scan; the message id is now carried on result events',
+            'Fixed cache double-counting for DeepSeek/OpenAI-compatible endpoints — their input_tokens already include cache hits; aggregation now uses the same semantic rule as the frontend (no repeat addition when input covers the cached share), fixing totalTokens/daily/model stats',
+            'Security: file paths from model output are workspace-checked before opening (../ folding + absolute-path rejection); deliverable chips too',
+            'Security: sensitive user directories blacklisted for file commands (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker, ~/.npmrc, …)',
+            'Security: download caps (web update 256MiB, Node archive extract 2GiB total, wallpaper 512MiB) against disk/memory exhaustion',
+            'Security: conversion-proxy token now matched as a full path segment; title-generation model names pass the cmd-injection charset guard',
+            'Security: remote images load with no-referrer + lazy loading',
+            'Fixed unbounded toast growth, lingering stream-buffer keeping a global timer alive, and per-frame persist writes while dragging panels',
+            'Fixed microphone not released when the speech component unmounts',
+            'Build chain unified on pnpm (removes npm/pnpm lock drift and the double frontend build on release)',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.1.5',
     date: '2026-08-13',
     highlights: {

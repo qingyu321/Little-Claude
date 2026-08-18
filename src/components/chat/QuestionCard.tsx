@@ -90,6 +90,9 @@ export const QuestionCard = memo(function QuestionCard({ message, floating }: Pr
   const interactionState = message.interactionState ?? (isFullyResolved ? 'resolved' : 'pending');
   const isSending = interactionState === 'sending';
   const isFailed = interactionState === 'failed';
+  // Expired question: re-submitting would fail again with the same stale id —
+  // replace the action buttons with a static stop-and-resend hint.
+  const isExpired = isFailed && message.interactionError === t('error.requestExpired');
   const awaitingSdkPatch = !isFullyResolved && !message.permissionData?.requestId;
 
   const handleConfirm = useCallback(async () => {
@@ -326,33 +329,39 @@ export const QuestionCard = memo(function QuestionCard({ message, floating }: Pr
             )}
 
             {/* Action buttons */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleConfirm}
-                disabled={!hasCurrentSelection || isSending || awaitingSdkPatch}
-                className={`px-4 py-1.5 rounded-lg text-xs font-semibold
-                  bg-accent text-text-inverse hover:bg-accent-hover
-                  transition-smooth cursor-pointer shadow-sm
-                  disabled:opacity-30 disabled:cursor-not-allowed
-                  ${isSending ? 'animate-pulse-soft' : ''}`}
-              >
-                {isSending
-                  ? 'Sending...'
-                  : awaitingSdkPatch
-                    ? t('msg.questionLoading')
-                    : currentIdx >= questions.length - 1 ? t('msg.questionSubmit') : t('msg.questionNext')}
-              </button>
-              <button
-                onClick={handleSkip}
-                disabled={isSending || awaitingSdkPatch}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium
-                  text-text-tertiary hover:text-text-primary
-                  hover:bg-bg-tertiary transition-smooth cursor-pointer
-                  disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                {t('msg.questionSkip')}
-              </button>
-            </div>
+            {isExpired ? (
+              <span className="text-[11px] text-warning font-medium">
+                {t('msg.expiredStatic')}
+              </span>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleConfirm}
+                  disabled={!hasCurrentSelection || isSending || awaitingSdkPatch}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-semibold
+                    bg-accent text-text-inverse hover:bg-accent-hover
+                    transition-smooth cursor-pointer shadow-sm
+                    disabled:opacity-30 disabled:cursor-not-allowed
+                    ${isSending ? 'animate-pulse-soft' : ''}`}
+                >
+                  {isSending
+                    ? 'Sending...'
+                    : awaitingSdkPatch
+                      ? t('msg.questionLoading')
+                      : currentIdx >= questions.length - 1 ? t('msg.questionSubmit') : t('msg.questionNext')}
+                </button>
+                <button
+                  onClick={handleSkip}
+                  disabled={isSending || awaitingSdkPatch}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium
+                    text-text-tertiary hover:text-text-primary
+                    hover:bg-bg-tertiary transition-smooth cursor-pointer
+                    disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  {t('msg.questionSkip')}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

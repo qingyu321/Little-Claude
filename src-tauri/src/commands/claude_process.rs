@@ -148,8 +148,10 @@ pub struct ProcessManager {
     /// DeepSeek (DSH service mode) session IDs keyed by LC session_id.
     /// D-N1-B: one DSH session per LC tab — follow-ups reuse it for real
     /// context continuity (no process is involved; the dsh web service owns
-    /// the session lifecycle).
-    pub(crate) deepseek_sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// the session lifecycle). Value = (dsh_session_id, cwd) — the cwd is
+    /// kept so send_stdin can REBUILD an orphaned session after a service
+    /// respawn (R11) instead of stranding the tab.
+    pub(crate) deepseek_sessions: Arc<Mutex<HashMap<String, (String, Option<String>)>>>,
     /// Windows Job Objects keyed by session_id for whole-tree kill.
     /// Empty on non-Windows (field only exists under cfg(windows)).
     #[cfg(windows)]
@@ -183,13 +185,24 @@ impl ProcessManager {
     /// Retrieve the DSH session ID for an LC session (service mode).
     pub async fn get_deepseek_session(&self, session_id: &str) -> Option<String> {
         let map = self.deepseek_sessions.lock().await;
-        map.get(session_id).cloned()
+        map.get(session_id).map(|(sid, _)| sid.clone())
+    }
+
+    /// R11: the cwd the DSH session was created with (for orphan rebuild).
+    pub async fn get_deepseek_session_cwd(&self, session_id: &str) -> Option<String> {
+        let map = self.deepseek_sessions.lock().await;
+        map.get(session_id).and_then(|(_, cwd)| cwd.clone())
     }
 
     /// Record the DSH session ID for an LC session (service mode).
-    pub async fn insert_deepseek_session(&self, session_id: &str, dsh_session_id: String) {
+    pub async fn insert_deepseek_session(
+        &self,
+        session_id: &str,
+        dsh_session_id: String,
+        cwd: Option<String>,
+    ) {
         let mut map = self.deepseek_sessions.lock().await;
-        map.insert(session_id.to_string(), dsh_session_id);
+        map.insert(session_id.to_string(), (dsh_session_id, cwd));
     }
 
     /// Remove the DSH session mapping on cleanup.

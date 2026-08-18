@@ -128,6 +128,17 @@ pub async fn start_wallpaper_server() -> Result<u16, String> {
                         return;
                     }
                 };
+                // M1: refuse oversized files before allocating — an attacker
+                // (or a stray download) could otherwise force a multi-GB
+                // Vec::with_capacity allocation on the server task.
+                const MAX_WALLPAPER_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+                if file_size > MAX_WALLPAPER_BYTES {
+                    let resp = format!(
+                        "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
 
                 // Parse Range header (RFC 7233).  We support the common
                 // "bytes=N-M" and "bytes=N-" forms; suffix ranges
@@ -417,7 +428,11 @@ pub async fn compress_wallpaper(
     input_path: String,
     quality: String,
 ) -> Result<WallpaperInfo, String> {
-    let input = std::path::PathBuf::from(&input_path);
+    // B1: the input path comes from a file dialog on the frontend — it must
+    // be authorized (registered project root / whitelist / dialog grant) or
+    // a compromised renderer could transcode arbitrary local media files
+    // into the wallpaper dir and read them back via the wallpaper server.
+    let input = crate::commands::files::resolve_authorized(&input_path)?;
     if !input.is_file() {
         return Err("Input file not found".to_string());
     }

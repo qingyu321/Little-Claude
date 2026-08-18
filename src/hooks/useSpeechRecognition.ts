@@ -125,6 +125,22 @@ export function useSpeechRecognition(): SpeechRecognitionResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speechLanguage]);
 
+  // Unmount cleanup: abort an in-flight recognition so the microphone is
+  // released and no callbacks fire into an unmounted component.
+  useEffect(() => {
+    return () => {
+      const rec = recognitionRef.current;
+      if (rec) {
+        rec.onresult = null;
+        rec.onerror = null;
+        rec.onend = null;
+        try { rec.abort(); } catch { /* ignore */ }
+        recognitionRef.current = null;
+      }
+      finalBufferRef.current = '';
+    };
+  }, []);
+
   const startListening = useCallback(() => {
     const rec = getRecognition();
     if (!rec) return;

@@ -20,6 +20,19 @@ import { FileChipExtension, type FileChipAttrs } from './file-chip-extension';
 import { FileChipView } from './FileChipView';
 
 /* ------------------------------------------------------------------ */
+/*  F3: 全局 IME 组合态（多编辑器实例计数）                            */
+/* ------------------------------------------------------------------ */
+// 组合进行中切换 tab 会把 compositionend 的 flush 写进新 tab 的草稿。
+// App.tsx 的 Ctrl+Tab 等会话切换热键在组合态中跳过，保证组合文本不丢、
+// 不覆盖别的 tab 草稿。
+let _globalComposingCount = 0;
+
+/** F3: 任一编辑器实例处于 IME 组合态即为 true（会话切换热键据此跳过）。 */
+export function isGlobalComposing(): boolean {
+  return _globalComposingCount > 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Imperative handle                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -146,6 +159,8 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
           // leaving composingRef stuck true and blocking Enter. See issue #66.
           if (composingRef.current && !event.isComposing && event.keyCode !== 229) {
             composingRef.current = false;
+            // F3: 全局计数同步解卡，否则切换热键会被永久屏蔽
+            _globalComposingCount = Math.max(0, _globalComposingCount - 1);
           }
           return onKeyDownRef.current?.(event) === true;
         },
@@ -166,9 +181,18 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
     useEffect(() => {
       const el = editor?.view?.dom;
       if (!el) return;
-      const onStart = () => { composingRef.current = true; };
+      // F3: 组合起止同步维护全局计数（以 composingRef 状态翻转为准，保证配对）
+      const onStart = () => {
+        if (!composingRef.current) {
+          composingRef.current = true;
+          _globalComposingCount += 1;
+        }
+      };
       const onEnd = () => {
-        composingRef.current = false;
+        if (composingRef.current) {
+          composingRef.current = false;
+          _globalComposingCount = Math.max(0, _globalComposingCount - 1);
+        }
         // Flush the final composed text to the store
         const text = editorToPlainText(editor);
         onUpdateRef.current?.(text);
@@ -178,6 +202,11 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
       return () => {
         el.removeEventListener('compositionstart', onStart);
         el.removeEventListener('compositionend', onEnd);
+        // F3: 卸载时仍处于组合态（如 tab 被切走）——归还计数防泄漏
+        if (composingRef.current) {
+          composingRef.current = false;
+          _globalComposingCount = Math.max(0, _globalComposingCount - 1);
+        }
       };
     }, [editor]);
 

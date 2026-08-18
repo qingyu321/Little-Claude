@@ -113,6 +113,10 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
     });
     const filePath = Array.isArray(result) ? result[0] : result;
     if (!filePath) return;
+    // B1: the native dialog picked this path — register it with the backend
+    // so the authorized-path gate accepts it (project roots are Rust-side
+    // only; dialog picks are the user-approved exception).
+    bridge.authorizeExternalPath(filePath).catch(() => {});
 
     setImportError('');
     setImportStatus('idle');
@@ -214,6 +218,9 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
       if (!filePath) return;
+      // B1: register the dialog-chosen output directory (file may not exist
+      // yet, so authorize the parent).
+      bridge.authorizeExternalPath(filePath).catch(() => {});
       await bridge.writeFileContent(filePath, json);
     } catch (e) {
       console.error('Export failed:', e);

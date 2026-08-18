@@ -182,7 +182,12 @@ export const useTokenSpeedStore = create<TokenSpeedState>((set, get) => ({
     set((s) => {
       const next = {
         ...s.tabs,
-        [tabId]: { ...tab, isStreaming: false, endedAt: Date.now(), apiAvg },
+        // B4: use performance.now() like every other timestamp in this store.
+        // The GC sort compares `endedAt ?? turnStartAt` across records — mixing
+        // Date.now() epoch (~1.7e12) with performance.now() (~1e6) made the
+        // ordering meaningless (ended records sorted after live ones, so the
+        // wrong tabs got evicted and live streaming tabs could be dropped).
+        [tabId]: { ...tab, isStreaming: false, endedAt: performance.now(), apiAvg },
       };
       // Lazy GC: prune only when over the bound. Eviction pool = draft_ tabs
       // (ephemeral tabs that are discarded wholesale) + already-ended records;

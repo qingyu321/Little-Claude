@@ -124,7 +124,8 @@ export const SessionGroup = memo(function SessionGroup({
       monthEntries.sort((a, b) => b[0].localeCompare(a[0]));
       for (const [monthKey, monthItems] of monthEntries) {
         const d = new Date(parseInt(monthKey.split('-')[0]), parseInt(monthKey.split('-')[1]) - 1);
-        const monthLabel = `${d.getMonth() + 1}月`;
+        // F24: 月份分组标签按 locale 处理（英文环境此前硬编码显示"3月"）
+        const monthLabel = t('conv.monthGroup', { month: String(d.getMonth() + 1) });
         groups.push({ category: `earlier-${monthKey}`, label: monthLabel, items: monthItems });
       }
     }

@@ -91,40 +91,61 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
     document.body.style.userSelect = 'none';
   }, []);
 
+  // P2: rAF-throttled width commit — the raw mousemove handler only records
+  // the pending width; one rAF per frame applies it. Without this, every
+  // mousemove (~60-120Hz) called setSecondaryPanelWidth/setPreviewWidth,
+  // each triggering a full settings persist (localStorage) + re-render.
+  const rightRafRef = useRef(0);
+  const rightPendingWidthRef = useRef(0);
+
+  /** Apply the latest pending width (also called on mouseup to flush). */
+  const applyRightWidth = useCallback((w: number) => {
+    if (isFilePreviewModeRef.current) {
+      if (w < COLLAPSE_THRESHOLD) {
+        isRightDragging.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        useFileStore.getState().closePreview();
+        return;
+      }
+      setPreviewWidth(
+        Math.max(MIN_PREVIEW_WIDTH, Math.min(MAX_PREVIEW_WIDTH, w))
+      );
+    } else {
+      if (w < COLLAPSE_THRESHOLD) {
+        isRightDragging.current = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        const settings = useSettingsStore.getState();
+        if (settings.secondaryPanelOpen) settings.toggleSecondaryPanel();
+        return;
+      }
+      useSettingsStore.getState().setSecondaryPanelWidth(
+        Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, w))
+      );
+    }
+  }, []);
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isRightDragging.current) return;
       const delta = rightStartX.current - e.clientX;
-      const newWidth = rightStartWidth.current + delta;
-
-      if (isFilePreviewModeRef.current) {
-        if (newWidth < COLLAPSE_THRESHOLD) {
-          isRightDragging.current = false;
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-          useFileStore.getState().closePreview();
-          return;
-        }
-        setPreviewWidth(
-          Math.max(MIN_PREVIEW_WIDTH, Math.min(MAX_PREVIEW_WIDTH, newWidth))
-        );
-      } else {
-        if (newWidth < COLLAPSE_THRESHOLD) {
-          isRightDragging.current = false;
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-          const settings = useSettingsStore.getState();
-          if (settings.secondaryPanelOpen) settings.toggleSecondaryPanel();
-          return;
-        }
-        useSettingsStore.getState().setSecondaryPanelWidth(
-          Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, newWidth))
-        );
-      }
+      rightPendingWidthRef.current = rightStartWidth.current + delta;
+      if (rightRafRef.current) return;
+      rightRafRef.current = requestAnimationFrame(() => {
+        rightRafRef.current = 0;
+        applyRightWidth(rightPendingWidthRef.current);
+      });
     };
 
     const handleMouseUp = () => {
       if (!isRightDragging.current) return;
+      if (rightRafRef.current) {
+        cancelAnimationFrame(rightRafRef.current);
+        rightRafRef.current = 0;
+        // Flush the final width so the last mousemove isn't lost.
+        applyRightWidth(rightPendingWidthRef.current);
+      }
       isRightDragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
@@ -135,13 +156,17 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      if (rightRafRef.current) {
+        cancelAnimationFrame(rightRafRef.current);
+        rightRafRef.current = 0;
+      }
       // Safety: reset body styles if component unmounts mid-drag
       if (isRightDragging.current) {
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
       }
     };
-  }, []);
+  }, [applyRightWidth]);
 
   // --- Sidebar dragging ---
   const isSidebarDragging = useRef(false);
@@ -161,26 +186,49 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
     document.body.style.userSelect = 'none';
   }, []);
 
+  // P2: same rAF throttling for the sidebar drag (see right panel above).
+  const sidebarRafRef = useRef(0);
+  const sidebarPendingWidthRef = useRef(0);
+
   useEffect(() => {
     const handleMove = (e: MouseEvent) => {
       if (!isSidebarDragging.current) return;
       // Dragging right increases sidebar width
       const delta = e.clientX - sidebarStartX.current;
-      const newW = sidebarStartW.current + delta;
-      if (newW < SIDEBAR_COLLAPSE_THRESHOLD) {
-        isSidebarDragging.current = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        const settings = useSettingsStore.getState();
-        if (settings.sidebarOpen) settings.toggleSidebar();
-        return;
-      }
-      useSettingsStore.getState().setSidebarWidth(
-        Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, newW))
-      );
+      sidebarPendingWidthRef.current = sidebarStartW.current + delta;
+      if (sidebarRafRef.current) return;
+      sidebarRafRef.current = requestAnimationFrame(() => {
+        sidebarRafRef.current = 0;
+        const w = sidebarPendingWidthRef.current;
+        if (w < SIDEBAR_COLLAPSE_THRESHOLD) {
+          isSidebarDragging.current = false;
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+          const settings = useSettingsStore.getState();
+          if (settings.sidebarOpen) settings.toggleSidebar();
+          return;
+        }
+        useSettingsStore.getState().setSidebarWidth(
+          Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, w))
+        );
+      });
     };
     const handleUp = () => {
       if (!isSidebarDragging.current) return;
+      if (sidebarRafRef.current) {
+        cancelAnimationFrame(sidebarRafRef.current);
+        sidebarRafRef.current = 0;
+        // Flush the final width so the last mousemove isn't lost.
+        const w = sidebarPendingWidthRef.current;
+        if (w < SIDEBAR_COLLAPSE_THRESHOLD) {
+          const settings = useSettingsStore.getState();
+          if (settings.sidebarOpen) settings.toggleSidebar();
+        } else {
+          useSettingsStore.getState().setSidebarWidth(
+            Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, w))
+          );
+        }
+      }
       isSidebarDragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
@@ -190,6 +238,10 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
     return () => {
       window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('mouseup', handleUp);
+      if (sidebarRafRef.current) {
+        cancelAnimationFrame(sidebarRafRef.current);
+        sidebarRafRef.current = 0;
+      }
       if (isSidebarDragging.current) {
         document.body.style.cursor = '';
         document.body.style.userSelect = '';

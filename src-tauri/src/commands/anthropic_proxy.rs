@@ -121,11 +121,13 @@ impl ProxyManager {
                 shutdown: Some(shutdown_tx),
             },
         );
+        // L3: never print the full token — stderr can land in shared logs.
+        // The 8-char prefix is enough to correlate with the URL the CLI got.
         eprintln!(
-            "[LITTLECLAUDE:proxy] Started proxy for session {} on port {} (token {}) → {} (format {})",
+            "[LITTLECLAUDE:proxy] Started proxy for session {} on port {} (token {}…) → {} (format {})",
             session_id,
             port,
-            token,
+            &token[..token.len().min(8)],
             state.target_url,
             state.main_format,
         );
@@ -169,6 +171,13 @@ type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 fn proxy_log(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("littleclaude-proxy.log");
+    // L3: predictable path in a shared temp dir — refuse to follow a
+    // pre-planted symlink (log-append redirect attack on multi-user Unix).
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return;
+        }
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -185,7 +194,7 @@ fn proxy_log(msg: &str) {
 
 /// Redact likely API-key material from an upstream error message before it is
 /// forwarded to the UI. Providers sometimes echo keys back in error bodies.
-fn redact_secrets(s: &str) -> String {
+pub(crate) fn redact_secrets(s: &str) -> String {
     // Common key shapes: sk-... (OpenAI-style), key-... , and long base64/hex tokens.
     let mut out = s.to_string();
     for pat in ["sk-", "key-", "Bearer ", "x-api-key: "] {
@@ -193,17 +202,22 @@ fn redact_secrets(s: &str) -> String {
         while let Some(rel) = out[start..].find(pat) {
             let m = start + rel; // start of the pattern match
             let i = m + pat.len();
-            // Take up to 64 chars of the trailing token value.
+            // Take up to 64 chars of the trailing token value. Byte-safe:
+            // char_indices yields BYTE offsets — counting chars and indexing
+            // bytes panics mid-codepoint on CJK error text (e.g. "sk-密钥已失效").
             let rest = &out[i..];
-            let len = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-                .count()
-                .min(64);
-            if len >= 8 {
+            let end_rel = rest
+                .char_indices()
+                .take_while(|&(_, c)| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+                .take(64)
+                .last()
+                .map(|(idx, c)| idx + c.len_utf8())
+                .unwrap_or(0);
+            let taken = rest[..end_rel].chars().count();
+            if taken >= 8 {
                 // Replace from the pattern start so the prefix (sk- etc.)
                 // is hidden too.
-                out.replace_range(m..i + len, "[REDACTED]");
+                out.replace_range(m..i + end_rel, "[REDACTED]");
                 start = m + "[REDACTED]".len();
             } else {
                 start = i;
@@ -219,7 +233,11 @@ async fn handle_request(req: Request<Incoming>, state: ProxyState) -> Response<B
     let path = req.uri().path().to_string();
     let token_prefix = format!("/{}", state.token);
 
-    if !path.starts_with(&token_prefix) {
+    // The token must be a COMPLETE path segment (`/token` or `/token/...`).
+    // A bare prefix match (`/token` matching `/token-evil`) would let a
+    // partially-guessed token through; exact segment matching keeps the
+    // random token the sole gate for this loopback proxy.
+    if path != token_prefix && !path.starts_with(&format!("{}/", token_prefix)) {
         return json_response(StatusCode::NOT_FOUND, json!({
             "type": "error",
             "error": {"type": "not_found_error", "message": "Not found"}
@@ -443,11 +461,18 @@ async fn forward_openai_conversion(
                             let cache_read = usage.get("prompt_cache_hit_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
                             let cache_creation = usage.get("prompt_cache_miss_tokens").and_then(|u| u.as_u64()).unwrap_or(0);
                             if inp.saturating_add(out).saturating_add(cache_read).saturating_add(cache_creation) > 0 {
-                                let mid = openai
-                                    .get("id")
-                                    .and_then(|i| i.as_str())
-                                    .unwrap_or("")
-                                    .trim_start_matches("chatcmpl-");
+                                // R6 (bug): the streaming path + the converted
+                                // anthropic response both key on `msg_{id}` —
+                                // recording the bare id here missed dedup and
+                                // double-counted every non-streaming turn.
+                                let mid = format!(
+                                    "msg_{}",
+                                    openai
+                                        .get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .trim_start_matches("chatcmpl-")
+                                );
                                 let ts = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -455,7 +480,7 @@ async fn forward_openai_conversion(
                                 let model = openai.get("model").and_then(|m| m.as_str()).unwrap_or("");
                                 let _ = crate::commands::profile::append_usage_record_impl(
                                     &state.session_id,
-                                    mid,
+                                    &mid,
                                     inp,
                                     out,
                                     cache_read,
@@ -489,18 +514,29 @@ async fn forward_openai_conversion(
             let mut stream = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
 
-            let send_events = |tx: &mut tokio::sync::mpsc::Sender<
-                Result<Frame<Bytes>, hyper::Error>,
-            >,
-                               events: Vec<String>| {
+            // #2 (bug): send with backpressure (`send().await`), never
+            // `try_send` — a momentarily-full 64-slot channel used to be
+            // treated as "receiver dropped", silently dropping SSE frames
+            // (split content_block_start/delta pairs) whenever the upstream
+            // outpaced the CLI for an instant.
+            async fn send_events(
+                tx: &mut tokio::sync::mpsc::Sender<Result<Frame<Bytes>, hyper::Error>>,
+                events: Vec<String>,
+            ) -> bool {
                 for ev in events {
                     let frame = Frame::data(Bytes::from(format!("{}\n\n", ev)));
-                    if tx.try_send(Ok(frame)).is_err() {
+                    if tx.send(Ok(frame)).await.is_err() {
                         return false; // receiver dropped
                     }
                 }
                 true
-            };
+            }
+            // #12: cap the line buffer — a broken upstream streaming data
+            // without newlines must not grow this vec unbounded.
+            const MAX_SSE_BUF: usize = 16 * 1024 * 1024;
+            // #12: idle timeout — an upstream that hangs mid-stream must not
+            // pin this turn forever.
+            const CHUNK_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
             // Persist the authoritative OpenAI usage (input + output + cache)
             // straight to Little Claude's usage log. The CLI drops message_delta
@@ -529,12 +565,24 @@ async fn forward_openai_conversion(
                 }
             };
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk {
-                    Ok(c) => c,
-                    Err(_) => break,
+            'outer: loop {
+                let next = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        proxy_log("SSE stream idle timeout — aborting stalled upstream");
+                        break;
+                    }
+                };
+                let chunk = match next {
+                    Some(Ok(c)) => c,
+                    Some(Err(_)) => break,
+                    None => break,
                 };
                 buf.extend_from_slice(&chunk);
+                if buf.len() > MAX_SSE_BUF {
+                    proxy_log("SSE buffer exceeded 16MiB without a newline — aborting stream");
+                    break;
+                }
                 // Split into lines
                 loop {
                     let newline = match buf.iter().position(|&b| b == b'\n') {
@@ -549,24 +597,38 @@ async fn forward_openai_conversion(
                         if payload == "[DONE]" {
                             let events = conv.finish();
                             persist(&conv);
-                            if !send_events(&mut tx, events) {
-                                break;
+                            if !send_events(&mut tx, events).await {
+                                break 'outer;
                             }
-                            break;
+                            break 'outer;
                         }
                         let events = conv.on_openai_chunk(payload);
-                        if !send_events(&mut tx, events) {
-                            break;
+                        if !send_events(&mut tx, events).await {
+                            break 'outer;
                         }
                     }
                 }
+            }
+            // #12: process a trailing partial line left in buf when the
+            // upstream ended the stream without a final newline.
+            if !buf.is_empty() && !conv.is_finished() {
+                let line_str = String::from_utf8_lossy(&buf);
+                let trimmed = line_str.trim();
+                if let Some(data) = trimmed.strip_prefix("data:") {
+                    let payload = data.trim();
+                    if payload != "[DONE]" {
+                        let events = conv.on_openai_chunk(payload);
+                        let _ = send_events(&mut tx, events).await;
+                    }
+                }
+                buf.clear();
             }
             // Flush any remaining accumulated output if the stream ended
             // without [DONE] (some providers omit the terminator).
             if !conv.is_finished() {
                 let events = conv.finish();
                 persist(&conv);
-                let _ = send_events(&mut tx, events);
+                let _ = send_events(&mut tx, events).await;
             }
             // Dropping tx closes the response body (EOF for the CLI).
         });

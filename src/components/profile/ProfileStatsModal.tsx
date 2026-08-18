@@ -82,10 +82,14 @@ export function ProfileStatsModal({ open, onClose }: Props) {
     if (open) loadStats();
   }, [open]);
 
+  // 主口径 = 新输入 + 输出（不含缓存命中），与 DSH 界面/实际消耗口径一致；
+  // 缓存命中量仍可在"累计"视图单独查看（缓存 Token 行）。
   const dailyMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const day of stats?.daily ?? []) {
-      if (day.date !== 'unknown') map.set(day.date, day.total_tokens);
+      if (day.date !== 'unknown') {
+        map.set(day.date, (day.input_tokens || 0) + (day.output_tokens || 0));
+      }
     }
     return map;
   }, [stats]);
@@ -107,7 +111,13 @@ export function ProfileStatsModal({ open, onClose }: Props) {
     return weeks;
   }, [dailyMap]);
 
-  const maxDay = stats?.peakDayTokens ?? 0;
+  const maxDay = useMemo(() => {
+    let max = 0;
+    for (const v of dailyMap.values()) {
+      if (v > max) max = v;
+    }
+    return max;
+  }, [dailyMap]);
 
   const recentDaily = useMemo(() => {
     return [...(stats?.daily ?? [])]
@@ -186,8 +196,8 @@ export function ProfileStatsModal({ open, onClose }: Props) {
             <>
               <div className="mt-9 grid grid-cols-5 rounded-[20px] border border-border-subtle bg-bg-primary/70 overflow-hidden">
                 {[
-                  ['累计 Token 数', formatTokens(stats.totalTokens)],
-                  ['峰值日 Token 数', formatTokens(stats.peakDayTokens)],
+                  ['累计 Token 数', formatTokens((stats.totalInputTokens || 0) + (stats.totalOutputTokens || 0))],
+                  ['峰值日 Token 数', formatTokens(maxDay)],
                   ['会话总数', stats.sessionCount.toLocaleString()],
                   ['活跃天数', `${stats.activeDays} 天`],
                   ['消息计数', stats.messageCount.toLocaleString()],
@@ -264,7 +274,9 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                               style={{ width: `${Math.max(3, day.total_tokens / Math.max(maxDay, 1) * 100)}%` }}
                             />
                           </div>
-                          <span className="w-20 text-right text-text-primary">{formatTokens(day.total_tokens)}</span>
+                          <span className="w-20 text-right text-text-primary">
+                            {formatTokens((day.input_tokens || 0) + (day.output_tokens || 0))}
+                          </span>
                         </div>
                       )) : (
                         <p className="text-sm text-text-muted">还没有可统计的 token 活动。</p>

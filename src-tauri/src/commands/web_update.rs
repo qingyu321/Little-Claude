@@ -71,6 +71,27 @@ pub async fn download_web_update(
     if !url.starts_with("https://") {
         return Err("资源包地址必须是 https://（拒绝非加密传输，防中间人篡改）".to_string());
     }
+    // H3 (security): version monotonicity — a forged/stale manifest must not
+    // be able to DOWNGRADE the frontend to an older (vulnerable) build.
+    // Same-version re-apply stays allowed (repair/overwrite publish flow).
+    let current = env!("CARGO_PKG_VERSION");
+    if version_key(&version) < version_key(current) {
+        return Err(format!(
+            "拒绝降级：目标版本 {} 低于当前版本 {}",
+            version, current
+        ));
+    }
+    // H3 (security): restrict the download host to the release channels this
+    // app actually publishes through — an attacker-controlled latest.json
+    // must not be able to point zipUrl at an arbitrary server.
+    let host_ok = ["raw.githubusercontent.com", "github.com", "objects.githubusercontent.com", "cdn.jsdelivr.net"]
+        .iter()
+        .any(|h| {
+            url.starts_with(&format!("https://{}/", h))
+        });
+    if !host_ok {
+        return Err(format!("资源包地址不在可信主机白名单内: {}", url));
+    }
 
     let root = web_resources_root().ok_or_else(|| "无法定位数据目录".to_string())?;
     std::fs::create_dir_all(&root)
@@ -79,7 +100,13 @@ pub async fn download_web_update(
     let target = root.join(format!("dist-{}", version));
 
     // 1) 流式下载到临时 zip（同时计算 SHA256）
-    let tmp = std::env::temp_dir().join(format!("little-claude-web-update-{}.zip", version));
+    // L6 (security): random suffix — a fixed predictable name in the shared
+    // temp dir left a pre-plant/swap race window.
+    let tmp = std::env::temp_dir().join(format!(
+        "little-claude-web-update-{}-{}.zip",
+        version,
+        uuid::Uuid::new_v4().simple()
+    ));
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300))
@@ -94,6 +121,19 @@ pub async fn download_web_update(
     if !resp.status().is_success() {
         return Err(format!("下载失败: HTTP {}", resp.status()));
     }
+    // M1: 无上限的流式下载会被恶意/被劫持端点无限喂数据（磁盘耗尽）。
+    // 前端资源包远小于此上限，先按 Content-Length 预检，再在流式过程中
+    // 累计校验（Content-Length 可缺失或被谎报）。
+    const MAX_UPDATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+    if let Some(total) = resp.content_length() {
+        if total > MAX_UPDATE_BYTES {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!(
+                "资源包过大 ({} bytes, 上限 256 MiB)",
+                total
+            ));
+        }
+    }
     let total = resp.content_length();
     let mut out = tokio::fs::File::create(&tmp)
         .await
@@ -102,11 +142,19 @@ pub async fn download_web_update(
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {}", e))? {
+        downloaded += chunk.len() as u64;
+        if downloaded > MAX_UPDATE_BYTES {
+            drop(out);
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!(
+                "资源包超过 256 MiB 上限（已下载 {} bytes），已中止",
+                downloaded
+            ));
+        }
         hasher.update(&chunk);
         tokio::io::AsyncWriteExt::write_all(&mut out, &chunk)
             .await
             .map_err(|e| format!("写入临时文件失败: {}", e))?;
-        downloaded += chunk.len() as u64;
         // 进度节流：每 1MB 或收尾时发射
         if downloaded - last_emit >= 1_048_576 || downloaded == total.unwrap_or(u64::MAX) {
             last_emit = downloaded;
@@ -308,7 +356,11 @@ fn cleanup_old_versions(root: &Path, keep: usize) {
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(v) = name.strip_prefix("dist-v") {
+            // R8 (bug): writers accept versions WITH or WITHOUT the leading
+            // `v` (dist-{version}), but cleanup only matched "dist-v…" —
+            // v-less version dirs were never cleaned and piled up forever.
+            // Match on "dist-" and let valid_version (v-tolerant) validate.
+            if let Some(v) = name.strip_prefix("dist-") {
                 if e.path().is_dir() && valid_version(v) {
                     dirs.push((e.path(), version_key(v)));
                 }

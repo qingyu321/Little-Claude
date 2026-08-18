@@ -13,11 +13,15 @@ import { useChatStore } from './stores/chatStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useAgentStore } from './stores/agentStore';
 import { bridge, onFileChange } from './lib/tauri-bridge';
+// fix2: Ctrl+Tab 缓存未命中时的磁盘加载回退（共享实现）
+import { loadSessionFromDisk } from './lib/session-disk-load';
 import { useT } from './lib/i18n';
 import { debugLog } from './lib/debug-log';
 import { useAutoUpdateCheck } from './hooks/useAutoUpdateCheck';
 import { usePetBridge } from './hooks/usePetBridge';
 import { openUrl } from '@tauri-apps/plugin-opener';
+// F3: IME 组合态全局标志（组合中禁用 Ctrl+Tab 会话切换）
+import { isGlobalComposing } from './components/chat/TiptapEditor';
 
 // Lazy-load heavy components not needed for first paint
 const CommandPalette = lazy(() => import('./components/commands/CommandPalette').then(m => ({ default: m.CommandPalette })));
@@ -141,6 +145,8 @@ function App() {
   const closeNeverAgainRef = useRef(false);
 
   useEffect(() => {
+    // fix12: cancelled 标志防异步注册竞态——resolve 时 effect 已清理则立即注销
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       const win = getCurrentWindow();
@@ -152,9 +158,12 @@ function App() {
           return;
         }
         setCloseDialogOpen(true);
-      }).then((fn) => { unlisten = fn; });
+      }).then((fn) => {
+        if (cancelled) { fn(); return; }
+        unlisten = fn;
+      });
     });
-    return () => { unlisten?.(); };
+    return () => { cancelled = true; unlisten?.(); };
   }, [confirmOnClose]);
 
   const handleCloseConfirmed = () => {
@@ -344,7 +353,7 @@ function App() {
         useSettingsStore.getState().decreaseFontSize();
       } else if (e.key === '0') {
         e.preventDefault();
-        useSettingsStore.getState().setFontSize(14);
+        useSettingsStore.getState().setFontSize(18); // fix19: 重置值与默认字号 18 一致（原 14 矛盾）
       }
     };
     window.addEventListener('keydown', handler);
@@ -356,6 +365,9 @@ function App() {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === 'Tab') {
         e.preventDefault();
+        // F3: IME 组合态中跳过切换——否则 compositionend 的 flush 会把组合
+        // 文本写进切换后的新 tab 草稿（组合文本不丢、不覆盖别的 tab 草稿）
+        if (isGlobalComposing()) return;
         const sessionState = useSessionStore.getState();
         const { previousSessionId, selectedSessionId, sessions } = sessionState;
         if (!previousSessionId || previousSessionId === selectedSessionId) return;
@@ -379,29 +391,35 @@ function App() {
         const restored = useChatStore.getState().restoreFromCache(previousSessionId);
         if (restored) {
           useAgentStore.getState().restoreFromCache(previousSessionId);
-          // Restore working directory
-          const projectPath = prevSession.project || prevSession.projectDir;
-          if (projectPath) {
-            // Resolve project path using same logic as ConversationList
-            let resolved = projectPath;
-            if (!projectPath.startsWith('/') && !/^[A-Za-z]:[/\\]/.test(projectPath)) {
-              if (projectPath.startsWith('~/')) {
-                resolved = projectPath; // will work with home dir expansion
-              } else if (/^[A-Za-z]-/.test(projectPath)) {
-                const drive = projectPath[0];
-                resolved = `${drive}:\\${projectPath.slice(2).replace(/-/g, '\\')}`;
-              } else {
-                resolved = projectPath.replace(/-/g, '/');
-              }
-            }
-            useSettingsStore.getState().setWorkingDirectory(resolved);
-          }
+        } else if (prevSession.path) {
+          // fix2: 缓存未命中（LRU 淘汰/从未加载）→ 磁盘加载回退，
+          // 复用 ConversationList.handleLoadSession 的共享实现，不能只 clearAgents()
+          void loadSessionFromDisk(previousSessionId, prevSession.path, prevSession.origin || 'claude');
         } else {
-          // M5: never-opened tab — no cache to restore. Clear the LIVE agent
-          // tree left over from the previous tab, or AgentPanel would keep
-          // showing the previous conversation's agents (the click path clears
-          // via handleLoadSession; the Ctrl+Tab path had no equivalent).
+          // M5: never-opened draft tab — no cache to restore. Clear the LIVE
+          // agent tree left over from the previous tab, or AgentPanel would
+          // keep showing the previous conversation's agents (the click path
+          // clears via handleLoadSession; the Ctrl+Tab path had no equivalent).
+          useChatStore.getState().ensureTab(previousSessionId);
+          useChatStore.getState().resetTab(previousSessionId);
           useAgentStore.getState().clearAgents();
+        }
+        // Restore working directory（缓存命中与磁盘回退路径一致）
+        const projectPath = prevSession.project || prevSession.projectDir;
+        if (projectPath) {
+          // Resolve project path using same logic as ConversationList
+          let resolved = projectPath;
+          if (!projectPath.startsWith('/') && !/^[A-Za-z]:[/\\]/.test(projectPath)) {
+            if (projectPath.startsWith('~/')) {
+              resolved = projectPath; // will work with home dir expansion
+            } else if (/^[A-Za-z]-/.test(projectPath)) {
+              const drive = projectPath[0];
+              resolved = `${drive}:\\${projectPath.slice(2).replace(/-/g, '\\')}`;
+            } else {
+              resolved = projectPath.replace(/-/g, '/');
+            }
+          }
+          useSettingsStore.getState().setWorkingDirectory(resolved);
         }
       }
     };

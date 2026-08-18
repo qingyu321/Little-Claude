@@ -17,6 +17,8 @@ export interface ApiConfigFileV2 {
     /** Which CLI backend this provider uses: "claude" (default) or "codex". */
     cliBackend?: 'claude' | 'codex';
   };
+  /** S8: warning marker on exports that embed a plaintext API key. */
+  _warning?: string;
 }
 
 // Legacy v1 format (version: 1) is also accepted by parseAndValidate for backward compatibility.
@@ -45,6 +47,12 @@ export function exportProvider(provider: ApiProvider): string {
         ? { cliBackend: provider.cliBackend }
         : {}),
     },
+    // S8: explicit warning marker — the export may contain a plaintext API
+    // key; parsers ignore unknown fields, so this is metadata only, but it
+    // makes "this file has a secret in it" visible to anyone handling it.
+    ...(provider.apiKey
+      ? { _warning: 'This file contains a plaintext API key. Do not share it.' }
+      : {}),
   };
   return JSON.stringify(config, null, 2);
 }
@@ -105,11 +113,21 @@ export function parseAndValidate(
     return { ok: false, error: `API 格式无效：${apiFormat}，仅支持 anthropic 或 openai` };
   }
 
-  // apiKey
+  // apiKey — S8: redaction placeholders from exported-but-shared files must
+  // never be imported as a real key.
   if (p.apiKey !== undefined && p.apiKey !== null && typeof p.apiKey !== 'string') {
     return { ok: false, error: 'API Key 格式不正确，应为字符串' };
   }
-  const apiKey = typeof p.apiKey === 'string' ? p.apiKey.trim() : undefined;
+  const apiKey = (() => {
+    if (typeof p.apiKey !== 'string') return undefined;
+    const trimmed = p.apiKey.trim();
+    if (!trimmed) return undefined;
+    // Placeholders used by redacted exports (e.g. "***", "REDACTED", "sk-***").
+    if (/^[*xX-]+$/.test(trimmed) || trimmed === 'REDACTED' || trimmed.startsWith('***')) {
+      return undefined;
+    }
+    return trimmed;
+  })();
 
   // modelMappings
   let rawMappings: unknown[] = [];

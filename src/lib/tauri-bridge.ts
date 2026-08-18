@@ -541,6 +541,17 @@ export const bridge = {
   openInVscode: (path: string) =>
     invoke<void>('open_in_vscode', { path }),
 
+  /** B1: authorize a path the user picked in a native file dialog so the
+   *  file commands' authorized-path gate accepts it (TTL-bounded). */
+  authorizeExternalPath: (path: string) =>
+    invoke<void>('authorize_external_path', { path }),
+
+  /** B1: register the user-chosen working directory (long-lived grant, same
+   *  semantics as a session project root). Called when workingDirectory
+   *  changes so browsing/preview works before the first session spawns. */
+  registerWorkspaceRoot: (path: string) =>
+    invoke<void>('register_workspace_root', { path }),
+
   revealInFinder: (path: string) =>
     invoke<void>('reveal_in_finder', { path }),
 

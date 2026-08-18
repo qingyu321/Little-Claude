@@ -104,53 +104,60 @@ fn dir_mtime_ns(dir: &Path) -> Option<u128> {
 #[tauri::command]
 pub async fn read_file_tree(path: String, depth: Option<u32>) -> Result<Vec<FileNode>, String> {
     let max_depth = depth.unwrap_or(3).min(8);
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", path));
-    }
-    // Refuse to enumerate system-critical directories (symlinked roots too).
-    if let Ok(canon) = fs::canonicalize(dir) {
-        if is_system_dir(&canon) {
-            return Err(format!("拒绝访问系统目录: {}", path));
+    // P1 (perf): the scan is synchronous fs work — running it inline blocked
+    // a tokio worker and stalled IPC/stream events app-wide while a deep
+    // (depth 8) search scan ran. Move it to the blocking pool.
+    tokio::task::spawn_blocking(move || -> Result<Vec<FileNode>, String> {
+        let dir = Path::new(&path);
+        if !dir.is_dir() {
+            return Err(format!("Not a directory: {}", path));
         }
-    }
-    let name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
-    let mut root = FileNode {
-        name,
-        path: path.clone(),
-        is_dir: true,
-        children: None,
-    };
-    // R1: depth=1 reads (the lazy-loading pattern used by the file tree) go
-    // through an mtime-validated cache, so repeated refreshes of unchanged
-    // directories cost one stat instead of a full rescan. Deeper scans
-    // (full-tree search) bypass the cache.
-    let children = if max_depth == 1 {
-        match fs::canonicalize(dir) {
-            Ok(canon) => match dir_mtime_ns(&canon) {
-                Some(mtime) => {
-                    let cache = tree_dir_cache();
-                    match cache.get(&canon, mtime) {
-                        Some(cached) => cached.as_ref().clone(),
-                        None => {
-                            let children = read_dir_recursive(dir, 1, 1);
-                            cache.insert(canon, mtime, children.clone());
-                            children
+        // Refuse to enumerate system-critical directories (symlinked roots too).
+        if let Ok(canon) = fs::canonicalize(dir) {
+            if is_system_dir(&canon) {
+                return Err(format!("拒绝访问系统目录: {}", path));
+            }
+        }
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        let mut root = FileNode {
+            name,
+            path: path.clone(),
+            is_dir: true,
+            children: None,
+        };
+        // R1: depth=1 reads (the lazy-loading pattern used by the file tree)
+        // go through an mtime-validated cache, so repeated refreshes of
+        // unchanged directories cost one stat instead of a full rescan.
+        // Deeper scans (full-tree search) bypass the cache.
+        let children = if max_depth == 1 {
+            match fs::canonicalize(dir) {
+                Ok(canon) => match dir_mtime_ns(&canon) {
+                    Some(mtime) => {
+                        let cache = tree_dir_cache();
+                        match cache.get(&canon, mtime) {
+                            Some(cached) => cached.as_ref().clone(),
+                            None => {
+                                let children = read_dir_recursive(dir, 1, 1);
+                                cache.insert(canon, mtime, children.clone());
+                                children
+                            }
                         }
                     }
-                }
-                None => read_dir_recursive(dir, 1, 1),
-            },
-            Err(_) => read_dir_recursive(dir, 1, 1),
-        }
-    } else {
-        read_dir_recursive(dir, 1, max_depth)
-    };
-    root.children = Some(children);
-    Ok(vec![root])
+                    None => read_dir_recursive(dir, 1, 1),
+                },
+                Err(_) => read_dir_recursive(dir, 1, 1),
+            }
+        } else {
+            read_dir_recursive(dir, 1, max_depth)
+        };
+        root.children = Some(children);
+        Ok(vec![root])
+    })
+    .await
+    .map_err(|e| format!("file tree task failed: {}", e))?
 }
 
 fn read_dir_recursive(dir: &Path, current_depth: u32, max_depth: u32) -> Vec<FileNode> {
@@ -216,10 +223,70 @@ fn reject_unsafe_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Sensitive user-directory entries (relative to the user's home) that file
+/// commands must never touch even though they are not OS-system dirs: they
+/// hold credentials (SSH keys, cloud CLI tokens, git/npm/registry auth,
+/// browser login state). A renderer compromise could otherwise read them
+/// directly — the system-dir blacklist alone leaves every user-level secret
+/// in reach. Matched case-insensitively on the canonical path relative to
+/// the canonical home (a non-canonical input simply doesn't match here and
+/// is re-checked after canonicalize in safe_resolve).
+fn is_sensitive_user_dir(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Ok(home_c) = std::fs::canonicalize(&home) else {
+        return false;
+    };
+    let Ok(rel) = path.strip_prefix(&home_c) else {
+        return false;
+    };
+    let norm = rel.to_string_lossy().replace('\\', "/").to_lowercase();
+    const SENSITIVE: &[&str] = &[
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        ".netrc",
+        ".npmrc",
+        ".yarnrc.yml",
+        ".pypirc",
+        ".m2",
+        // Browser login/cookie stores under ~/.config on Linux/macOS
+        ".config/google-chrome",
+        ".config/chromium",
+        ".config/microsoft-edge",
+        // GitHub CLI / Google Cloud CLI credential stores
+        ".config/gh",
+        ".config/gcloud",
+        // H4: Windows browser credential stores (%LOCALAPPDATA% = home/AppData/Local)
+        "appdata/local/google/chrome/user data",
+        "appdata/local/microsoft/edge/user data",
+        "appdata/local/bravesoftware/brave-browser/user data",
+        // H4: editor token/session stores under %APPDATA%
+        "appdata/roaming/code",
+        "appdata/roaming/cursor",
+        // H4: macOS browser + editor credential stores and the keychain db
+        "library/application support/google/chrome",
+        "library/application support/chromium",
+        "library/application support/microsoft edge",
+        "library/application support/code",
+        "library/application support/cursor",
+        "library/keychains",
+    ];
+    SENSITIVE
+        .iter()
+        .any(|s| norm == *s || norm.starts_with(&format!("{}/", s)))
+}
+
 /// System-critical directories that file commands must never touch.
 /// Case-insensitive prefix match on '/'-normalized paths, so Windows drives
 /// and case-sensitive macOS/Linux roots are both covered.
 fn is_system_dir(path: &Path) -> bool {
+    if is_sensitive_user_dir(path) {
+        return true;
+    }
     // Strip the Windows verbatim prefix (`\\?\C:\...` / `\\.\C:\...`) that
     // fs::canonicalize returns — prefix matching against it would miss every
     // blacklist entry (`//?/C:/WINDOWS` vs `C:/WINDOWS`), letting reads like
@@ -254,6 +321,187 @@ fn is_system_dir(path: &Path) -> bool {
         "/PRIVATE",
     ];
     ROOTS.iter().any(|root| norm == *root || norm.starts_with(&format!("{}/", root)))
+}
+
+// ── B1: authorized-path gate ──────────────────────────────────────────────
+// The renderer's file commands (read/write/delete/rename/copy/...) must never
+// reach ARBITRARY user files: a compromised renderer could otherwise read
+// ~/.ssh, cloud credentials, browser cookies etc. directly. A path is
+// authorized only when it falls under one of:
+//   1. fixed whitelist roots (the app's own data + Claude/Codex config trees),
+//   2. a project root registered by start_claude_session (Rust-internal,
+//      NOT reachable from IPC — a compromised renderer cannot add roots),
+//   3. a path the user explicitly picked via a native file dialog
+//      (frontend registers it after the dialog; TTL-bounded).
+// read_file_tree / watch_directory stay open (project browsing + the A1
+// sensitive-dir blacklist already gate them).
+
+use std::time::Instant;
+
+static AUTHORIZED_PATHS: OnceLock<StdMutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+/// How long a dialog-picked path stays authorized (long enough for import /
+/// export / skin-pick flows; short enough that a stale grant expires).
+const EXTERNAL_PATH_TTL: Duration = Duration::from_secs(30 * 60);
+
+fn authorized_paths() -> &'static StdMutex<HashMap<PathBuf, Instant>> {
+    AUTHORIZED_PATHS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Register a project root (called from start_claude_session on every spawn).
+/// Rust-internal only — there is deliberately NO IPC command for this, so a
+/// compromised renderer cannot grant itself arbitrary roots.
+pub(crate) fn register_project_root(path: &Path) {
+    let Ok(canon) = fs::canonicalize(path) else {
+        return;
+    };
+    if let Ok(mut map) = authorized_paths().lock() {
+        map.insert(canon, Instant::now());
+    }
+}
+
+/// Register the user-chosen working directory (frontend calls this whenever
+/// workingDirectory changes — the user explicitly picked this folder as the
+/// workspace, so it is long-lived, same semantics as a session project root).
+/// Required so file browsing/preview works BEFORE the first message spawns a
+/// session (no session → no register_project_root). Rejects sensitive/system
+/// dirs, so a compromised renderer still cannot grant ~/.ssh etc.
+#[tauri::command]
+pub fn register_workspace_root(path: String) -> Result<(), String> {
+    reject_unsafe_path(&path)?;
+    let canon = fs::canonicalize(Path::new(&path))
+        .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
+    if is_system_dir(&canon) {
+        return Err(format!("拒绝注册系统/敏感目录为工作目录: {}", path));
+    }
+    if let Ok(mut map) = authorized_paths().lock() {
+        map.insert(canon, Instant::now());
+    }
+    Ok(())
+}
+
+/// Register a path the user picked in a native dialog (frontend calls this
+/// right after dialog.open/save returns). Rejects sensitive/system dirs so a
+/// compromised renderer cannot grant itself ~/.ssh etc. The picked file may
+/// not exist yet (save dialogs name a new file) — the nearest existing
+/// ancestor is what gets authorized.
+#[tauri::command]
+pub fn authorize_external_path(path: String) -> Result<(), String> {
+    reject_unsafe_path(&path)?;
+    let p = Path::new(&path);
+    let canon = resolve_nearest_existing(p)
+        .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
+    if is_system_dir(&canon) {
+        return Err(format!("拒绝授权系统/敏感目录: {}", path));
+    }
+    // Authorize the directory containing the picked file (or the dir itself),
+    // canonicalized so the starts_with comparison in path_authorized works.
+    let root = if canon.is_dir() {
+        fs::canonicalize(&canon).unwrap_or(canon)
+    } else {
+        match canon.parent() {
+            Some(parent) => fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+            None => canon,
+        }
+    };
+    if let Ok(mut map) = authorized_paths().lock() {
+        map.insert(root, Instant::now());
+    }
+    Ok(())
+}
+
+/// Canonicalize the nearest existing ancestor of `p` (p itself if it exists),
+/// appending the non-existent tail back — like safe_resolve's fallback, used
+/// by authorize_external_path for save-dialog targets that don't exist yet.
+fn resolve_nearest_existing(p: &Path) -> Result<std::path::PathBuf, String> {
+    if let Ok(c) = fs::canonicalize(p) {
+        return Ok(c);
+    }
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p;
+    loop {
+        let Some(parent) = cur.parent() else {
+            return Err(format!("路径不存在: {}", p.display()));
+        };
+        if parent == cur {
+            return Err(format!("路径不存在: {}", p.display()));
+        }
+        if let Some(name) = cur.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        cur = parent;
+        if cur.exists() {
+            break;
+        }
+    }
+    let mut result = fs::canonicalize(cur)
+        .map_err(|e| format!("Cannot resolve path '{}': {}", p.display(), e))?;
+    for name in suffix.iter().rev() {
+        result.push(name);
+    }
+    Ok(result)
+}
+
+/// Fixed whitelist roots — the app's own data and the Claude/Codex config
+/// trees the app legitimately manages. All compared against canonical paths.
+fn whitelist_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".claude")); // projects/jsonl, settings, skills, commands
+        roots.push(home.join(".claude.json")); // file-level auth/config
+        roots.push(home.join(".mcp.json"));
+        roots.push(home.join(".codex"));
+    }
+    if let Ok(data) = crate::safe_data_dir() {
+        roots.push(data); // providers, wallpapers, usage_log, pets, skills
+    }
+    // H4/#16: authorize ONLY the app's own temp subdir, not the whole shared
+    // temp dir — on multi-user systems %TEMP%//tmp hold other apps' files,
+    // and a compromised renderer could pre-plant or read them through the
+    // file commands. save_temp_file's fallback writes exactly here.
+    roots.push(std::env::temp_dir().join("tokenicode"));
+    roots
+}
+
+/// Convenience for other command modules (e.g. git): canonicalize and check
+/// authorization in one step. Returns false when the path doesn't resolve.
+pub(crate) fn path_is_authorized(p: &Path) -> bool {
+    let Ok(canon) = fs::canonicalize(p) else {
+        return false;
+    };
+    path_authorized(&canon)
+}
+
+/// True when the canonical path falls under a whitelist root or a registered
+/// project/external root (or is a whitelisted root itself).
+fn path_authorized(canon: &Path) -> bool {
+    // Sweep expired external grants on every check (cheap: few entries).
+    if let Ok(mut map) = authorized_paths().lock() {
+        map.retain(|_, at| at.elapsed() < EXTERNAL_PATH_TTL);
+        for root in map.keys() {
+            if canon == root || canon.starts_with(root) {
+                return true;
+            }
+        }
+    }
+    for root in whitelist_roots() {
+        let Ok(root_c) = fs::canonicalize(&root) else {
+            continue;
+        };
+        if canon == root_c || canon.starts_with(&root_c) {
+            return true;
+        }
+    }
+    false
+}
+
+/// safe_resolve + the B1 authorization gate. All sensitive file commands go
+/// through this; tree browsing keeps using safe_resolve alone.
+pub(crate) fn resolve_authorized(path: &str) -> Result<std::path::PathBuf, String> {
+    let resolved = safe_resolve(path)?;
+    if !path_authorized(&resolved) {
+        return Err(format!("拒绝访问未授权路径: {}", path));
+    }
+    Ok(resolved)
 }
 
 /// Resolve a path for file commands: canonicalize (following symlinks) and
@@ -324,9 +572,16 @@ fn check_file_size(path: &Path) -> Result<u64, String> {
 
 #[tauri::command]
 pub async fn read_file_content(path: String) -> Result<String, String> {
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     check_file_size(&resolved)?;
-    fs::read_to_string(&resolved).map_err(|e| format!("Cannot read file '{}': {}", path, e))
+    // P1 (perf): up to 10MiB of synchronous disk read — keep it off the
+    // async executor.
+    let display = path.clone();
+    tokio::task::spawn_blocking(move || {
+        fs::read_to_string(&resolved).map_err(|e| format!("Cannot read file '{}': {}", display, e))
+    })
+    .await
+    .map_err(|e| format!("file read task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -335,7 +590,11 @@ pub async fn check_file_access(path: String) -> Result<bool, String> {
     // Keep the boolean semantics callers rely on: nonexistent or inaccessible
     // paths (including system dirs) resolve to `false`, not an error.
     match fs::canonicalize(&path) {
-        Ok(p) => Ok(!is_system_dir(&p) && p.is_file()),
+        Ok(p) => {
+            // L1: also require authorization — otherwise this command is a
+            // whole-disk file-existence oracle for a compromised renderer.
+            Ok(!is_system_dir(&p) && path_authorized(&p) && p.is_file())
+        }
         Err(_) => Ok(false),
     }
 }
@@ -343,15 +602,22 @@ pub async fn check_file_access(path: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn read_file_base64(path: String) -> Result<String, String> {
     use base64::Engine;
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     check_file_size(&resolved)?;
-    let data = fs::read(&resolved).map_err(|e| format!("Cannot read file '{}': {}", path, e))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&data))
+    // P1 (perf): sync read + base64 of up to 10MiB — blocking pool.
+    let display = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let data =
+            fs::read(&resolved).map_err(|e| format!("Cannot read file '{}': {}", display, e))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&data))
+    })
+    .await
+    .map_err(|e| format!("file read task failed: {}", e))?
 }
 
 #[tauri::command]
 pub async fn write_file_content(path: String, content: String) -> Result<(), String> {
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     if let Some(parent) = resolved.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create parent directory: {}", e))?;
@@ -363,21 +629,27 @@ pub async fn write_file_content(path: String, content: String) -> Result<(), Str
 
 #[tauri::command]
 pub async fn copy_file(source: String, dest: String) -> Result<(), String> {
-    let src = safe_resolve(&source)?;
-    let dst = safe_resolve(&dest)?;
+    let src = resolve_authorized(&source)?;
+    let dst = resolve_authorized(&dest)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create parent directory: {}", e))?;
     }
-    fs::copy(&src, &dst)
-        .map_err(|e| format!("Cannot copy '{}' to '{}': {}", source, dest, e))?;
-    Ok(())
+    // P1 (perf): copies can be GB-scale — must not block the async executor.
+    let (s_disp, d_disp) = (source.clone(), dest.clone());
+    tokio::task::spawn_blocking(move || {
+        fs::copy(&src, &dst)
+            .map_err(|e| format!("Cannot copy '{}' to '{}': {}", s_disp, d_disp, e))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("file copy task failed: {}", e))?
 }
 
 #[tauri::command]
 pub async fn rename_file(old_path: String, new_path: String) -> Result<(), String> {
-    let src = safe_resolve(&old_path)?;
-    let dst = safe_resolve(&new_path)?;
+    let src = resolve_authorized(&old_path)?;
+    let dst = resolve_authorized(&new_path)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create parent directory: {}", e))?;
@@ -389,7 +661,7 @@ pub async fn rename_file(old_path: String, new_path: String) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn delete_file(path: String) -> Result<(), String> {
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     if !resolved.exists() {
         return Err(format!("路径不存在: {}", path));
     }
@@ -400,7 +672,7 @@ pub async fn delete_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn create_directory(path: String) -> Result<(), String> {
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     fs::create_dir_all(&resolved)
         .map_err(|e| format!("Cannot create directory '{}': {}", path, e))?;
     Ok(())
@@ -652,12 +924,25 @@ pub async fn unwatch_directory(
     state: State<'_, WatcherManager>,
     path: String,
 ) -> Result<(), String> {
-    let canonical = fs::canonicalize(&path)
-        .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
-    let watch_key = canonical.to_string_lossy().to_string();
-
     let mut watchers = state.watchers.lock().await;
-    watchers.remove(&watch_key);
+    match fs::canonicalize(&path) {
+        Ok(canonical) => {
+            watchers.remove(&canonical.to_string_lossy().to_string());
+        }
+        Err(_) => {
+            // #6 (bug): the watched directory was deleted (branch switch,
+            // cleanup) — canonicalize fails and the entry used to leak
+            // forever; after MAX_WATCHERS dead entries, ALL file watching
+            // died with "watcher limit reached" until a restart. Fall back
+            // to matching the raw path against the stored keys.
+            let norm = path.replace('\\', "/").to_lowercase();
+            let norm = norm.trim_end_matches('/').to_string();
+            watchers.retain(|k, _| {
+                let kn = k.replace('\\', "/").to_lowercase();
+                kn.trim_end_matches('/') != norm
+            });
+        }
+    }
     Ok(())
 }
 
@@ -665,7 +950,7 @@ pub async fn unwatch_directory(
 
 #[tauri::command]
 pub async fn get_file_size(path: String) -> Result<u64, String> {
-    let resolved = safe_resolve(&path)?;
+    let resolved = resolve_authorized(&path)?;
     let meta = fs::metadata(&resolved).map_err(|e| format!("Cannot stat '{}': {}", path, e))?;
     Ok(meta.len())
 }
@@ -688,9 +973,17 @@ pub async fn save_temp_file(
         ));
     }
     // If a working directory is provided, save inside it so Claude CLI can access the file.
-    // Falls back to system temp if cwd is not set.
+    // Falls back to system temp if cwd is not set. B1: the cwd must itself be
+    // an authorized project root (register_project_root on session spawn) —
+    // an arbitrary cwd would let a compromised renderer write attachments
+    // into any directory it picks.
     let tmp = if let Some(ref dir) = cwd {
         reject_unsafe_path(dir)?;
+        let dir_p = Path::new(dir);
+        let cwd_ok = fs::canonicalize(dir_p).map(|c| path_authorized(&c)).unwrap_or(false);
+        if !cwd_ok {
+            return Err(format!("拒绝使用未授权工作目录保存附件: {}", dir));
+        }
         let p = std::path::PathBuf::from(dir)
             .join(".tokenicode")
             .join("tmp");
@@ -807,6 +1100,41 @@ mod tests {
         assert!(safe_resolve("/private/etc/passwd").is_err());
         assert!(safe_resolve("/private/var/log/system.log").is_err());
         assert!(safe_resolve("/private/tmp/x").is_err());
+    }
+
+    #[test]
+    fn rejects_sensitive_user_dirs() {
+        // Credential-bearing user dirs are rejected whether the input is a
+        // bare path or goes through canonicalize (the canonical check inside
+        // safe_resolve is what actually fires for existing paths).
+        if let Some(home) = dirs::home_dir() {
+            for sub in [
+                ".ssh",
+                ".ssh/id_rsa",
+                ".aws",
+                ".aws/credentials",
+                ".gnupg",
+                ".gnupg/private-keys-v1.d",
+                ".kube",
+                ".kube/config",
+                ".docker",
+                ".docker/config.json",
+                ".npmrc",
+                ".yarnrc.yml",
+                ".pypirc",
+                ".m2",
+            ] {
+                let p = home.join(sub);
+                if !p.exists() {
+                    continue; // only assert on dirs that exist on this machine
+                }
+                assert!(
+                    safe_resolve(&p.to_string_lossy()).is_err(),
+                    "expected rejection for {}",
+                    p.display()
+                );
+            }
+        }
     }
 
     #[test]

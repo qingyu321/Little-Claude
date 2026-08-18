@@ -18,7 +18,7 @@ import { FileUploadChips } from './FileUploadChips';
 import { RewindPanel } from './RewindPanel';
 import { useFileAttachments } from '../../hooks/useFileAttachments';
 import { useRewind } from '../../hooks/useRewind';
-import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, formatErrorForUser } from '../../hooks/useStreamProcessor';
+import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, formatErrorForUser, markKilledStdin } from '../../hooks/useStreamProcessor';
 import { useAgentStore } from '../../stores/agentStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useT } from '../../lib/i18n';
@@ -29,6 +29,8 @@ import { useGoalStore } from '../../stores/goalStore';
 import { GoalBar } from './GoalBar';
 import { TodoDock } from './TodoDock';
 import { cleanupStreamListener, registerStreamListener } from '../../lib/stream-cleanup';
+// F2: steer 后端守卫的 toast 提示
+import { showToast } from '../shared/Toast';
 import { envFingerprint, resolveModelForProvider, resolveModelOrError, resolveThinkingLevelForProvider } from '../../lib/api-provider';
 import { useProviderStore } from '../../stores/providerStore';
 import { PROVIDER_PRESETS } from '../../lib/provider-presets';
@@ -296,10 +298,16 @@ export function InputBar() {
 
     // Restart with --resume <sessionId>
     useChatStore.getState().setActivityStatus(tabId, { phase: 'thinking' });
-    setInputSync('Execute the plan above.');
-    requestAnimationFrame(() => {
-      handleSubmitRef.current();
-    });
+    // fix14: 仅在输入框为空时写入；非空则直接发送，不动编辑器内容
+    const planDraft = getActiveTabState().inputDraft || textareaRef.current?.getText() || '';
+    if (!planDraft.trim()) {
+      setInputSync('Execute the plan above.');
+      requestAnimationFrame(() => {
+        handleSubmitRef.current();
+      });
+    } else {
+      handleSubmitRef.current('Execute the plan above.', { preserveDraft: true });
+    }
   }, [setInputSync]);
 
   // Listen for plan-execute events from PlanReviewCard and Enter shortcut
@@ -324,6 +332,9 @@ export function InputBar() {
   // Sync files → store.pendingAttachments so tab switch can persist them
   const setPendingAttachmentsStore = useChatStore((s) => s.setPendingAttachments);
   useEffect(() => {
+    // fix13: 仅在有新附件时写入——files 清空时不覆写别的 tab 的附件
+    // （切 tab 时本 effect 会以空 files 先跑一次，清空目标 tab 的存量附件）
+    if (files.length === 0) return;
     const tid = useSessionStore.getState().selectedSessionId;
     if (tid) setPendingAttachmentsStore(tid, files);
   }, [files, setPendingAttachmentsStore]);
@@ -459,7 +470,8 @@ export function InputBar() {
   }, [activePrefix]);
 
   // Ref to always point to the latest handleSubmit (avoids stale closure)
-  const handleSubmitRef = useRef<() => void>(() => {});
+  // fix14: 类型放开为可传 submitText/preserveDraft（与 handleSubmit 签名对齐）
+  const handleSubmitRef = useRef<(text?: string, opts?: { preserveDraft?: boolean }) => void>(() => {});
   // Ref to always point to the latest handleStderrLine (used by retry logic in handleStreamMessage)
   const handleStderrLineRef = useRef<(line: string, sid: string) => void>(() => {});
   /** Last non-empty stderr line — shown to user if process exits without response */
@@ -1025,6 +1037,11 @@ export function InputBar() {
       // stdinId exists when: (a) a pre-warmed process is waiting, or (b) follow-up in active session.
       const submitTabState = getActiveTabState();
       let stdinId = submitTabState.sessionMeta.stdinId;
+      // fix1: 提交时一次性快照 {tabId, stdinId, sessionId}（tabId 即上方捕获值）——
+      // 所有 await 之后一律用快照值，不再实时读活动 tab（await 期间可能被切走）
+      const snapshotStdinId = stdinId;
+      const snapshotSessionId = submitTabState.sessionMeta.sessionId;
+      const snapshotSessionOrigin = submitTabState.sessionMeta.sessionOrigin;
       let sentViaStdin = false;
 
       if (stdinId) {
@@ -1036,6 +1053,8 @@ export function InputBar() {
           console.warn('[LITTLECLAUDE] API provider config changed, killing stale session');
           bridge.killSession(stdinId).catch(() => {});
           cleanupStreamListener(stdinId);
+          // F11: kill 重建路径回收 stdinId→tab 映射（旧 id 不再拥有事件路由）
+          useSessionStore.getState().unregisterStdinTab(stdinId);
           // Keep sessionId so we attempt resume (preserving context).
           // If the resume fails due to thinking signature mismatch, the
           // stream error handler will auto-retry without resume.
@@ -1048,6 +1067,7 @@ export function InputBar() {
             console.warn(`[LITTLECLAUDE] Permission mode changed (${spawnedMode} -> ${currentMode}), killing stale session`);
             bridge.killSession(stdinId).catch(() => {});
             cleanupStreamListener(stdinId);
+            useSessionStore.getState().unregisterStdinTab(stdinId); // F11: 回收映射
             setSessionMeta(tabId, { stdinId: undefined, snapshotMode: undefined });
             stdinId = undefined;
           } else {
@@ -1057,6 +1077,7 @@ export function InputBar() {
             console.warn(`[LITTLECLAUDE] Context window mode changed (${spawnedContextMode} -> ${currentContextMode}), killing stale session`);
             bridge.killSession(stdinId).catch(() => {});
             cleanupStreamListener(stdinId);
+            useSessionStore.getState().unregisterStdinTab(stdinId); // F11: 回收映射
             setSessionMeta(tabId, { stdinId: undefined, snapshotContextWindowMode: undefined });
             stdinId = undefined;
           } else {
@@ -1070,21 +1091,12 @@ export function InputBar() {
             console.warn(`[LITTLECLAUDE] Model changed (${oldShort} → ${newShort}), killing stale session`);
             bridge.killSession(stdinId).catch(() => {});
             cleanupStreamListener(stdinId);
+            useSessionStore.getState().unregisterStdinTab(stdinId); // F11: 回收映射
             // System message already inserted by ModelSelector — no duplicate here.
             // Keep sessionId so we attempt resume (preserving context).
             setSessionMeta(tabId, { stdinId: undefined, spawnedModel: undefined, modelSwitched: true, modelSwitchPendingText: text });
-            // Clean thinking blocks from history to avoid signature mismatch on resume.
-            // Thinking signatures are model-specific; resuming with a different model
-            // causes the API to reject the request (400).
-            useChatStore.setState((state) => {
-              const tab = state.tabs.get(tabId);
-              if (!tab) return {};
-              const cleanedMessages = tab.messages.filter(m => m.type !== 'thinking');
-              if (cleanedMessages.length === tab.messages.length) return {}; // nothing to clean
-              const newTabs = new Map(state.tabs);
-              newTabs.set(tabId, { ...tab, messages: cleanedMessages });
-              return { tabs: newTabs, sessionCache: newTabs };
-            });
+            // fix6: 不再过滤 thinking 消息——保留完整历史；resume 的签名 400
+            // 已由流错误处理器的失败重试路径（自动去 resume 重试）覆盖
             stdinId = undefined;
           } else {
           // ===== Send via stdin to existing persistent process (pre-warmed or follow-up) =====
@@ -1092,7 +1104,8 @@ export function InputBar() {
             await bridge.sendStdin(stdinId, text);
             sentViaStdin = true;
             // Defensive: ensure spawnedModel is always recorded after first successful stdin send
-            if (!getActiveTabState().sessionMeta.spawnedModel) {
+            // fix1: await 之后按捕获的 tabId 读 tab，不再读活动 tab
+            if (!useChatStore.getState().getTab(tabId)?.sessionMeta.spawnedModel) {
               setSessionMeta(tabId, { spawnedModel: resolveModelForProvider(selectedModel) });
             }
           } catch (stdinErr) {
@@ -1124,7 +1137,8 @@ export function InputBar() {
         // so after a rewind (process killed, history truncated) the next
         // message would spawn a fresh context-less session instead of
         // --resume'ing the pre-rewind history.
-        const rawSessionId = getActiveTabState().sessionMeta.sessionId;
+        // fix1: 用提交时快照（上方可能有 await），不再实时读活动 tab
+        const rawSessionId = snapshotSessionId;
         let existingSessionId: string | undefined = rawSessionId
           && !rawSessionId.startsWith('desk_')
           ? rawSessionId
@@ -1132,7 +1146,7 @@ export function InputBar() {
 
         // Cross-backend transition: native resume only works within the same backend.
         // Claude session IDs are not valid Codex thread IDs, and vice versa.
-        const sessionOrigin = getActiveTabState().sessionMeta.sessionOrigin;
+        const sessionOrigin = snapshotSessionOrigin; // fix1: 快照值
         if (existingSessionId) {
           const currentBackend = useSettingsStore.getState().cliBackend;
           if (sessionOrigin && sessionOrigin !== currentBackend) {
@@ -1157,11 +1171,12 @@ export function InputBar() {
               // Mirrors the Claude→Codex text-injection pattern (formatJsonlAsText above).
               // This is simpler and more reliable than the --resume + JSONL mechanism.
               try {
-                const tab = getActiveTabState();
-                const historyContext = formatCodexMessagesAsText(tab.messages, workingDirectory);
+                // fix1: 按捕获的 tabId 读历史（此处之前可能已发生 await）
+                const tabMessages = useChatStore.getState().getTab(tabId)?.messages ?? [];
+                const historyContext = formatCodexMessagesAsText(tabMessages, workingDirectory);
                 if (historyContext) {
                   text = historyContext + text;
-                  debugLog('session', 'Injected Codex→Claude history, messages=', tab.messages.length);
+                  debugLog('session', 'Injected Codex→Claude history, messages=', tabMessages.length);
                 } else {
                   debugLog('session', 'No completed Codex turns to inject, starting fresh Claude session');
                 }
@@ -1176,7 +1191,8 @@ export function InputBar() {
 
         // TK-329 fix: only clean up THIS tab's old stdinId listener, not the global singleton.
         // The old __claudeUnlisten global could kill another tab's active listener.
-        const oldStdinId = getActiveTabState().sessionMeta.stdinId;
+        // fix1: 用提交时快照的 stdinId（await 之后活动 tab 可能已变）
+        const oldStdinId = snapshotStdinId;
         if (oldStdinId) {
           cleanupStreamListener(oldStdinId);
           // Also flush any pending stream buffer for the old session
@@ -1191,11 +1207,20 @@ export function InputBar() {
         sessionStdinId = preGeneratedId;
 
         // Reset guards for the new session
-        exitPlanModeSeenRef.current = false;
+        // fix15: per-tab map 只删当前 tab 的键，不再整体置 false 清掉别的 tab
+        {
+          const seen = exitPlanModeSeenRef.current;
+          if (seen && typeof seen === 'object') {
+            delete seen[tabId];
+          } else {
+            exitPlanModeSeenRef.current = false;
+          }
+        }
 
         // TK-329 fix: register stdinId → tabId mapping BEFORE listeners,
         // so events arriving immediately after spawn can be routed correctly.
-        const earlyTabId = useSessionStore.getState().selectedSessionId;
+        // fix1: 一律用捕获的 tabId，不再实时读 selectedSessionId
+        const earlyTabId = tabId;
         if (earlyTabId) {
           useSessionStore.getState().registerStdinTab(preGeneratedId, earlyTabId);
           // B3: the auto-compact fired flag is per-tab (sessionMeta) — reset on
@@ -1465,6 +1490,13 @@ export function InputBar() {
     if (!tabId) return;
     const meta = getActiveTabState().sessionMeta;
     if (!meta.stdinId) return;
+    // F2: 对齐 handleSubmit 的守卫——steer 仅 deepseek 后端有效；claude/codex
+    // 下裸写 stdin 会被 CLI 丢弃（消息从队列消失显示已发送但永远收不到），
+    // 其他后端保持排队并 toast 提示。
+    if (useSettingsStore.getState().cliBackend !== 'deepseek') {
+      showToast(t('input.steerUnsupported'), 'info');
+      return;
+    }
     useChatStore.getState().removePendingMessage(tabId, index);
     addMessage(tabId, {
       id: generateMessageId(),
@@ -1479,7 +1511,7 @@ export function InputBar() {
       console.warn('[queue-dock] steer failed:', err);
       useChatStore.getState().addPendingMessage(tabId, text);
     });
-  }, []);
+  }, [t]);
   const hasLiveStdin = useActiveTab((t) => !!t.sessionMeta.stdinId);
   useEffect(() => {
     if (sessionStatus === 'completed' && !hasLiveStdin && pendingCount > 0) {
@@ -1964,6 +1996,9 @@ export function InputBar() {
                   }
                 }
                 if (sid) {
+                  // fix11: 登记被杀的 stdinId——迟到的 process_exit 按 stale 处理，
+                  // 不把 completed 回滚成 idle、不误发"任务完成"通知
+                  markKilledStdin(sid);
                   await bridge.killSession(sid).catch(() => {});
                   // Don't unlisten immediately — let process_exit fire naturally to clean up.
                   // The listener will be replaced when a new session spawns (line ~788).

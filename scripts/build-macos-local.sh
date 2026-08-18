@@ -122,7 +122,7 @@ done
 echo ""
 echo "============================================"
 echo " Build complete!"
-echo " Draft Release: https://github.com/mistydew/tokenicode-deepseek-alpha/releases/tag/$TAG"
+echo " Draft Release: https://github.com/qingyu321/Little-Claude/releases/tag/$TAG"
 echo ""
 echo " Next steps:"
 echo "   1. Verify artifacts on the release page"

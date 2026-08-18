@@ -36,6 +36,15 @@ function computeChangedPrefixes(changed: Map<string, FileChangeKind>): Set<strin
   return set;
 }
 
+// F19: changedFiles 上限 500 条——超出丢最旧（Map 迭代序≈插入序）。
+// 无上限时长跑会话的 watcher 事件会让 Map 与 changedPrefixes 无限增长。
+const MAX_CHANGED_FILES = 500;
+
+// F17: 大文件护栏——>1MB 的文本文件只保留前 512KB 供预览/编辑，
+// FilePreview 提供"加载完整文件"入口（loadFullFileContent）。
+const LARGE_FILE_BYTES = 1024 * 1024;
+const LARGE_FILE_PREVIEW_CHARS = 512 * 1024;
+
 // ── R1: lazy tree loading helpers ────────────────────────────────────
 // The tree is loaded one level at a time (depth=1); expanding a directory
 // fetches its direct children on demand. Loaded children live inside the tree
@@ -119,6 +128,10 @@ interface FileState {
   /** Full-depth tree loaded on demand for search results (depth=1 lazy tree can't be searched) */
   searchTree: FileNode[];
   isSearchLoading: boolean;
+  /** F13: searchTree 已过期（结构变更事件只打标，不重建）——下次真正搜索时重建 */
+  searchTreeStale: boolean;
+  /** F17: 当前预览文本是大文件截断后的前 512KB（true 时 FilePreview 显示"加载完整文件"） */
+  fileTruncated: boolean;
 
   // Directory missing detection
   directoryMissing: boolean;
@@ -135,7 +148,11 @@ interface FileState {
   markStale: (paths: Iterable<string>) => void;
   /** Load the full-depth tree used for search results. */
   loadSearchTree: () => Promise<void>;
+  /** F13: 清空搜索树（查询清空时调用，释放全深树内存） */
+  clearSearchTree: () => void;
   selectFile: (path: string) => Promise<void>;
+  /** F17: 大文件截断后按需加载完整内容（"加载完整文件"按钮） */
+  loadFullFileContent: () => Promise<void>;
   clearSelection: () => void;
   closePreview: () => void;
   setPreviewMode: (mode: PreviewMode) => void;
@@ -179,6 +196,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
   childrenVersion: 0,
   searchTree: [],
   isSearchLoading: false,
+  searchTreeStale: false,
+  fileTruncated: false,
   directoryMissing: false,
   isDragOverTree: false,
 
@@ -202,7 +221,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
           tree, isLoading: false, changedFiles: new Map(), changedPrefixes: new Set(),
           directoryMissing: false,
           staleDirs: new Set(), childrenVersion: get().childrenVersion + 1,
-          searchTree: [], isSearchLoading: false,
+          searchTree: [], isSearchLoading: false, searchTreeStale: false,
         });
       }
     } catch (err) {
@@ -227,7 +246,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
         set({
           tree: fresh, rootPath: overridePath,
           staleDirs: new Set(), childrenVersion: get().childrenVersion + 1,
-          searchTree: [], isSearchLoading: false,
+          searchTree: [], isSearchLoading: false, searchTreeStale: false,
         });
         return;
       }
@@ -239,8 +258,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
       collectDirPaths(merged, staleDirs);
       staleDirs.delete(dir); // root's children were just refreshed
       set({ tree: merged, staleDirs, childrenVersion: get().childrenVersion + 1 });
-      // Keep search results current if a search tree is loaded
-      if (get().searchTree.length > 0) get().loadSearchTree();
+      // F13: 搜索树重扫链掐断——结构变更只标记过期，不再同步 loadSearchTree
+      // （watcher flush / 工具触发的 refreshTree 每次都全深重扫 8 层树，
+      // 下次用户真正输入搜索时再重建）
+      if (get().searchTree.length > 0) set({ searchTreeStale: true });
     } catch (err) {
       if (get().rootPath === dir && String(err).includes('does not exist')) {
         set({ directoryMissing: true, tree: [] });
@@ -297,11 +318,15 @@ export const useFileStore = create<FileState>()((set, get) => ({
     set({ isSearchLoading: true });
     try {
       const tree = await bridge.readFileTree(root, 8);
-      if (get().rootPath === root) set({ searchTree: tree, isSearchLoading: false });
+      // F13: 重建完成即解除过期标记
+      if (get().rootPath === root) set({ searchTree: tree, isSearchLoading: false, searchTreeStale: false });
     } catch {
       if (get().rootPath === root) set({ isSearchLoading: false });
     }
   },
+
+  // F13: 查询清空即清 searchTree（全深树常驻内存没有意义）
+  clearSearchTree: () => set({ searchTree: [], isSearchLoading: false, searchTreeStale: false }),
 
   selectFile: async (path: string) => {
     const { selectedFile, editContent, fileContent } = get();
@@ -332,32 +357,39 @@ export const useFileStore = create<FileState>()((set, get) => ({
         try {
           const dataUrl = await bridge.readFileBase64(path);
           if (get().selectedFile === path) {
-            set({ fileContent: dataUrl, isLoadingContent: false });
+            set({ fileContent: dataUrl, isLoadingContent: false, fileTruncated: false });
           }
         } catch {
           if (get().selectedFile === path) {
-            set({ fileContent: null, isLoadingContent: false });
+            set({ fileContent: null, isLoadingContent: false, fileTruncated: false });
           }
         }
       } else {
         try {
+          // F17: 先取文件大小（失败按 0，不阻塞读取）决定是否截断
+          const fileSize = await bridge.getFileSize(path).catch(() => 0);
           const content = await bridge.readFileContent(path);
           // Only update if selectedFile hasn't changed during the async call
           if (get().selectedFile === path) {
-            set({ fileContent: content, isLoadingContent: false });
+            if (fileSize > LARGE_FILE_BYTES && content.length > LARGE_FILE_PREVIEW_CHARS) {
+              // F17: >1MB 只保留前 512KB，"加载完整文件"按钮按需补全
+              set({ fileContent: content.slice(0, LARGE_FILE_PREVIEW_CHARS), isLoadingContent: false, fileTruncated: true });
+            } else {
+              set({ fileContent: content, isLoadingContent: false, fileTruncated: false });
+            }
           }
         } catch {
           if (get().selectedFile === path) {
-            set({ fileContent: '// Error loading file', isLoadingContent: false });
+            set({ fileContent: '// Error loading file', isLoadingContent: false, fileTruncated: false });
           }
         }
       }
     }
   },
 
-  clearSelection: () => set({ selectedFile: null, fileContent: null, isLoadingContent: false, editContent: null }),
+  clearSelection: () => set({ selectedFile: null, fileContent: null, isLoadingContent: false, editContent: null, fileTruncated: false }),
 
-  closePreview: () => set({ selectedFile: null, fileContent: null, isLoadingContent: false, editContent: null }),
+  closePreview: () => set({ selectedFile: null, fileContent: null, isLoadingContent: false, editContent: null, fileTruncated: false }),
 
   setPreviewMode: (mode: PreviewMode) => {
     const state = get();
@@ -421,8 +453,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
         const dataUrl = await bridge.readFileBase64(path);
         if (get().selectedFile === path) set({ fileContent: dataUrl });
       } else {
+        // F17: 维持当前截断状态——仍处于截断态则继续截断，已加载完整文件则保持完整
+        const wasTruncated = get().fileTruncated;
+        const fileSize = await bridge.getFileSize(path).catch(() => 0);
         const content = await bridge.readFileContent(path);
-        if (get().selectedFile === path) set({ fileContent: content });
+        if (get().selectedFile === path) {
+          const keepTruncated = wasTruncated && fileSize > LARGE_FILE_BYTES && content.length > LARGE_FILE_PREVIEW_CHARS;
+          set({ fileContent: keepTruncated ? content.slice(0, LARGE_FILE_PREVIEW_CHARS) : content });
+        }
       }
       // A8: reload syncs the preview with disk — clear the stale 'modified'
       // marker so the FilePreview auto-reload effect stops re-firing on every
@@ -436,6 +474,21 @@ export const useFileStore = create<FileState>()((set, get) => ({
       }
     } catch {
       // Silently fail — keep existing content
+    }
+  },
+
+  // F17: "加载完整文件" —— 解除截断，读取并展示完整内容
+  loadFullFileContent: async () => {
+    const path = get().selectedFile;
+    if (!path || !get().fileTruncated) return;
+    set({ isLoadingContent: true });
+    try {
+      const content = await bridge.readFileContent(path);
+      if (get().selectedFile === path) {
+        set({ fileContent: content, isLoadingContent: false, fileTruncated: false });
+      }
+    } catch {
+      if (get().selectedFile === path) set({ isLoadingContent: false });
     }
   },
 
@@ -456,6 +509,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
           if (k !== 'modified') stalePaths.push(p);
         }
         _pendingChanges.clear();
+        // F19: 上限 500 条，超出丢最旧（防长跑会话无界增长）
+        while (next.size > MAX_CHANGED_FILES) {
+          const oldest = next.keys().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
         set({ changedFiles: next, changedPrefixes: computeChangedPrefixes(next) });
         if (stalePaths.length > 0) get().markStale(stalePaths);
       });

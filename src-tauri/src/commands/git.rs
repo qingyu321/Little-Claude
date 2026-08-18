@@ -76,6 +76,38 @@ pub async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, S
     if !cwd_path.is_dir() {
         return Err(format!("Working directory does not exist: {}", cwd));
     }
+    // M8 (security): cwd must be an authorized root (registered project /
+    // workspace / dialog pick) — a compromised renderer must not be able to
+    // run git inside ANY repository on the machine.
+    if !crate::commands::files::path_is_authorized(cwd_path) {
+        return Err(format!("Git is not authorized in this directory: {}", cwd));
+    }
+
+    // #14 (security): destructive variants get a second-level allowlist.
+    if subcmd == "stash" {
+        let variant = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        if !matches!(variant, "list" | "show") {
+            return Err("Only `git stash list/show` is allowed".to_string());
+        }
+    }
+    if subcmd == "checkout" {
+        for arg in &args[1..] {
+            let lower = arg.to_lowercase();
+            if lower == "-f" || lower == "--force" || lower == "-b" || lower.starts_with("-b") {
+                return Err(format!("Git checkout flag '{}' not allowed", arg));
+            }
+            // R10 (security): the pathspec-restore form (`checkout <ref> -- <paths>`)
+            // runs the repo's filter.*.smudge/clean drivers on every restored
+            // file — a malicious .git/config + .gitattributes turns that into
+            // arbitrary command execution. Only branch/commit-level checkout
+            // stays allowed.
+            if arg == "--" {
+                return Err(
+                    "Git checkout with pathspec restore is not allowed".to_string(),
+                );
+            }
+        }
+    }
 
     // P1-1: Reject dangerous git flags that could enable command execution or
     // arbitrary file reads/writes.
@@ -120,36 +152,80 @@ pub async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, S
     #[cfg(not(target_os = "macos"))]
     let git_bin = "git";
 
+    // #14/M8 (security): a malicious repo's .git/config can define
+    // diff.external / textconv drivers / fsmonitor / hooks that EXECUTE when
+    // status/diff/show/checkout run. Neutralize the config-driven vectors:
+    // flags disable external diff + textconv; env overrides (command-line
+    // precedence, beat repo config) kill fsmonitor and redirect hooks to a
+    // nonexistent dir. GIT_CONFIG_NOSYSTEM also skips system-level config.
+    let mut exec_args: Vec<String> = Vec::with_capacity(args.len() + 2);
+    exec_args.push(args[0].clone());
+    if matches!(subcmd, "diff" | "show" | "log") {
+        exec_args.push("--no-ext-diff".to_string());
+        exec_args.push("--no-textconv".to_string());
+    }
+    exec_args.extend(args[1..].iter().cloned());
+
     let mut cmd = Command::new(git_bin);
-    cmd.args(&args).current_dir(&cwd);
+    cmd.args(&exec_args).current_dir(&cwd);
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_COUNT", "2");
+    cmd.env("GIT_CONFIG_KEY_0", "core.fsmonitor");
+    cmd.env("GIT_CONFIG_VALUE_0", "false");
+    cmd.env("GIT_CONFIG_KEY_1", "core.hooksPath");
+    cmd.env(
+        "GIT_CONFIG_VALUE_1",
+        std::env::temp_dir()
+            .join("tokenicode")
+            .join("no-hooks")
+            .to_string_lossy()
+            .as_ref(),
+    );
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
-    // timeout() 只放弃等待 future，不会终止已 spawn 的子进程——output()
-    // 默认 kill_on_drop=false，超时后 git 会继续在后台运行（网络、凭证
-    // 提示等场景会残留进程并锁住工作目录）。kill_on_drop(true) 确保超时
-    // 后子进程被终止，UI 不会被 hung git 阻塞。
+    // timeout() 只放弃等待 future，不会终止已 spawn 的子进程——
+    // kill_on_drop(true) 确保超时后子进程被终止，UI 不会被 hung git 阻塞。
     cmd.kill_on_drop(true);
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| format!("git {} timed out after 60s", subcmd))?
-    .map_err(|e| format!("Failed to run git: {}", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // #13 (perf/safety): output() buffered the ENTIRE stdout before the 4MB
+    // cap applied — a multi-GB diff was read fully into memory first. Read
+    // through take() so the cap is enforced WHILE streaming; stderr is
+    // drained concurrently (bounded) so neither pipe can deadlock us.
+    const MAX_STDOUT_BYTES: u64 = 4 * 1024 * 1024;
+    const MAX_STDERR_BYTES: u64 = 1024 * 1024;
+    use tokio::io::AsyncReadExt;
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+    let mut stdout_r = child.stdout.take().expect("stdout piped");
+    let mut stderr_r = child.stderr.take().expect("stderr piped");
+    let mut out_buf: Vec<u8> = Vec::new();
+    let mut err_buf: Vec<u8> = Vec::new();
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let mut out_limited = (&mut stdout_r).take(MAX_STDOUT_BYTES + 1);
+        let mut err_limited = (&mut stderr_r).take(MAX_STDERR_BYTES + 1);
+        tokio::join!(
+            out_limited.read_to_end(&mut out_buf),
+            err_limited.read_to_end(&mut err_buf),
+            child.wait()
+        )
+    })
+    .await
+    .map_err(|_| format!("git {} timed out after 60s", subcmd))?;
+    let (_, _, wait_res) = read_result;
+    let status = wait_res.map_err(|e| format!("Failed to wait for git: {}", e))?;
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&err_buf).to_string();
         return Err(format!("git {} failed: {}", subcmd, stderr));
     }
 
-    // L7: stdout 无大小上限——巨型输出（如仓库内超大文件 diff）会撑爆内存。
-    // 按 4MB 截断（截断发生在 UTF-8 安全边界，由 from_utf8_lossy 兜底）。
-    const MAX_STDOUT_BYTES: usize = 4 * 1024 * 1024;
-    let stdout_capped: Vec<u8> = output
-        .stdout
-        .iter()
-        .take(MAX_STDOUT_BYTES)
-        .cloned()
-        .collect();
-    Ok(String::from_utf8_lossy(&stdout_capped).to_string())
+    // L7: cap applied during the read above; trim the +1 overflow byte here
+    // (from_utf8_lossy tolerates cutting mid-char).
+    if out_buf.len() > MAX_STDOUT_BYTES as usize {
+        out_buf.truncate(MAX_STDOUT_BYTES as usize);
+    }
+    Ok(String::from_utf8_lossy(&out_buf).to_string())
 }

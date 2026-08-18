@@ -23,6 +23,32 @@ fn usage_u64(usage: &Value, key: &str) -> u64 {
     usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
+/// Full-input-token semantics shared with the frontend's
+/// `semanticContextTokens` (src/lib/context-tokens.ts). The two endpoint
+/// families report input_tokens differently:
+///  - Anthropic official: input_tokens is the UNCACHED remainder — full
+///    context = input + cacheRead + cacheCreation.
+///  - DeepSeek / OpenAI-compatible endpoints (incl. this app's OpenAI→
+///    Anthropic conversion proxy and the DSH backend): input_tokens is the
+///    FULL context, ALREADY including cache hits/writes. Verified on 96/96
+///    usage-log records (5 sessions): input == cache_read + cache_creation
+///    holds exactly, so summing the three fields double-counts (~140K shown
+///    for a real ~70K context).
+/// Detection from the numbers: when the cached share is non-zero and input
+/// alone covers it, input IS the full context.
+fn semantic_full_input(input: u64, cache: u64) -> u64 {
+    if cache > 0 && input >= cache {
+        input
+    } else {
+        input + cache
+    }
+}
+
+/// Total tokens for one turn under the semantic rule: full input + output.
+fn semantic_total(input: u64, cache: u64, output: u64) -> u64 {
+    semantic_full_input(input, cache) + output
+}
+
 fn cache_creation_tokens(usage: &Value) -> u64 {
     let top_level = usage_u64(usage, "cache_creation_input_tokens");
     let nested = usage
@@ -167,6 +193,7 @@ fn merge_usage_log_into(
     total_input: &mut u64,
     total_output: &mut u64,
     total_cache: &mut u64,
+    total_semantic: &mut u64,
     message_count: &mut u64,
 ) {
     use std::io::BufRead as _;
@@ -206,7 +233,11 @@ fn merge_usage_log_into(
         let cache_read = usage_u64(&value, "cache_read_tokens");
         let cache_creation = usage_u64(&value, "cache_creation_tokens");
         let cache_tokens = cache_read + cache_creation;
-        let total_tokens = input_tokens + output_tokens + cache_tokens;
+        // S-sem: DeepSeek/OpenAI-compat endpoints report input_tokens already
+        // containing the cached share — summing all three double-counts.
+        // The totals/daily/model aggregates use the semantic rule; the
+        // input/output/cache detail columns keep their raw values.
+        let total_tokens = semantic_total(input_tokens, cache_tokens, output_tokens);
         if total_tokens == 0 {
             continue;
         }
@@ -228,6 +259,9 @@ fn merge_usage_log_into(
         *total_input += add_input;
         *total_output += add_output;
         *total_cache += add_cache;
+        // Semantic total of what THIS record contributes (cache double-count
+        // removed for DeepSeek-style records).
+        *total_semantic += semantic_total(add_input, add_cache, add_output);
         if add_msg {
             *message_count += 1;
         }
@@ -247,7 +281,7 @@ fn merge_usage_log_into(
         entry.input_tokens += add_input;
         entry.output_tokens += add_output;
         entry.cache_tokens += add_cache;
-        entry.total_tokens += add_input + add_output + add_cache;
+        entry.total_tokens += semantic_total(add_input, add_cache, add_output);
         if add_msg {
             entry.message_count += 1;
         }
@@ -260,7 +294,7 @@ fn merge_usage_log_into(
                         model: model.to_string(),
                         ..Default::default()
                     });
-            model_entry.total_tokens += add_input + add_output + add_cache;
+            model_entry.total_tokens += semantic_total(add_input, add_cache, add_output);
             if add_msg {
                 model_entry.message_count += 1;
             }
@@ -268,10 +302,231 @@ fn merge_usage_log_into(
     }
 }
 
+// ── DSH usage sync ────────────────────────────────────────────────────────
+// DSH-GUI-direct sessions never pass through the Little Claude frontend, so
+// their usage never reaches usage_log automatically. Every get_profile_stats
+// run therefore scans ~/.dsh/sessions/**/session.jsonl.zstd (multi-frame
+// zstd, one frame per append) for assistant/message usage records and appends
+// any unseen message ids — profile numbers keep moving even for sessions
+// started outside Little Claude. Files whose (mtime, size) are unchanged
+// since the last sync are skipped (incremental).
+
+static DSH_SYNC_STATE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (u128, u64)>>,
+> = std::sync::OnceLock::new();
+
+fn dsh_sync_state() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, (u128, u64)>> {
+    DSH_SYNC_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Decode one DSH session file (multi-frame zstd) and return per-assistant-
+/// message usage rows: (message_id, input, output, cache_read, cache_creation,
+/// model, unix_secs). A file being appended to right now may end in a partial
+/// frame — frames already fully written are kept, only the torn tail is lost
+/// (it will be picked up on the next sync once the file's mtime changes).
+fn decode_dsh_session(
+    path: &std::path::Path,
+) -> Result<Vec<(String, u64, u64, u64, u64, String, i64)>, String> {
+    use std::io::{BufRead, Read};
+
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    // DSH appends one zstd FRAME per write; ruzstd's Read impl decodes a
+    // single frame per StreamingDecoder, so loop frame-by-frame until the
+    // underlying reader is exhausted.
+    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let mut decoder = match ruzstd::StreamingDecoder::new(&mut reader) {
+            Ok(d) => d,
+            Err(_) => break, // torn tail / corrupt frame — keep what we have
+        };
+        let mut chunk = [0u8; 128 * 1024];
+        loop {
+            match decoder.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => break, // frame error mid-way — keep what we have
+            }
+        }
+        let remaining = match reader.fill_buf() {
+            Ok(r) => r.to_vec(),
+            Err(_) => break,
+        };
+        if remaining.is_empty() {
+            break; // no more frames
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant/message") {
+            continue;
+        }
+        let data = v.get("data").cloned().unwrap_or_default();
+        let Some(mid) = data
+            .pointer("/message/id")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+        else {
+            continue;
+        };
+        let Some(usage) = data.get("usage").filter(|u| u.is_object()) else {
+            continue;
+        };
+        let inp = usage.get("inputTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        let out = usage.get("outputTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        let cr = usage.get("cacheReadTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        let cc = usage.get("cacheCreationTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        if inp + out + cr + cc == 0 {
+            continue;
+        }
+        let model = data
+            .pointer("/message/source/model")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ts = v
+            .get("time")
+            .and_then(|x| x.as_u64())
+            .map(|t| (t / 1000) as i64)
+            .unwrap_or(0);
+        rows.push((mid, inp, out, cr, cc, model, ts));
+    }
+    Ok(rows)
+}
+
+/// Scan all DSH sessions and append unseen usage records to usage_log.
+/// Returns the number of records added. Incremental via (mtime, size) cache.
+fn sync_dsh_usage_impl() -> usize {
+    let Some(home) = dirs::home_dir() else {
+        return 0;
+    };
+    let root = home.join(".dsh").join("sessions");
+    if !root.is_dir() {
+        return 0;
+    }
+
+    // Existing message ids (dedup key).
+    let mut seen: HashSet<String> = HashSet::new();
+    let log_path = tokenicode_usage_log_path();
+    if let Ok(file) = std::fs::File::open(&log_path) {
+        use std::io::BufRead as _;
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if let Some(mid) = v.get("message_id").and_then(|x| x.as_str()) {
+                    seen.insert(mid.to_string());
+                }
+            }
+        }
+    }
+
+    // Walk sessions tree for session.jsonl.zstd files.
+    let mut additions: Vec<String> = Vec::new();
+    let mut new_state: HashMap<std::path::PathBuf, (u128, u64)> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.file_name().and_then(|n| n.to_str()) != Some("session.jsonl.zstd") {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&p) else {
+                continue;
+            };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let size = meta.len();
+            // Incremental: skip unchanged files (keep them in the new state).
+            if let Ok(guard) = dsh_sync_state().lock() {
+                if guard.get(&p) == Some(&(mtime, size)) {
+                    new_state.insert(p.clone(), (mtime, size));
+                    continue;
+                }
+            }
+            let rows = match decode_dsh_session(&p) {
+                Ok(r) => r,
+                Err(_) => {
+                    // Partial frame (session being written right now) — skip.
+                    continue;
+                }
+            };
+            let session_id = p
+                .parent()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            for (mid, inp, out, cr, cc, model, ts) in rows {
+                if mid.is_empty() || !seen.insert(mid.clone()) {
+                    continue;
+                }
+                let rec = serde_json::json!({
+                    "session_id": session_id,
+                    "message_id": mid,
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "cache_read_tokens": cr,
+                    "cache_creation_tokens": cc,
+                    "model": model,
+                    "timestamp": ts.to_string(),
+                });
+                additions.push(rec.to_string());
+            }
+            new_state.insert(p.clone(), (mtime, size));
+        }
+    }
+
+    if !additions.is_empty() {
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            use std::io::Write as _;
+            for line in &additions {
+                let _ = writeln!(file, "{}", line);
+            }
+        }
+    }
+    if let Ok(mut guard) = dsh_sync_state().lock() {
+        *guard = new_state;
+    }
+    additions.len()
+}
+
+#[tauri::command]
+pub fn sync_dsh_usage() -> Result<usize, String> {
+    Ok(sync_dsh_usage_impl())
+}
+
 #[tauri::command]
 pub async fn get_profile_stats() -> Result<Value, String> {
     let home = dirs::home_dir().ok_or("Cannot find home dir")?;
     let claude_dir = home.join(".claude").join("projects");
+    // DSH-GUI-direct sessions: sync their usage into usage_log first so the
+    // stats below include everything (incremental, cheap when unchanged).
+    // #17 (perf): the sync itself walks ~/.dsh/sessions + decodes zstd —
+    // it must not run on the async executor either.
+    tokio::task::spawn_blocking(sync_dsh_usage_impl)
+        .await
+        .map_err(|e| format!("DSH usage sync task failed: {}", e))?;
     if !claude_dir.exists() {
         return Ok(serde_json::json!({
             "totalInputTokens": 0u64,
@@ -352,6 +607,13 @@ fn scan_jsonl_file(path: &std::path::Path, msgs: &mut HashMap<String, ParsedAssi
     };
     let reader = std::io::BufReader::new(file);
     for line in reader.lines().map_while(Result::ok) {
+        // Perf #1: cheap substring prefilter BEFORE full JSON parsing — in a
+        // typical session jsonl the assistant rows are a small minority and
+        // from_str on every line (user/tool/system/summary...) dominated the
+        // scan cost. Both compact and pretty key spellings covered.
+        if !line.contains("\"type\":\"assistant\"") && !line.contains("\"type\": \"assistant\"") {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -424,6 +686,10 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
     let mut total_input = 0u64;
     let mut total_output = 0u64;
     let mut total_cache = 0u64;
+    // S-sem: semantic total (cache double-count removed for DeepSeek-style
+    // records) — this is what totalTokens / peakDayTokens expose. The
+    // input/output/cache detail columns keep their raw values.
+    let mut total_semantic = 0u64;
     let mut message_count = 0u64;
     // Turn-level uuids (== the `msg.uuid` the frontend persists) for assistant
     // messages the JSONL scan already counted. Used to suppress those turns in
@@ -450,7 +716,12 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
     collect_jsonl_files_recursive(&claude_dir, &mut counted_sessions, &mut msgs);
 
     for msg in msgs.values() {
-        let total_tokens = msg.input_tokens + msg.output_tokens + msg.cache_tokens;
+        // S-sem: DeepSeek/OpenAI-compat endpoints (incl. this app's proxy)
+        // report input_tokens already containing the cached share, so the
+        // naive input + cache + output sum double-counts cache (~2x on real
+        // DeepSeek sessions — the frontend's semanticContextTokens already
+        // handles this for the Ctx bar; the profile aggregation must match).
+        let total_tokens = semantic_total(msg.input_tokens, msg.cache_tokens, msg.output_tokens);
         if total_tokens == 0 {
             continue;
         }
@@ -478,6 +749,7 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
         total_input += msg.input_tokens;
         total_output += msg.output_tokens;
         total_cache += msg.cache_tokens;
+        total_semantic += total_tokens;
         message_count += 1;
 
         let date = msg
@@ -522,6 +794,7 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
         &mut total_input,
         &mut total_output,
         &mut total_cache,
+        &mut total_semantic,
         &mut message_count,
     );
 
@@ -541,7 +814,7 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
         "totalInputTokens": total_input,
         "totalOutputTokens": total_output,
         "totalCacheTokens": total_cache,
-        "totalTokens": total_input + total_output + total_cache,
+        "totalTokens": total_semantic,
         "sessionCount": counted_sessions.len() as u64,
         "messageCount": message_count,
         "activeDays": daily_values.iter().filter(|d| d.date != "unknown").count() as u64,
@@ -553,7 +826,55 @@ fn scan_profile_stats(claude_dir: &std::path::Path) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::local_date_from_timestamp;
+    use super::{decode_dsh_session, local_date_from_timestamp, semantic_total, sync_dsh_usage_impl};
+
+    /// Local-machine verification: decodes a REAL multi-frame DSH session
+    /// file (ignored on CI — requires ~/.dsh/sessions on this machine).
+    #[test]
+    #[ignore]
+    fn decode_real_dsh_session_files() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let root = home.join(".dsh").join("sessions");
+        if !root.is_dir() {
+            return;
+        }
+        let mut total_rows = 0usize;
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.file_name().and_then(|n| n.to_str()) != Some("session.jsonl.zstd") {
+                    continue;
+                }
+                match decode_dsh_session(&p) {
+                    Ok(rows) => {
+                        eprintln!("decoded {} rows from {}", rows.len(), p.display());
+                        total_rows += rows.len();
+                    }
+                    Err(e) => panic!("decode failed for {}: {}", p.display(), e),
+                }
+            }
+        }
+        assert!(total_rows > 0, "no session files decoded");
+    }
+
+    #[test]
+    fn sync_dsh_usage_is_idempotent() {
+        // Running twice must not duplicate records (message_id dedup). Safe to
+        // call on any machine: no ~/.dsh → 0 additions both times.
+        let first = sync_dsh_usage_impl();
+        let second = sync_dsh_usage_impl();
+        assert!(second == 0 || second <= first, "second sync added records");
+    }
 
     #[test]
     fn rfc3339_utc_is_bucketed_to_local_date() {
@@ -571,5 +892,42 @@ mod tests {
     fn garbage_falls_back_to_raw_prefix() {
         assert_eq!(local_date_from_timestamp("not-a-timestamp"), "not-a-time");
         assert_eq!(local_date_from_timestamp(""), "unknown");
+    }
+
+    // ── S-sem: DeepSeek-style usage must not double-count cache ─────────
+
+    #[test]
+    fn deepseek_input_includes_cache_so_total_is_input_plus_output() {
+        // Verified real shape: input == cache_read + cache_creation exactly.
+        // Naive sum = 70_000 + 69_000 + 1_000 + 500 = 140_500 (2x inflated);
+        // semantic = 70_000 + 500 = 70_500.
+        assert_eq!(semantic_total(70_000, 70_000, 500), 70_500);
+    }
+
+    #[test]
+    fn anthropic_input_is_uncached_so_cache_is_added() {
+        // Anthropic official: input is the uncached remainder, cache separate.
+        assert_eq!(semantic_total(6, 85_163, 900), 86_069);
+    }
+
+    #[test]
+    fn zero_cache_keeps_plain_sum() {
+        assert_eq!(semantic_total(38_428, 0, 669), 39_097);
+    }
+
+    #[test]
+    fn partial_cache_share_below_input_returns_input() {
+        // Ambiguous case documented in context-tokens.ts: a small cache hit
+        // with a large fresh input misreads as "input covers the cached
+        // share" and the cache part is NOT added (Anthropic shape loses the
+        // small cache share — a few percent at most, matches the frontend).
+        assert_eq!(semantic_total(50_000, 2_000, 300), 50_300);
+    }
+
+    #[test]
+    fn supplement_branch_uses_same_rule() {
+        // Proxy path with input=0: JSONL counted output only; the usage-log
+        // record supplements input+cache. Semantic total = cache + output.
+        assert_eq!(semantic_total(0, 8_000, 1_200), 9_200);
     }
 }

@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { useSessionStore } from './sessionStore';
 import { useAgentStore } from './agentStore';
 import type { FileAttachment } from '../hooks/useFileAttachments';
+// F4: LRU 淘汰泄漏进程回收所需（均为纯 IPC/window 工具，不引入 React）
+import { bridge } from '../lib/tauri-bridge';
+import { cleanupStreamListener } from '../lib/stream-cleanup';
 
 // --- Types ---
 
@@ -421,6 +424,15 @@ function _purgeTabCache(tabId: string) {
   useAgentStore.getState().removeCache(tabId);
 }
 
+// fix7: draft→real id 改名时迁移 _batchDedupCache 键，不留僵尸条目
+export function migrateBatchDedupKey(oldTabId: string, newTabId?: string) {
+  const entry = _batchDedupCache.get(oldTabId);
+  _batchDedupCache.delete(oldTabId);
+  if (entry && newTabId && !_batchDedupCache.has(newTabId)) {
+    _batchDedupCache.set(newTabId, entry);
+  }
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   tabs: new Map(),
   sessionCache: new Map(),   // alias — always kept in sync with tabs
@@ -589,7 +601,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return result ?? {};
     }),
 
-  clearMessages: (tabId) =>
+  clearMessages: (tabId) => {
+    _batchDedupCache.delete(tabId); // fix8: 消息清空时顺手删批次去重缓存，防陈旧索引
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => ({
         ...tab,
@@ -604,7 +617,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const newStreams = new Map(state.streams);
       newStreams.delete(tabId);
       return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
-    }),
+    });
+  },
 
   resetTab: (tabId) => {
     // B5: also drop the per-tab agent snapshot — otherwise the next
@@ -721,7 +735,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return result ?? {};
     }),
 
-  rewindToTurn: (tabId, startMsgIdx) =>
+  rewindToTurn: (tabId, startMsgIdx) => {
+    _batchDedupCache.delete(tabId); // fix8: rewind 截断消息后顺手删批次去重缓存
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => {
         // Guard against invalid index — if out of bounds, keep messages intact
@@ -744,7 +759,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         };
       });
       return result ?? {};
-    }),
+    });
+  },
 
   setInteractionState: (tabId, msgId, interactionState, error) =>
     set((state) => {
@@ -787,20 +803,32 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // Never evict tabs that are actively streaming — their disk JSONL may have
     // been compacted, so the tab is the only source of full history (#32 fix)
     const evicted: string[] = [];
+    // F4: 收集被淘汰 tab 的存活 CLI 进程 stdinId（淘汰后统一 kill）
+    const evictedStdinIds: string[] = [];
     if (newTabs.size > MAX_CACHE) {
       const keysIter = newTabs.keys();
       while (newTabs.size > MAX_CACHE) {
         const oldest = keysIter.next().value;
         if (oldest === undefined) break;
         if (oldest === tabId) continue; // don't evict the tab we're creating
+        // fix2: LRU 淘汰跳过当前选中 tab（用户正在看的会话不能被逐出内存）
+        if (oldest === useSessionStore.getState().selectedSessionId) continue;
         const entry = newTabs.get(oldest);
         // B2: TabSession.isStreaming was removed (dead field) — the real
         // streaming flag lives in the streams Map (StreamState.isStreaming).
         if (get().streams.get(oldest)?.isStreaming || entry?.sessionStatus === 'running') continue; // protect active
+        // F4: 非 running/streaming 但仍持有 stdinId（prewarm/空闲遗留进程）
+        if (entry?.sessionMeta.stdinId) evictedStdinIds.push(entry.sessionMeta.stdinId);
         newTabs.delete(oldest);
         evicted.push(oldest);
       }
       // If all candidates are streaming, allow cache to exceed MAX_CACHE
+    }
+    // F4: 淘汰路径不能泄漏存活进程——kill + 回收事件监听与 stdinId→tab 映射
+    for (const sid of evictedStdinIds) {
+      bridge.killSession(sid).catch(() => {});
+      cleanupStreamListener(sid);
+      useSessionStore.getState().unregisterStdinTab(sid);
     }
     // Regression fix: evicted tabs' stream entries (partialText up to hundreds
     // of KB) must not linger — removeTab deletes streams; the LRU path didn't.
@@ -852,6 +880,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // However, we still ensure the tab exists (some call sites save before switching
     // and may not have called ensureTab yet).
     get().ensureTab(tabId);
+    // fix2: delete+set 刷新 Map 插入序，让淘汰反映真正最近使用（真 LRU）
+    const tab = get().tabs.get(tabId);
+    if (tab) {
+      const newTabs = new Map(get().tabs);
+      newTabs.delete(tabId);
+      newTabs.set(tabId, tab);
+      set({ tabs: newTabs, sessionCache: newTabs });
+    }
   },
 
   restoreFromCache: (tabId) => {
@@ -895,6 +931,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // Sync full lifecycle state to sessionStore for the sidebar indicator (FI-1
     // fix) — the conversation list renders running/completed/error dots.
     useSessionStore.getState().setSessionStatus(tabId, tab.sessionStatus);
+    // fix2: 命中恢复即访问——delete+set 刷新插入序（真 LRU）；重读最新 tab，
+    // 避免覆盖上面的 stdinId 归属清理
+    const freshTab = get().tabs.get(tabId);
+    if (freshTab) {
+      const newTabs = new Map(get().tabs);
+      newTabs.delete(tabId);
+      newTabs.set(tabId, freshTab);
+      set({ tabs: newTabs, sessionCache: newTabs });
+    }
     return true;
   },
 

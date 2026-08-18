@@ -7,7 +7,7 @@
   <meta name="description" content="Little Claude wraps Claude Code CLI in a polished native desktop interface. Bring your own API key, connect any provider, multi-session tabs, file explorer, rewind & checkpoints, and full SDK control.">
   <meta name="keywords" content="Claude Code, desktop client, Tauri, AI coding, Claude CLI, Little Claude">
   <meta property="og:title" content="Little Claude — Desktop Client for Claude Code">
-  <meta property="og:description" content="A beautiful native desktop GUI for Claude Code CLI. Free & open source.">
+  <meta property="og:description" content="A beautiful native desktop GUI for Claude Code CLI. Free to use.">
   <meta property="og:type" content="website">
   <link rel="icon" type="image/png" href="../public/app-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -398,13 +398,13 @@
   <div class="container hero-content">
     <div class="hero-badge">
       <span class="hero-badge-dot"></span>
-      v0.9.2 — Latest Release
+      v1.1.8 — Latest Release
     </div>
     <h1>
       <span data-i18n="hero.t1">The Desktop Client</span><br>
       <span class="gradient" data-i18n="hero.t2">Claude Code Deserves</span>
     </h1>
-    <p class="hero-sub" data-i18n="hero.sub">Bring your own API key, connect any provider, and get a native coding experience — file explorer, multi-session tabs, rewind & checkpoints, full SDK control.</p>
+    <p class="hero-sub" data-i18n="hero.sub">One client for three agent backends — Claude Code, Codex and DeepSeek. Bring your own API key, connect any provider: file explorer, multi-session tabs, rewind & checkpoints, full SDK control.</p>
     <div class="hero-actions">
       <div class="hero-dl" id="heroDl">
         <a id="dlMain" href="#" class="hero-dl-main">
@@ -674,12 +674,12 @@
   <div class="container">
     <div class="dl-inner reveal">
       <h2 data-i18n="dl.title">Ready to code beautifully?</h2>
-      <p class="dl-desc" data-i18n="dl.desc">Free and open source. macOS · Windows · Linux.</p>
+      <p class="dl-desc" data-i18n="dl.desc">Free to use. macOS · Windows · Linux.</p>
       <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;">
         <a href="https://github.com/qingyu321/Little-Claude/releases" class="btn btn-primary" target="_blank" rel="noopener" data-i18n="dl.all_releases">All Releases on GitHub</a>
         <a href="https://github.com/qingyu321/Little-Claude/releases" class="btn btn-ghost" target="_blank" rel="noopener" data-i18n="dl.gitee">Gitee Releases (China)</a>
       </div>
-      <p class="dl-note" style="margin-top:20px;">Apache 2.0 License</p>
+      <p class="dl-note" style="margin-top:20px;">All rights reserved</p>
     </div>
   </div>
 </section>
@@ -687,7 +687,7 @@
 <!-- Footer -->
 <footer class="footer">
   <div class="container footer-inner">
-    <div class="footer-left">&copy; 2025–2026 TinyZ · Little Claude v0.9.2</div>
+    <div class="footer-left">&copy; 2025–2026 TinyZ · Little Claude v1.1.8</div>
     <ul class="footer-links">
       <li><a href="https://github.com/qingyu321/Little-Claude" target="_blank" rel="noopener">GitHub</a></li>
       <li><a href="https://github.com/qingyu321/Little-Claude" target="_blank" rel="noopener">Gitee</a></li>
@@ -760,7 +760,7 @@ const T = {
   en: {
     'nav.features':'Features','nav.gallery':'Gallery','nav.shortcuts':'Shortcuts','nav.tech':'Tech Stack','nav.download':'Download',
     'hero.t1':'The Desktop Client','hero.t2':'Claude Code Deserves',
-    'hero.sub':'Bring your own API key, connect any provider, and get a native coding experience — file explorer, multi-session tabs, rewind & checkpoints, full SDK control.',
+    'hero.sub':'One client for three agent backends — Claude Code, Codex and DeepSeek. Bring your own API key, connect any provider: file explorer, multi-session tabs, rewind & checkpoints, full SDK control.',
     'hero.gh':'View on GitHub',
     'p.api.t':'Bring Your Own API','p.api.d':'7 preset providers + custom endpoints. Anthropic, DeepSeek, Zhipu, Qwen, Kimi, MiniMax, OpenRouter — or add yours.',
     'p.cn.t':'China-Ready','p.cn.d':'Gitee mirror auto-fallback. Pre-configured Chinese API endpoints. System proxy detection. Full Chinese UI.',
@@ -797,14 +797,14 @@ const T = {
     'tc.tauri':'Desktop Framework','tc.react':'UI Library','tc.ts':'Type Safety','tc.tw':'Styling',
     'tc.zustand':'10 State Stores','tc.cm':'Code Editor','tc.vite':'Build Tool','tc.rust':'Backend Runtime',
     'dl.title':'Ready to code beautifully?',
-    'dl.desc':'Free and open source. macOS · Windows · Linux.',
+    'dl.desc':'Free to use. macOS · Windows · Linux.',
     'dl.all_releases':'All Releases on GitHub',
     'dl.gitee':'Gitee Releases (China)',
   },
   zh: {
     'nav.features':'功能','nav.gallery':'截图','nav.shortcuts':'快捷键','nav.tech':'技术栈','nav.download':'下载',
     'hero.t1':'Claude Code','hero.t2':'值得拥有的桌面客户端',
-    'hero.sub':'自带 API Key，自由接入服务商，原生桌面体验——文件管理、多会话标签页、回退与快照、完整 SDK 控制。',
+    'hero.sub':'一个客户端，三种智能体内核——Claude Code、Codex、DeepSeek。自带 API Key，自由接入服务商：文件管理、多会话标签页、回退与快照、完整 SDK 控制。',
     'hero.gh':'在 GitHub 查看',
     'p.api.t':'自带 API Key','p.api.d':'7 个预设服务商 + 自定义接入点。Anthropic、DeepSeek、智谱、通义、Kimi、MiniMax、OpenRouter——也可以添加你自己的。',
     'p.cn.t':'国内可用','p.cn.d':'GitHub 不可达时自动降级到 Gitee 镜像。预配置国内 API 地址。自动检测系统代理。完整中文界面。',
@@ -841,7 +841,7 @@ const T = {
     'tc.tauri':'桌面框架','tc.react':'UI 库','tc.ts':'类型安全','tc.tw':'样式方案',
     'tc.zustand':'10 个状态仓库','tc.cm':'代码编辑器','tc.vite':'构建工具','tc.rust':'后端运行时',
     'dl.title':'准备好优雅地写代码了吗？',
-    'dl.desc':'免费开源。macOS · Windows · Linux。',
+    'dl.desc':'免费使用。macOS · Windows · Linux。',
     'dl.all_releases':'GitHub 全部版本',
     'dl.gitee':'Gitee 下载（国内）',
   }

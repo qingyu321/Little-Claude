@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useCallback, useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
-import { useChatStore, generateMessageId } from '../../stores/chatStore';
+import { useChatStore } from '../../stores/chatStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -10,8 +10,8 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
 import { cleanupStreamListener } from '../../lib/stream-cleanup';
-import { parseSessionMessages } from '../../lib/session-loader';
-import { formatErrorForUser } from '../../hooks/useStreamProcessor';
+// fix2/fix16: 磁盘加载共享实现（内部批量入库）
+import { loadSessionFromDisk } from '../../lib/session-disk-load';
 import { SessionGroup } from './SessionGroup';
 import { SessionItem } from './SessionItem';
 import { SessionContextMenu, ProjectContextMenu } from './SessionContextMenu';
@@ -189,17 +189,23 @@ export function ConversationList() {
         }
       }
     });
-    const interval = setInterval(fetchSessions, 30000);
+    // fix22: 轮询 30s→300s（sessions:changed 事件已覆盖即时刷新）
+    const interval = setInterval(fetchSessions, 300000);
     return () => clearInterval(interval);
   }, []);
 
   // Listen for sessions:changed event for instant refresh
   useEffect(() => {
+    // fix9: cancelled 标志 + 卸载竞态防护——resolve 时若已卸载立即注销
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen('sessions:changed', () => {
       fetchSessions();
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
-    return () => { unlisten?.(); };
+    }).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
   }, [fetchSessions]);
 
   // Debounce content search: 300ms after searchQuery changes, ≥2 chars
@@ -278,6 +284,18 @@ export function ConversationList() {
     });
   }, [sessions, filtered, contentSearchResults, searchQuery, showArchived, archivedSessions]);
 
+  // P1: precomputed base-name counts — the duplicate-folder disambiguation
+  // used to re-filter the whole projectGroups array for every project on
+  // every render (O(N²) per render with N projects).
+  const baseNameCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const [project] of projectGroups) {
+      const base = projectLabel(project);
+      counts.set(base, (counts.get(base) || 0) + 1);
+    }
+    return counts;
+  }, [projectGroups]);
+
   // Smart expand: expand if contains selected, or manually expanded
   const isExpanded = useCallback((key: string) => {
     if (manualCollapsed.has(key)) return false;
@@ -340,75 +358,10 @@ export function ConversationList() {
     }
 
     // Load from disk
-    useChatStore.getState().ensureTab(sessionId);
     useSettingsStore.getState().setWorkingDirectory(resolveProjectPath(projectOrDir));
-    const { clearMessages, addMessage, setSessionStatus, setSessionMeta } = useChatStore.getState();
-    const agentActions = useAgentStore.getState();
-    clearMessages(sessionId);
-    agentActions.clearAgents();
-    setSessionStatus(sessionId, 'running');
-    // TK-329: explicitly clear stdinId when loading from disk — no live process exists yet.
-    // Only set the CLI UUID (for resume). Prevents inheriting a stale stdinId
-    // from a previous session that might still be alive in the backend.
-    setSessionMeta(sessionId, {
-      sessionId,
-      stdinId: undefined,
-      sessionOrigin: session.origin || 'claude',
-    });
-
-    try {
-      const rawMessages = await bridge.loadSession(sessionPath);
-      if (useSessionStore.getState().selectedSessionId !== sessionId) {
-        return;
-      }
-      const { messages, agents, usage } = parseSessionMessages(rawMessages);
-
-      // Restore token/context stats from the JSONL — the Ctx bar and sidebar
-      // counters are in-memory (written on result events), so without this a
-      // reopened session reads 0% / 0 tokens until the next turn's result.
-      if (usage) {
-        setSessionMeta(sessionId, {
-          contextTokens: usage.contextTokens,
-          contextInputTokens: usage.contextInputTokens,
-          contextCacheReadTokens: usage.contextCacheReadTokens,
-          contextCacheCreationTokens: usage.contextCacheCreationTokens,
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          totalInputTokens: usage.totalInputTokens,
-          totalOutputTokens: usage.totalOutputTokens,
-        });
-      }
-
-      // Apply agents
-      for (const agent of agents) {
-        agentActions.upsertAgent(agent);
-      }
-
-      // Apply messages
-      for (const msg of messages) {
-        if (msg.toolResultContent) {
-          // For messages that have tool results, add the base message first, then update
-          const { toolResultContent, ...baseMsg } = msg;
-          addMessage(sessionId, baseMsg);
-          useChatStore.getState().updateMessage(sessionId, msg.id, { toolResultContent });
-        } else {
-          addMessage(sessionId, msg);
-        }
-      }
-
-      setSessionStatus(sessionId, 'completed');
-    } catch (err) {
-      if (useSessionStore.getState().selectedSessionId !== sessionId) return;
-      setSessionStatus(sessionId, 'error');
-      addMessage(sessionId, {
-        id: generateMessageId(),
-        role: 'system',
-        type: 'text',
-        // A5: 原始错误经分类器转成友好文案（含可折叠的原始详情）
-        content: formatErrorForUser(String(err)),
-        timestamp: Date.now(),
-      });
-    }
+    // fix2/fix16: 磁盘加载抽成共享函数（与 App.tsx Ctrl+Tab 回退一致），
+    // 内部一次 batchAddMessages 入库，替代逐条 addMessage 的 O(N²)
+    await loadSessionFromDisk(sessionId, sessionPath, session.origin || 'claude');
   }, [selectedId, setSelected, t]);
 
   // --- Delete handlers ---
@@ -417,31 +370,37 @@ export function ConversationList() {
       // H5: kill a still-running CLI process before deleting — otherwise the
       // orphaned process keeps running (and the AI keeps writing files /
       // running commands) with no tab left to route its stream to, silently.
+      // F5: 判定放宽为"tab 存在 sessionMeta.stdinId 即 kill"——prewarm 进程
+      // 从不处于 running 状态，旧的 isSessionRunning 条件永远不杀它们。
+      const stdinId = useChatStore.getState().getTab(sessionId)?.sessionMeta.stdinId;
+      if (stdinId) {
+        // Await the kill before deleting the session file — on Windows the
+        // CLI process may still hold the JSONL open (no FILE_SHARE_DELETE),
+        // and removing it mid-kill throws a sharing violation. kill_session
+        // internally awaits process termination.
+        await bridge.killSession(stdinId).catch(() => {});
+        cleanupStreamListener(stdinId);
+        useSessionStore.getState().unregisterStdinTab(stdinId);
+        useChatStore.getState().setSessionMeta(sessionId, { stdinId: undefined });
+      }
       if (useSessionStore.getState().isSessionRunning(sessionId)) {
-        const stdinId = useChatStore.getState().getTab(sessionId)?.sessionMeta.stdinId;
-        if (stdinId) {
-          // Await the kill before deleting the session file — on Windows the
-          // CLI process may still hold the JSONL open (no FILE_SHARE_DELETE),
-          // and removing it mid-kill throws a sharing violation. kill_session
-          // internally awaits process termination.
-          await bridge.killSession(stdinId).catch(() => {});
-          cleanupStreamListener(stdinId);
-          useSessionStore.getState().unregisterStdinTab(stdinId);
-        }
         useSessionStore.getState().setSessionRunning(sessionId, false);
         // H5 (background tab): the listener was removed above, so the killed
         // process's exit event will never arrive to settle the tab — without
         // this the tab stays 'running' forever with a dead stdinId and a
         // queued pending list nobody drains.
         useChatStore.getState().setSessionStatus(sessionId, 'idle');
-        useChatStore.getState().setSessionMeta(sessionId, { stdinId: undefined });
         useChatStore.getState().clearPendingMessages(sessionId);
       }
       if (sessionPath) {
         await bridge.deleteSession(sessionId, sessionPath);
       } else {
         useSessionStore.getState().removeDraft(sessionId);
+        // fix18: draft 被移除时清空全局 pre-warm 事件队列（其中的事件已无归属）
+        window.__claudeStreamQueue = undefined;
       }
+      // fix17: 删除成功后清理该会话残留的状态条目（customPreviews 同步落盘）
+      useSessionStore.getState().cleanupDeletedSession(sessionId);
       if (selectedId === sessionId) {
         setSelected(null);
         useChatStore.getState().resetTab(sessionId);
@@ -768,7 +727,7 @@ export function ConversationList() {
       {/* Project groups — detect duplicate folder names for disambiguation */}
       {projectGroups.map(([project, items]) => {
         const baseName = projectLabel(project);
-        const isDuplicate = projectGroups.filter(([k]) => projectLabel(k) === baseName).length > 1;
+        const isDuplicate = (baseNameCounts.get(baseName) || 0) > 1;
         return (
         <SessionGroup
           key={project}

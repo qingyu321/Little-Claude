@@ -29,6 +29,17 @@ pub struct DshTranslator {
     pub usage: Option<Value>,
     /// Model from the last `request/header` (for `result` attribution).
     pub model: Option<String>,
+    /// Last assistant message id (`assistant/message` → `message.id`), surfaced
+    /// on the `result` event as `uuid`. Without it the frontend's
+    /// persistTurnUsage skips the turn (empty message_id) and DSH token usage
+    /// never reaches usage_log — DSH sessions have no ~/.claude/projects JSONL
+    /// for the profile scan to fall back on, so the usage was lost entirely.
+    pub last_message_id: Option<String>,
+    /// Turn-accumulated usage: DSH reports per-STEP usage (each step is an
+    /// independent API request), and `turn/end` must carry the SUM of the
+    /// turn's steps — the frontend persists it to usage_log and would
+    /// otherwise record only the LAST step (severe undercount on tool loops).
+    pub turn_usage: Option<Value>,
 }
 
 impl DshTranslator {
@@ -42,6 +53,29 @@ impl DshTranslator {
         self.started.clear();
         self.tool_blocks.clear();
         self.usage = None;
+        self.last_message_id = None;
+        self.turn_usage = None;
+    }
+}
+
+/// Add one step's usage (snake_case) onto a running total (same shape).
+fn add_usage_into(total: &mut Value, step: &Value) {
+    let mut add = |key: &str| {
+        let a = total.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        let b = step.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        // #24 (bug): saturate — token counts come from untrusted frames; a
+        // u64::MAX frame used to panic debug builds (killing the single mux
+        // translator for ALL DSH sessions) and wrap in release builds.
+        total[key] = json!(a.saturating_add(b));
+    };
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "thinking_tokens",
+    ] {
+        add(key);
     }
 }
 
@@ -402,8 +436,26 @@ fn translate_chunk(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
             }
         }
         "usage" => {
-            state.usage = Some(convert_usage(chunk.get("usage").cloned().unwrap_or_default()));
-            Vec::new()
+            let usage = convert_usage(chunk.get("usage").cloned().unwrap_or_default());
+            // Accumulate the turn total: each step is an independent API
+            // request, and `turn/end` must report the SUM so usage_log /
+            // profile record the full turn (not just the last step).
+            match state.turn_usage.as_mut() {
+                Some(total) => add_usage_into(total, &usage),
+                None => state.turn_usage = Some(usage.clone()),
+            }
+            state.usage = Some(usage.clone());
+            // Real-time token display: the frontend's stream_event →
+            // message_delta handler updates the live Ctx bar / sidebar totals
+            // from this shape. Without it, DSH token counts only refresh at
+            // turn end (long multi-step turns show stale numbers).
+            vec![json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "message_delta",
+                    "usage": usage,
+                },
+            })]
         }
         "finish" => {
             let reason = chunk
@@ -431,6 +483,13 @@ fn translate_chunk(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
 
 fn translate_assistant_message(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
     let message = data.get("message").cloned().unwrap_or_default();
+    // Remember the assistant message id — the `turn/end` result event carries
+    // it as `uuid` so the frontend can persist usage (see DshTranslator docs).
+    if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
+        if !id.is_empty() {
+            state.last_message_id = Some(id.to_string());
+        }
+    }
     let mut content = translate_content_blocks(message.get("content").cloned().unwrap_or_default());
     // Fill in tool inputs parsed from the finished tool blocks.
     for block in content.iter_mut() {
@@ -514,16 +573,37 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
     let mut result = json!({
         "type": "result",
         "subtype": subtype,
-        "usage": state.usage.clone().unwrap_or_else(|| json!({})),
+        // Turn-accumulated usage (sum of every step's request) when available —
+        // DSH reports per-step usage and each step is an independent request;
+        // persisting only the last step would undercount tool-heavy turns.
+        "usage": state.turn_usage.clone().or_else(|| state.usage.clone()).unwrap_or_else(|| json!({})),
         "duration_ms": 0,
         "num_turns": data.get("turn").and_then(|v| v.as_u64()).unwrap_or(1),
+        // The frontend's persistTurnUsage keys usage_log records on this
+        // field and skips empty values — without it DSH usage never reaches
+        // the profile stats (DSH sessions have no ~/.claude/projects JSONL).
+        "uuid": state.last_message_id.clone().unwrap_or_default(),
     });
     if !ok {
+        // Carry any human-readable detail DSH attached to the failure —
+        // without it the frontend had nothing but the bare reason kind and
+        // failed turns surfaced as an unexplained generic error.
+        let detail = data
+            .get("reason")
+            .and_then(|r| r.get("message"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                data.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("");
         result["error"] = json!({
             "type": "dsh_turn_end",
             "reason": reason,
+            "message": detail,
         });
-        result["result"] = json!({ "kind": "error", "reason": reason });
+        result["result"] = json!({ "kind": "error", "reason": reason, "message": detail });
     }
     vec![result]
 }
@@ -652,9 +732,9 @@ mod tests {
             "event": { "type": "turn/end", "seq": 22, "data": { "turn": 1, "reason": { "kind": "completed" } } }
         }))));
 
-        // 1 system init + 2 start/delta + stop + message_delta + message_stop
-        // + assistant + result
-        assert_eq!(out.len(), 8, "got: {}", serde_json::to_string(&out).unwrap());
+        // 1 system init + 2 start/delta + stop + usage stream_event +
+        // message_delta + message_stop + assistant + result
+        assert_eq!(out.len(), 9, "got: {}", serde_json::to_string(&out).unwrap());
         assert_eq!(ev(&out, 0)["type"], "system");
         assert_eq!(ev(&out, 0)["model"], "deepseek-v4-flash");
         assert_eq!(ev(&out, 1)["event"]["type"], "content_block_start");
@@ -662,14 +742,71 @@ mod tests {
         assert_eq!(ev(&out, 2)["event"]["type"], "content_block_delta");
         assert_eq!(ev(&out, 2)["event"]["delta"]["text"], "OK");
         assert_eq!(ev(&out, 3)["event"]["type"], "content_block_stop");
+        // Live usage event: stream_event → message_delta with snake_case usage
+        // (drives the frontend's real-time Ctx bar / sidebar totals).
+        assert_eq!(ev(&out, 4)["type"], "stream_event");
         assert_eq!(ev(&out, 4)["event"]["type"], "message_delta");
-        assert_eq!(ev(&out, 4)["event"]["delta"]["stop_reason"], "end_turn");
-        assert_eq!(ev(&out, 5)["event"]["type"], "message_stop");
-        assert_eq!(ev(&out, 6)["type"], "assistant");
-        assert_eq!(ev(&out, 6)["message"]["content"][0]["text"], "OK");
-        assert_eq!(ev(&out, 6)["usage"]["input_tokens"], 12460);
-        assert_eq!(ev(&out, 7)["type"], "result");
-        assert_eq!(ev(&out, 7)["subtype"], "success");
+        assert_eq!(ev(&out, 4)["event"]["usage"]["input_tokens"], 12460);
+        assert_eq!(ev(&out, 4)["event"]["usage"]["output_tokens"], 2);
+        assert_eq!(ev(&out, 5)["event"]["type"], "message_delta");
+        assert_eq!(ev(&out, 5)["event"]["delta"]["stop_reason"], "end_turn");
+        assert_eq!(ev(&out, 6)["event"]["type"], "message_stop");
+        assert_eq!(ev(&out, 7)["type"], "assistant");
+        assert_eq!(ev(&out, 7)["message"]["content"][0]["text"], "OK");
+        assert_eq!(ev(&out, 7)["usage"]["input_tokens"], 12460);
+        assert_eq!(ev(&out, 8)["type"], "result");
+        assert_eq!(ev(&out, 8)["subtype"], "success");
+        // result usage = turn-accumulated (single step here → same value)
+        assert_eq!(ev(&out, 8)["usage"]["input_tokens"], 12460);
+        assert_eq!(ev(&out, 8)["uuid"], "m_1");
+    }
+
+    #[test]
+    fn multi_step_turn_accumulates_usage() {
+        // Two steps in one turn: each step is an independent request; the
+        // result must carry the SUM (usage_log/persistTurnUsage would
+        // otherwise record only the last step).
+        let mut st = DshTranslator::default();
+        let mut out = Vec::new();
+
+        let usage_step = |turn: u64, step: u64, input: u64, output: u64| {
+            frame(json!({
+                "type": "session/event", "sessionId": "s_x",
+                "event": { "type": "assistant/chunk", "seq": turn * 100 + step, "data": {
+                    "turn": turn, "step": step,
+                    "chunk": { "type": "usage", "usage": {
+                        "inputTokens": input, "outputTokens": output,
+                        "cacheReadTokens": 0, "reasoningTokens": 0
+                    } }
+                } }
+            }))
+        };
+        // step 1: 1000 in / 10 out; step 2: 3000 in / 40 out (cacheRead 500)
+        out.extend(translate_session_event(&mut st, &usage_step(1, 1, 1000, 10)));
+        out.extend(translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "assistant/chunk", "seq": 102, "data": {
+                "turn": 1, "step": 2,
+                "chunk": { "type": "usage", "usage": {
+                    "inputTokens": 3000, "outputTokens": 40, "cacheReadTokens": 500, "reasoningTokens": 0
+                } }
+            } }
+        }))));
+        out.extend(translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "turn/end", "seq": 103, "data": { "turn": 1, "reason": { "kind": "completed" } } }
+        }))));
+
+        let result = out.last().unwrap();
+        assert_eq!(result["type"], "result");
+        // 1000+3000 input, 10+40 output, 0+500 cacheRead
+        assert_eq!(result["usage"]["input_tokens"], 4000);
+        assert_eq!(result["usage"]["output_tokens"], 50);
+        assert_eq!(result["usage"]["cache_read_input_tokens"], 500);
+        // Live events: one per step
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0]["event"]["usage"]["input_tokens"], 1000);
+        assert_eq!(out[1]["event"]["usage"]["input_tokens"], 3000);
     }
 
     #[test]

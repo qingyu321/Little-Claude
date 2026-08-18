@@ -103,6 +103,8 @@ interface SessionState {
   getTabForStdin: (stdinId: string) => string | undefined;
   /** Remove a draft session from the local list (no disk deletion needed) */
   removeDraft: (draftId: string) => void;
+  /** fix17: 会话删除成功后清理残留状态（customPreviews/sessionStatuses/runningSessions） */
+  cleanupDeletedSession: (sessionId: string) => void;
   /** Promote a draft session to a real session ID (when CLI returns the actual UUID).
    *  Updates session id, selectedSessionId, stdinToTab mapping, and runningSessions. */
   promoteDraft: (oldDraftId: string, newRealId: string) => void;
@@ -240,6 +242,25 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   removeDraft: (draftId) => set((state) => ({
     sessions: state.sessions.filter((s) => s.id !== draftId),
   })),
+
+  // fix17: 删除成功后清理该会话残留的状态条目，防内存/界面泄漏
+  cleanupDeletedSession: (sessionId) => {
+    // customPreviews 持久化 —— 同步落盘（localStorage）
+    const previews = { ...get().customPreviews };
+    if (previews[sessionId]) {
+      delete previews[sessionId];
+      saveCustomPreviewsLocal(previews);
+    }
+    set((state) => {
+      const runningSessions = new Set(state.runningSessions);
+      runningSessions.delete(sessionId);
+      const sessionStatuses = new Map(state.sessionStatuses);
+      sessionStatuses.delete(sessionId);
+      const contentSearchResults = new Map(state.contentSearchResults);
+      contentSearchResults.delete(sessionId);
+      return { customPreviews: previews, runningSessions, sessionStatuses, contentSearchResults };
+    });
+  },
 
   promoteDraft: (oldDraftId, newRealId) => {
     saveLastSessionId(newRealId);

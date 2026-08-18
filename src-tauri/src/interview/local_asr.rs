@@ -513,6 +513,19 @@ async fn download_model_file(
     let mut downloaded: u64 = if resume { existing.unwrap_or(0) } else { 0 };
     let mut last_emit = 0u64;
 
+    // M1/B4: cap the total download — a hijacked endpoint must not be able
+    // to fill the disk (ASR models are < 1GB; 4GiB ceiling stops runaway
+    // streams while leaving resume + retry headroom).
+    const MAX_ASR_MODEL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    if let Some(total) = expected_total {
+        if total > MAX_ASR_MODEL_BYTES {
+            return Err(format!(
+                "模型文件过大 ({} bytes, 上限 4 GiB)",
+                total
+            ));
+        }
+    }
+
     while let Some(chunk) = resp
         .chunk()
         .await
@@ -523,9 +536,15 @@ async fn download_model_file(
             return Err(download_cancel::CANCELLED_ERROR.to_string());
         }
 
+        downloaded += chunk.len() as u64;
+        if downloaded > MAX_ASR_MODEL_BYTES {
+            return Err(format!(
+                "模型文件超过 4 GiB 上限（已下载 {} bytes），已中止",
+                downloaded
+            ));
+        }
         file.write_all(&chunk)
             .map_err(|e| format!("写入 {} 失败: {}", part_path.display(), e))?;
-        downloaded += chunk.len() as u64;
 
         // 节流进度事件（~256 KiB 一次，或下载完成时），数值基于字节数
         if downloaded - last_emit >= 256 * 1024
@@ -666,25 +685,39 @@ static ACTIVE_SESSION: std::sync::OnceLock<
     std::sync::Mutex<Option<(LocalAsrEngine, Vec<f32>)>>,
 > = std::sync::OnceLock::new();
 
-/// 启动本地 ASR 会话 — 加载模型并创建引擎，清空音频缓冲区
-#[tauri::command]
-pub fn start_local_asr_session() -> Result<String, String> {
-    let model_dir = default_model_dir();
-    if !model_dir.join("model.int8.onnx").is_file() {
-        return Err(
-            "Model not installed. Please download the ASR model in Settings > Interview Helper."
-                .to_string(),
-        );
-    }
+/// R5 (bug): generation counter closing the transcribe-window race. start and
+/// stop bump it; an in-flight transcribe_and_reset only writes the engine
+/// back if the generation is unchanged (otherwise the write-back used to
+/// RESURRECT a stopped session — 239MB model resident again — or clobber a
+/// freshly started one).
+static SESSION_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    let engine = LocalAsrEngine::new(&model_dir)?;
-    let lock = ACTIVE_SESSION.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-    *guard = Some((engine, Vec::new()));
-    Ok(format!(
-        "Local ASR session started with model at {}",
-        model_dir.display()
-    ))
+/// 启动本地 ASR 会话 — 加载模型并创建引擎，清空音频缓冲区
+/// R6 (perf): async + spawn_blocking — loading the 239MB model is a
+/// second-scale blocking op that used to freeze the IPC thread.
+#[tauri::command]
+pub async fn start_local_asr_session() -> Result<String, String> {
+    tokio::task::spawn_blocking(|| {
+        let model_dir = default_model_dir();
+        if !model_dir.join("model.int8.onnx").is_file() {
+            return Err(
+                "Model not installed. Please download the ASR model in Settings > Interview Helper."
+                    .to_string(),
+            );
+        }
+
+        let engine = LocalAsrEngine::new(&model_dir)?;
+        let lock = ACTIVE_SESSION.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
+        SESSION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *guard = Some((engine, Vec::new()));
+        Ok(format!(
+            "Local ASR session started with model at {}",
+            model_dir.display()
+        ))
+    })
+    .await
+    .map_err(|e| format!("ASR start task failed: {}", e))?
 }
 
 /// 单题音频缓冲上限（60s @16kHz，与前端 MAX_QA_AUDIO_CHUNKS 兜底语义一致）。
@@ -740,8 +773,14 @@ pub fn push_local_asr_audio(wav_base64: String) -> Result<(), String> {
 /// 停止本地 ASR 会话 — 对全部累积音频运行一次性推理，返回转录文本。
 /// 同时通过 `local-asr:transcript` 事件发送结果（供混合对比面板使用）。
 #[tauri::command]
-pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || {
+    // R5: bump the generation FIRST — an in-flight transcribe_and_reset then
+    // sees the change and drops the engine instead of resurrecting it after
+    // this stop. Also makes stop-while-busy return cleanly (take() is None).
+    SESSION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     // 先取出 session，释放锁后再推理
     let session = {
@@ -775,7 +814,7 @@ pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
                         trimmed.len(),
                         preview
                     );
-                    let _ = app.emit(
+                    let _ = app2.emit(
                         "local-asr:transcript",
                         serde_json::json!({
                             "text": trimmed.clone(),
@@ -796,6 +835,9 @@ pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
     }
 
     Ok(result_text)
+    })
+    .await
+    .map_err(|e| format!("ASR stop task failed: {}", e))?
 }
 
 /// 转录并重置：取走当前会话（引擎 + 缓冲区）→ 锁外推理 → 放回引擎与空缓冲区。
@@ -804,16 +846,19 @@ pub fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
 /// 时长与缓冲音频成正比，长音频时持锁会卡住采集管道导致 chunk 丢弃）；
 /// 代价是推理期间 push 看到 session 被取走 → 静默丢弃（有日志）。
 #[tauri::command]
-pub fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
-
-    // 取出整个 session（引擎 + 缓冲区），锁外推理
-    let session = {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || {
+    // 取出整个 session（引擎 + 缓冲区），锁外推理。
+    // R5: remember the generation — if stop/start happens during inference,
+    // the write-back below is skipped (no resurrection, no clobbering).
+    let (session, gen) = {
         let lock = ACTIVE_SESSION
             .get()
             .ok_or("No active ASR session.")?;
         let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        guard.take()
+        (guard.take(), SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst))
     };
 
     let (engine, buffer) = match session {
@@ -845,7 +890,7 @@ pub fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, S
                     trimmed.len(),
                     preview
                 );
-                let _ = app.emit(
+                let _ = app2.emit(
                     "local-asr:transcript",
                     serde_json::json!({
                         "text": trimmed.clone(),
@@ -862,16 +907,28 @@ pub fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, S
         }
     };
 
-    // 放回引擎与空缓冲区（推理期间 push 被丢弃的音频在下一轮正常接收）
+    // 放回引擎与空缓冲区（推理期间 push 被丢弃的音频在下一轮正常接收）。
+    // R5: only when the generation is unchanged AND the slot is still empty —
+    // a stop or a fresh start during inference wins over the write-back.
     {
         let lock = ACTIVE_SESSION
             .get()
             .ok_or("No active ASR session.")?;
         let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        *guard = Some((engine, Vec::new()));
+        if SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen && guard.is_none() {
+            *guard = Some((engine, Vec::new()));
+        } else {
+            eprintln!(
+                "[local-asr] write-back skipped: session changed during inference (stop/start won)"
+            );
+            drop(engine);
+        }
     }
 
     Ok(result_text)
+    })
+    .await
+    .map_err(|e| format!("ASR transcribe task failed: {}", e))?
 }
 
 // ============================================================
@@ -895,6 +952,13 @@ fn decode_wav_base64_to_f32(base64: &str) -> Result<Vec<f32>, String> {
     let sample_rate = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
     let num_channels = u16::from_le_bytes([bytes[22], bytes[23]]);
     let bits_per_sample = u16::from_le_bytes([bytes[34], bytes[35]]);
+
+    // R23 (bug): the header is renderer-controlled input — sample_rate=0 made
+    // resample_linear compute a zero ratio → usize::MAX capacity → panic that
+    // took down the whole app. Validate a sane range up front.
+    if !(1_000..=384_000).contains(&sample_rate) {
+        return Err(format!("Invalid WAV sample rate: {}", sample_rate));
+    }
 
     if bits_per_sample != 16 || num_channels != 1 {
         return Err(format!(
@@ -963,6 +1027,11 @@ fn preview_chars(s: &str, max_chars: usize) -> String {
 
 /// 线性重采样
 fn resample_linear(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    // R23: belt-and-braces guards (callers validate too) — zero/empty inputs
+    // must never reach the capacity math below.
+    if samples.is_empty() || src_rate == 0 || dst_rate == 0 {
+        return Vec::new();
+    }
     if src_rate == dst_rate {
         return samples.to_vec();
     }

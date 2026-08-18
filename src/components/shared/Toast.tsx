@@ -25,9 +25,19 @@ interface ToastStore {
 
 let nextId = 1;
 
+// Max toasts retained in the store. The UI renders only the latest 3
+// (`slice(-3)`), so anything beyond this buffer would never be dismissed:
+// the overflow item unmounts, its auto-dismiss timer is cleared by the
+// effect cleanup, and `remove(id)` never runs — the array used to grow
+// without bound (real leak on repeated showToast calls).
+const MAX_TOASTS = 10;
+
 const useToastStore = create<ToastStore>((set) => ({
   toasts: [],
-  add: (toast) => set((s) => ({ toasts: [...s.toasts, { ...toast, id: nextId++ }] })),
+  add: (toast) =>
+    set((s) => ({
+      toasts: [...s.toasts, { ...toast, id: nextId++ }].slice(-MAX_TOASTS),
+    })),
   remove: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
 

@@ -18,6 +18,42 @@ static SYS_AUDIO_RAW: tokio::sync::Mutex<Option<(
 static MIMO_CLIENTS: tokio::sync::Mutex<Option<HashMap<String, reqwest::Client>>> =
     tokio::sync::Mutex::const_new(None);
 
+/// M4 (security, shared): resolve the API key from a renderer-controlled env
+/// variable name. The value gets shipped as a Bearer token to a
+/// renderer-controlled URL — an arbitrary name is a confused-deputy
+/// env-exfiltration primitive. Restrict to plausible API-key variable names
+/// and exclude credential-ish ones. Both interview_mimo_answer and
+/// interview_test_mimo MUST go through this (R1: the test command used to
+/// skip it entirely).
+fn resolve_api_key(env_name: Option<&str>, fallback: String) -> Result<String, String> {
+    let Some(env_name) = env_name.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return Ok(fallback);
+    };
+    let shape_ok = env_name.len() <= 64
+        && env_name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && env_name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false)
+        && (env_name.ends_with("_API_KEY")
+            || env_name.ends_with("_TOKEN")
+            || env_name.ends_with("_KEY"));
+    let upper = env_name.to_uppercase();
+    let excluded = ["AWS", "SECRET", "PASSWORD", "PRIVATE", "PATH", "CREDENTIAL"];
+    let excluded_hit = excluded.iter().any(|banned| upper.contains(banned));
+    if shape_ok && !excluded_hit {
+        Ok(std::env::var(env_name).unwrap_or(fallback))
+    } else {
+        Err(format!(
+            "环境变量名不符合 API key 命名要求（仅允许 *_API_KEY/*_TOKEN/*_KEY）: {}",
+            env_name
+        ))
+    }
+}
+
 async fn get_mimo_client(base_url: &str, proxy_url: Option<&str>) -> reqwest::Client {
     let key = format!("{}|{}", base_url, proxy_url.unwrap_or(""));
     // Fast path: cached client with matching key
@@ -29,21 +65,23 @@ async fn get_mimo_client(base_url: &str, proxy_url: Option<&str>) -> reqwest::Cl
             }
         }
     }
-    // Build new client with proxy support
+    // Build new client with proxy support.
+    // R15 (bug): NO total-request timeout here — reqwest's `timeout` covers
+    // the whole body read, so a streaming answer longer than the old 30s cap
+    // was killed mid-sentence. Long streams are instead guarded by a
+    // per-chunk watchdog in the consumer (120s without a new chunk).
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let builder = || reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
     let client = match proxy_url.filter(|p| !p.is_empty()) {
         Some(purl) => match reqwest::Proxy::all(purl) {
-            Ok(proxy) if crate::is_proxy_reachable(purl).await => reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(TOTAL_TIMEOUT)
+            Ok(proxy) if crate::is_proxy_reachable(purl).await => builder()
                 .no_proxy()
                 .proxy(proxy)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            _ => crate::build_smart_http_client(CONNECT_TIMEOUT, TOTAL_TIMEOUT).await,
+            _ => builder().build().unwrap_or_else(|_| reqwest::Client::new()),
         },
-        None => crate::build_smart_http_client(CONNECT_TIMEOUT, TOTAL_TIMEOUT).await,
+        None => builder().build().unwrap_or_else(|_| reqwest::Client::new()),
     };
     // Cache it
     let mut guard = MIMO_CLIENTS.lock().await;
@@ -180,16 +218,8 @@ pub async fn interview_mimo_answer(
     let max_tokens = max_tokens.unwrap_or(512);
     let temperature = temperature.unwrap_or(0.0);
 
-    // 解析 API key: 优先环境变量名，再 fallback 到明文 key
-    let api_key = if let Some(ref env_name) = api_key_env {
-        if !env_name.is_empty() {
-            std::env::var(env_name).unwrap_or(api_key)
-        } else {
-            api_key
-        }
-    } else {
-        api_key
-    };
+    // 解析 API key: 优先环境变量名，再 fallback 到明文 key（M4 共享校验）。
+    let api_key = resolve_api_key(api_key_env.as_deref(), api_key)?;
 
     let client = get_mimo_client(&base_url, proxy_url.as_deref()).await;
     log::info!(
@@ -355,6 +385,8 @@ pub async fn interview_mimo_answer(
 
     if !status.is_success() {
         let body_text = resp.text().await.unwrap_or_default();
+        // Some upstreams echo the Authorization header back in error bodies.
+        let body_text = crate::commands::anthropic_proxy::redact_secrets(&body_text);
         return Err(format!("HTTP {status}: {body_text}"));
     }
 
@@ -368,14 +400,21 @@ pub async fn interview_mimo_answer(
 
     let text = if is_sse {
         // ── 流式分支：逐 chunk 累积，按行解析 SSE，增量 emit token ──
+        // R4 (bug): accumulate BYTES and split on b'\n' — the old path ran
+        // from_utf8_lossy on each raw chunk, and TLS record boundaries can
+        // land mid-codepoint, turning every split CJK character into U+FFFD
+        // garbage in the streamed answer. Only complete lines get decoded.
+        // R15: per-chunk watchdog replaces the old 30s whole-request timeout
+        // (which killed long streaming answers mid-sentence).
+        const CHUNK_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(120);
         let mut resp = resp;
-        let mut line_buf = String::new();
+        let mut byte_buf: Vec<u8> = Vec::new();
         let mut full_text = String::new();
         let mut first_chunk = true;
         loop {
-            let chunk = resp
-                .chunk()
+            let chunk = tokio::time::timeout(CHUNK_WATCHDOG, resp.chunk())
                 .await
+                .map_err(|_| "读取流超时（120s 无新数据）".to_string())?
                 .map_err(|e| format!("读取流失败: {e}"))?;
             let bytes = match chunk {
                 Some(b) => b,
@@ -389,11 +428,13 @@ pub async fn interview_mimo_answer(
                     t0.elapsed().as_millis()
                 );
             }
-            line_buf.push_str(&String::from_utf8_lossy(&bytes));
-            // 消费所有完整行
-            while let Some(nl) = line_buf.find('\n') {
-                let line = line_buf[..nl].trim().to_string();
-                line_buf.drain(..=nl);
+            byte_buf.extend_from_slice(&bytes);
+            // 消费所有完整行（字节层切分，行内才做 UTF-8 解码）
+            while let Some(nl) = byte_buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = byte_buf.drain(..=nl).collect();
+                let line = String::from_utf8(line_bytes)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                let line = line.trim().to_string();
                 if let Some(delta) = parse_sse_data_line(&line) {
                     full_text.push_str(&delta);
                     let _ = app.emit(
@@ -404,14 +445,18 @@ pub async fn interview_mimo_answer(
             }
         }
         // 残留的无尾换行最后一行
-        let tail = line_buf.trim().to_string();
-        if !tail.is_empty() {
-            if let Some(delta) = parse_sse_data_line(&tail) {
-                full_text.push_str(&delta);
-                let _ = app.emit(
-                    "interview:mimo-token",
-                    serde_json::json!({ "requestId": &request_id, "delta": delta }),
-                );
+        if !byte_buf.is_empty() {
+            let tail = String::from_utf8(byte_buf)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            let tail = tail.trim().to_string();
+            if !tail.is_empty() {
+                if let Some(delta) = parse_sse_data_line(&tail) {
+                    full_text.push_str(&delta);
+                    let _ = app.emit(
+                        "interview:mimo-token",
+                        serde_json::json!({ "requestId": &request_id, "delta": delta }),
+                    );
+                }
             }
         }
         log::info!(
@@ -517,15 +562,10 @@ pub async fn interview_test_mimo(
     proxy_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let is_single_hop = is_single_hop.unwrap_or(false);
-    let api_key = if let Some(ref env_name) = api_key_env {
-        if !env_name.is_empty() {
-            std::env::var(env_name).unwrap_or(api_key)
-        } else {
-            api_key
-        }
-    } else {
-        api_key
-    };
+    // R1 (security): same M4 gate as interview_mimo_answer — the test button
+    // used to be an UNVALIDATED env-read + exfiltration primitive (arbitrary
+    // env value shipped as Bearer to a renderer-controlled URL).
+    let api_key = resolve_api_key(api_key_env.as_deref(), api_key)?;
 
     let client = get_mimo_client(&base_url, proxy_url.as_deref()).await;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -561,12 +601,13 @@ pub async fn interview_test_mimo(
                 }));
             } else {
                 let body_text = resp.text().await.unwrap_or_default();
+                let body_text = crate::commands::anthropic_proxy::redact_secrets(&body_text);
                 results.insert("answer".to_string(), serde_json::json!({
                     "ok": false,
                     "model": &model,
                     "latencyMs": elapsed_ms,
                     "status": status.as_u16(),
-                    "error": body_text,
+                    "error": body_text.chars().take(200).collect::<String>(),
                 }));
             }
         }
@@ -617,12 +658,13 @@ pub async fn interview_test_mimo(
                     }));
                 } else {
                     let body_text = resp.text().await.unwrap_or_default();
+                    let body_text = crate::commands::anthropic_proxy::redact_secrets(&body_text);
                     results.insert("asr".to_string(), serde_json::json!({
                         "ok": false,
                         "model": &asr_model,
                         "latencyMs": elapsed_ms,
                         "status": status.as_u16(),
-                        "error": body_text,
+                        "error": body_text.chars().take(200).collect::<String>(),
                     }));
                 }
             }

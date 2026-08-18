@@ -17,8 +17,18 @@ export function dataUrlToBlobUrl(dataUrl: string): string {
     blobUrlCache.set(dataUrl, url);
     return url;
   }
-  const byteString = atob(dataUrl.split(',')[1]);
-  const mimeString = dataUrl.split(',')[0].split(':')[1].split(';')[0];
+  // A8: a malformed data URL (no comma, bad base64) used to throw out of
+  // render-phase callers (AiAvatar/UserAvatar/ProfileStatsModal), crashing
+  // the whole React tree. Return a defensive empty string instead.
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) return '';
+  let byteString: string;
+  try {
+    byteString = atob(dataUrl.slice(comma + 1));
+  } catch {
+    return '';
+  }
+  const mimeString = dataUrl.slice(5, comma).split(';')[0]; // "data:<mime>;base64"
   const ab = new ArrayBuffer(byteString.length);
   const ia = new Uint8Array(ab);
   for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);

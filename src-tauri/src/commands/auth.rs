@@ -233,13 +233,31 @@ pub async fn check_claude_auth() -> Result<AuthStatus, String> {
                 // JSON invalid or no token found  --?fall through to claude doctor
             }
         }
-        // Also check .claude.json (older format)
+        // Also check .claude.json (older format). #22 (bug): mere file
+        // EXISTENCE used to mean "authenticated" — but the CLI creates this
+        // file for everyone (onboarding state etc.), so never-logged-in
+        // users got a green light and hit an auth error on first message.
+        // Require an actual auth field before believing it.
         let alt_path = std::path::Path::new(&home).join(".claude.json");
         if alt_path.exists() {
-            return Ok(AuthStatus {
-                authenticated: true,
-                unknown: false,
-            });
+            if let Ok(content) = std::fs::read_to_string(&alt_path) {
+                if let Ok(json) = serde_json::from_str::<Value>(&content) {
+                    let has_auth = ["oauthAccount", "claudeAiOauth", "primaryApiKey"]
+                        .iter()
+                        .any(|key| match json.get(key) {
+                            Some(Value::String(s)) => !s.is_empty(),
+                            Some(Value::Object(o)) => !o.is_empty(),
+                            _ => false,
+                        });
+                    if has_auth {
+                        return Ok(AuthStatus {
+                            authenticated: true,
+                            unknown: false,
+                        });
+                    }
+                }
+            }
+            // No auth fields (or unreadable) — fall through to `claude doctor`
         }
     }
 

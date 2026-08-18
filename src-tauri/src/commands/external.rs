@@ -1,8 +1,30 @@
 use tauri::AppHandle;
 use tokio::process::Command;
 
+/// M5 (security): these commands used to accept ANY path string. Gate them:
+/// - no `-` prefix (flag injection into `code` / `open` argv),
+/// - no UNC paths (opening `\\attacker\share` leaks the NTLM hash via SMB
+///   authentication on Windows),
+/// - must be an authorized location (project root / dialog pick / whitelist).
+fn validate_external_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("Empty path".to_string());
+    }
+    if path.starts_with('-') {
+        return Err("Path must not start with '-'".to_string());
+    }
+    if path.starts_with(r"\\") && !path.starts_with(r"\\?\") {
+        return Err("UNC paths are not allowed".to_string());
+    }
+    if !crate::commands::files::path_is_authorized(std::path::Path::new(path)) {
+        return Err(format!("Path is not in an authorized location: {}", path));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn open_in_vscode(path: String) -> Result<(), String> {
+    validate_external_path(&path)?;
     let mut cmd = Command::new("code");
     cmd.arg(&path);
     #[cfg(target_os = "windows")]
@@ -14,6 +36,7 @@ pub async fn open_in_vscode(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn reveal_in_finder(path: String) -> Result<(), String> {
+    validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         // Use 'open -R' to reveal (select) the file in Finder
@@ -47,6 +70,7 @@ pub async fn reveal_in_finder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_with_default_app(path: String) -> Result<(), String> {
+    validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
@@ -115,6 +139,9 @@ unsafe fn create_nsurl_from_path(path: &str) -> *mut objc::runtime::Object {
 /// Show the macOS native share sheet for a file at the current mouse position.
 #[tauri::command]
 pub async fn share_file(path: String, app: AppHandle) -> Result<(), String> {
+    // R2 (security): sharing is exfiltration by design — without the gate a
+    // compromised renderer could AirDrop ~/.ssh/id_rsa or credentials.json.
+    validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         app.run_on_main_thread(move || {
@@ -196,6 +223,8 @@ pub async fn share_file(path: String, app: AppHandle) -> Result<(), String> {
 /// Directly invoke WeChat's sharing service for a file (macOS only).
 #[tauri::command]
 pub async fn share_to_wechat(path: String, app: AppHandle) -> Result<(), String> {
+    // R2 (security): same exfiltration gate as share_file.
+    validate_external_path(&path)?;
     #[cfg(target_os = "macos")]
     {
         app.run_on_main_thread(move || {

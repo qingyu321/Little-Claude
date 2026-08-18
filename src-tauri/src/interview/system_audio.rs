@@ -142,7 +142,34 @@ mod wasapi_impl {
         let channels = unsafe { (*wfx_ptr).nChannels };
         let bits_per_sample = unsafe { (*wfx_ptr).wBitsPerSample };
         let block_align = unsafe { (*wfx_ptr).nBlockAlign };
-        let format_tag = unsafe { (*wfx_ptr).wFormatTag };
+        let raw_format_tag = unsafe { (*wfx_ptr).wFormatTag };
+        // R12 (bug): WAVE_FORMAT_EXTENSIBLE (0xFFFE) carries the REAL sample
+        // format in the SubFormat GUID — the old code assumed float32 for ANY
+        // 32-bit extensible mix format, so integer-PCM mixes decoded into
+        // garbage (distorted peaks, broken transcription). Resolve to the
+        // effective tag here; unknown subtypes fail loudly instead of
+        // producing garbage audio.
+        let format_tag = if raw_format_tag == 0xFFFE {
+            let ext = unsafe {
+                &*(wfx_ptr as *const windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE)
+            };
+            let sub = ext.SubFormat;
+            let known_tail = sub.data2 == 0x0000
+                && sub.data3 == 0x0010
+                && sub.data4 == [0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+            if known_tail && sub.data1 == 0x00000003 {
+                3u16 // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT → WAVE_FORMAT_IEEE_FLOAT
+            } else if known_tail && sub.data1 == 0x00000001 {
+                1u16 // KSDATAFORMAT_SUBTYPE_PCM → WAVE_FORMAT_PCM
+            } else {
+                return Err(format!(
+                    "Unsupported extensible mix SubFormat: {:08x}-{:04x}-{:04x}",
+                    sub.data1, sub.data2, sub.data3
+                ));
+            }
+        } else {
+            raw_format_tag
+        };
         log::info!(
             "[sys_audio] mix format: {} Hz, {} ch, {} bit, tag={}, align={}",
             sample_rate, channels, bits_per_sample, format_tag, block_align
@@ -341,21 +368,26 @@ mod wasapi_impl {
     ) -> std::io::Result<(Vec<u8>, f32)> {
 
         // ── Step 1: 解码原始字节 → f32 样本 ──
-        let float_samples: Vec<f32> = if format_tag == 0xFFFE && bits_per_sample == 32 {
-            let samples: &[f32] = unsafe {
-                std::slice::from_raw_parts(raw_pcm.as_ptr() as *const f32, raw_pcm.len() / 4)
-            };
-            samples.to_vec()
+        // R12: tag 3 = IEEE float (extensible float mixes are normalized to
+        // tag 3 at parse time); raw 0xFFFE kept for safety. Unaligned reads
+        // avoided by copying per-sample instead of raw pointer casts.
+        let float_samples: Vec<f32> = if (format_tag == 3 || format_tag == 0xFFFE)
+            && bits_per_sample == 32
+        {
+            raw_pcm
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
         } else if bits_per_sample == 32 {
-            let samples: &[i32] = unsafe {
-                std::slice::from_raw_parts(raw_pcm.as_ptr() as *const i32, raw_pcm.len() / 4)
-            };
-            samples.iter().map(|&s| s as f32 / 2_147_483_648.0f32).collect()
+            raw_pcm
+                .chunks_exact(4)
+                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0f32)
+                .collect()
         } else if bits_per_sample == 16 {
-            let samples: &[i16] = unsafe {
-                std::slice::from_raw_parts(raw_pcm.as_ptr() as *const i16, raw_pcm.len() / 2)
-            };
-            samples.iter().map(|&s| s as f32 / 32768.0f32).collect()
+            raw_pcm
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0f32)
+                .collect()
         } else if bits_per_sample == 24 {
             let count = raw_pcm.len() / 3;
             let mut out = Vec::with_capacity(count);

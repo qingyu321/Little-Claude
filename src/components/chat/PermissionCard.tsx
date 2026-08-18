@@ -39,7 +39,11 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
     if (!permTabId) return;
     const { setInteractionState, setSessionStatus, setActivityStatus } = useChatStore.getState();
     const stdinId = getActiveTabState().sessionMeta.stdinId;
-    if (!stdinId) return;
+    // fix3: stdinId 缺失不再静默 return——置 failed 并显示错误文案（i18n 现有键）
+    if (!stdinId) {
+      setInteractionState(permTabId, message.id, 'failed', t('chat.connectionLost'));
+      return;
+    }
 
     // If we have structured permissionData, use SDK control protocol
     if (permData?.requestId) {
@@ -91,6 +95,10 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
   const isSending = interactionState === 'sending';
   const isFailed = interactionState === 'failed';
   const isPending = interactionState === 'pending';
+  // An expired request can never be retried (the registry entry is gone) —
+  // show a static stop-and-resend hint instead of a Retry button that would
+  // just fail again with the same id.
+  const isExpired = isFailed && message.interactionError === t('error.requestExpired');
 
   return (
     <div className={`ml-11 animate-scale-in ${isResolved ? 'opacity-60' : ''}`}>
@@ -146,7 +154,7 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
                   strokeDasharray="14 14" />
               </svg>
               <span className="text-[11px] text-text-muted">
-                Sending...
+                {t('msg.sending')}{/* F24: 硬编码走 i18n */}
               </span>
             </span>
           )}
@@ -204,7 +212,7 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
                 </button>
               </>
             )}
-            {isFailed && (
+            {isFailed && !isExpired && (
               <button
                 onClick={handleRetry}
                 disabled={retrying}
@@ -213,8 +221,13 @@ export const PermissionCard = memo(function PermissionCard({ message }: Props) {
                   hover:bg-warning/15 transition-smooth cursor-pointer
                   flex items-center gap-1.5"
               >
-                Retry
+                {t('common.retry')}{/* F24: 硬编码走 i18n */}
               </button>
+            )}
+            {isExpired && (
+              <span className="text-[11px] text-warning font-medium">
+                {t('msg.expiredStatic')}
+              </span>
             )}
           </div>
         )}

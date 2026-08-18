@@ -1,5 +1,5 @@
 import { useCallback, type MutableRefObject } from 'react';
-import { useChatStore, generateMessageId, type ChatMessage } from '../stores/chatStore';
+import { useChatStore, generateMessageId, migrateBatchDedupKey, type ChatMessage } from '../stores/chatStore';
 import {
   useSettingsStore,
   mapSessionModeToPermissionMode,
@@ -29,16 +29,22 @@ import { showToast } from '../components/shared/Toast';
 // message as primary text with raw error in a collapsible details block.
 // Unmatched errors get a generic fallback + raw details.
 const ERROR_CATEGORIES: ReadonlyArray<{ pattern: RegExp; i18nKey: string }> = [
-  { pattern: /40[13]|unauthorized|invalid.*key|api.key.*invalid/i, i18nKey: 'error.invalidKey' },
-  { pattern: /429|rate.limit|too.many.request/i, i18nKey: 'error.rateLimit' },
-  { pattern: /quota|insufficient.*balance|credit|billing/i, i18nKey: 'error.quotaExceeded' },
-  { pattern: /model.*not.found|invalid.*model|not_found.*model/i, i18nKey: 'error.modelNotFound' },
-  { pattern: /timeout|timed?.out|ECONNREFUSED|ECONNRESET|ENOTFOUND/i, i18nKey: 'error.networkError' },
-  { pattern: /network|fetch.failed|dns/i, i18nKey: 'error.networkError' },
-  { pattern: /permission.denied|operation.not.permitted|access.denied|forbidden/i, i18nKey: 'error.permissionDenied' },
-  { pattern: /overloaded|capacity|503|service.unavailable/i, i18nKey: 'error.serviceUnavailable' },
-  { pattern: /not.installed|command.not.found/i, i18nKey: 'error.cliNotInstalled' },
-  { pattern: /token.*limit|context.*length|too.long/i, i18nKey: 'error.tokenLimit' },
+  // Expired/stale interaction first: a permission/question card answered after
+  // its TTL ("Unknown or expired permission request") must explain itself
+  // instead of falling through to the generic fallback.
+  { pattern: /expired|过期|失效|unknown.*permission.*request/i, i18nKey: 'error.requestExpired' },
+  // Chinese patterns included: DeepSeek / DSH endpoints report errors in
+  // Chinese; English-only matching sent all of them to the generic fallback.
+  { pattern: /40[13]|unauthorized|invalid.*key|api.key.*invalid|密钥.*(无效|错误)|认证失败|鉴权失败|未授权/i, i18nKey: 'error.invalidKey' },
+  { pattern: /429|rate.limit|too.many.request|限流|频率.*(高|快)|请求过多|并发/i, i18nKey: 'error.rateLimit' },
+  { pattern: /quota|insufficient.*balance|credit|billing|余额|额度|欠费|配额/i, i18nKey: 'error.quotaExceeded' },
+  { pattern: /model.*not.found|invalid.*model|not_found.*model|模型不存在|无效.*模型|找不到模型/i, i18nKey: 'error.modelNotFound' },
+  { pattern: /timeout|timed?.out|ECONNREFUSED|ECONNRESET|ENOTFOUND|超时/i, i18nKey: 'error.networkError' },
+  { pattern: /network|fetch.failed|dns|网络(错误|异常)?|连接失败|无法连接|连接断开/i, i18nKey: 'error.networkError' },
+  { pattern: /permission.denied|operation.not.permitted|access.denied|forbidden|权限不足|拒绝访问/i, i18nKey: 'error.permissionDenied' },
+  { pattern: /overloaded|capacity|503|service.unavailable|过载|繁忙|拥挤|负载过高|服务不可用/i, i18nKey: 'error.serviceUnavailable' },
+  { pattern: /not.installed|command.not.found|未安装|找不到命令/i, i18nKey: 'error.cliNotInstalled' },
+  { pattern: /token.*limit|context.*length|too.long|上下文.*(超|过长)|超出.*长度|长度限制/i, i18nKey: 'error.tokenLimit' },
 ];
 
 export function formatErrorForUser(raw: string): string {
@@ -48,9 +54,9 @@ export function formatErrorForUser(raw: string): string {
   return `${friendly}\n\n<details>\n<summary>${t('error.showDetails')}</summary>\n\n\`\`\`\n${raw}\n\`\`\`\n\n</details>`;
 }
 
-// --- Streaming text buffer (rAF-throttled + interval fallback, per-stdinId) ---
+// --- Streaming text buffer (timer-throttled + interval fallback, per-stdinId) ---
 // Coalesces rapid text_delta / thinking_delta events into a single state update
-// per animation frame (~60/s), preventing JS main thread starvation from
+// per ~50ms (fix23: was rAF ~60fps), preventing JS main thread starvation from
 // excessive React re-renders when the message list is large.
 //
 // CRITICAL: rAF alone is unreliable — heavy React re-renders can block the
@@ -88,12 +94,43 @@ let _flushIntervalId: ReturnType<typeof setInterval> | null = null;
 // from 50-120/s to ~1/s during streaming (per-tab throttle).
 const _lastProgressThrottle = new Map<string, number>();
 
+// fix11: Stop/kill 主动杀掉的 stdinId 集合。旧进程迟到的 process_exit 一律按
+// stale 处理（不覆盖 completed 状态、不误发"任务完成"通知）。条目在
+// process_exit 消费时移除。
+// F11: 从 Set 改为带时间戳的 Map —— kill 后永无 process_exit 到达的进程
+// （如崩溃/已被系统回收）条目由 flush interval 定期清扫（>5 分钟），
+// 集合不会无限增长。
+const _killedStdinIds = new Map<string, number>();
+const KILLED_STDIN_TTL_MS = 5 * 60 * 1000;
+
+/** fix11: 主动杀进程前登记 stdinId（Stop 按钮等调用）。 */
+export function markKilledStdin(stdinId: string) {
+  _killedStdinIds.set(stdinId, Date.now());
+}
+
 function _ensureFlushInterval() {
   if (_flushIntervalId) return;
   _flushIntervalId = setInterval(() => {
     for (const [stdinId, buf] of _streamBuffers) {
       if (buf.text || buf.thinking) {
         _doFlush(stdinId, buf);
+      } else if (!buf.raf && !buf.timer) {
+        // B3: idle buffer with no pending flush. A session whose stream
+        // ended without process_exit (kill / webview reload / emit-failure
+        // bail-out) used to keep its entry forever — and the interval only
+        // self-stops when _streamBuffers.size === 0, so one orphaned entry
+        // made it poll 500ms forever. A slow live stream can briefly lose
+        // its throttled-state here (the entry is recreated on the next
+        // chunk), which is acceptable — the A7 threshold re-arms after 8KiB.
+        _streamBuffers.delete(stdinId);
+      }
+    }
+    // F11: 顺手清扫 _killedStdinIds 中 >5 分钟的条目（kill 后进程迟到
+    // exit 永不消费的兜底回收）
+    {
+      const sweepNow = Date.now();
+      for (const [id, killedAt] of _killedStdinIds) {
+        if (sweepNow - killedAt > KILLED_STDIN_TTL_MS) _killedStdinIds.delete(id);
       }
     }
     // Stop interval when no active buffers remain
@@ -182,16 +219,20 @@ function _doFlush(stdinId: string, buf: _StreamBuffer) {
   }
 }
 
+// fix23: 前 8KiB 不再用 rAF（~60fps）重渲 markdown，改 ~50ms 定时器节流
+const PRETHROTTLE_FLUSH_MS = 50;
+
 function _scheduleStreamFlush(stdinId: string) {
   const buf = _getBuffer(stdinId);
   // Start the interval fallback on first buffer activity
   _ensureFlushInterval();
   if (!buf.throttled) {
-    if (buf.raf) return;
-    buf.raf = requestAnimationFrame(() => {
-      buf.raf = 0;
+    // fix23: 复用 timer 槽位（raf 槽保留给 flushStreamBuffer 的取消逻辑）
+    if (buf.timer) return;
+    buf.timer = window.setTimeout(() => {
+      buf.timer = 0;
       _doFlush(stdinId, buf);
-    });
+    }, PRETHROTTLE_FLUSH_MS);
   } else {
     // A7: throttled mode — one pending timer per buffer, 150ms cadence.
     if (buf.timer) return;
@@ -237,8 +278,10 @@ export function flushStreamBuffer(stdinId?: string) {
 
 // --- File tree auto-refresh on file-mutating tool completions ---
 // Tools that may create/modify/delete files in the working directory.
+// F15: 'Bash' 移除——结构变更已有 watcher 覆盖，Bash 每次 tool_result 都
+// 触发 refreshTree，放大整树重扫。
 const FILE_MUTATING_TOOLS = new Set([
-  'Write', 'Edit', 'MultiEdit', 'Bash', 'BatchTool',
+  'Write', 'Edit', 'MultiEdit', 'BatchTool',
 ]);
 
 // A3: Module-level constant — avoids 50-120 Set allocations/second during streaming.
@@ -404,7 +447,8 @@ export interface StreamProcessorConfig {
    *  `useRef(false)` / `current = false` reset compiling unchanged. */
   exitPlanModeSeenRef: MutableRefObject<Record<string, boolean> | boolean>;
   silentRestartRef: MutableRefObject<boolean>;
-  handleSubmitRef: MutableRefObject<() => void>;
+  /** fix14: 支持传 submitText/preserveDraft——非空输入框直接发送，不覆写编辑器 */
+  handleSubmitRef: MutableRefObject<(text?: string, opts?: { preserveDraft?: boolean }) => void>;
   handleStderrLineRef: MutableRefObject<(line: string, sid: string) => void>;
   /** Last stderr error line — displayed to user if process exits without response */
   lastStderrRef: MutableRefObject<string>;
@@ -729,6 +773,70 @@ function tryFireAutoCompact(
 }
 
 /**
+ * F1: Shared "capture CLI sessionId + promote draft" logic. Previously this ran
+ * ONLY in the foreground handleStreamMessage — sending the first message then
+ * switching tabs immediately left the draft un-promoted forever: a ghost draft
+ * lingered in the session list while the disk session duplicate, once opened,
+ * had two processes writing the same JSONL. The background entry point now
+ * calls this too, so the promotion happens wherever the first session_id lands.
+ */
+function promoteDraftIfNeeded(tabId: string, cliSessionId: string | undefined): void {
+  if (!cliSessionId) return;
+  const currentId = useChatStore.getState().getTab(tabId)?.sessionMeta.sessionId;
+  if (currentId === cliSessionId) return;
+  useChatStore.getState().setSessionMeta(tabId, { sessionId: cliSessionId });
+  bridge.trackSession(cliSessionId).catch(() => {});
+
+  // Promote draft tab to real session ID so it merges with disk session
+  if (tabId.startsWith('draft_')) {
+    // Migrate tab data under old draft key to new real key
+    const chatState = useChatStore.getState();
+    const tabData = chatState.getTab(tabId);
+    if (tabData) {
+      const newTabs = new Map(chatState.tabs);
+      newTabs.set(cliSessionId, { ...tabData, tabId: cliSessionId });
+      newTabs.delete(tabId);
+      useChatStore.setState({ tabs: newTabs, sessionCache: newTabs });
+    }
+    // fix7: 随改名迁移其余 per-tab 键（streams/scrollAnchors/
+    // tokenSpeedStore.tabs/_batchDedupCache），不留 draft_* 僵尸条目
+    {
+      const csNow = useChatStore.getState();
+      const promotedStreams = new Map(csNow.streams);
+      if (promotedStreams.has(tabId)) {
+        const streamState = promotedStreams.get(tabId)!;
+        promotedStreams.delete(tabId);
+        promotedStreams.set(cliSessionId, streamState);
+      }
+      const promotedAnchors = { ...csNow.scrollAnchors };
+      if (tabId in promotedAnchors) {
+        promotedAnchors[cliSessionId] = promotedAnchors[tabId];
+        delete promotedAnchors[tabId];
+      }
+      useChatStore.setState({ streams: promotedStreams, scrollAnchors: promotedAnchors });
+      const speedTabs = useTokenSpeedStore.getState().tabs;
+      if (speedTabs[tabId]) {
+        const nextSpeedTabs = { ...speedTabs };
+        nextSpeedTabs[cliSessionId] = nextSpeedTabs[tabId];
+        delete nextSpeedTabs[tabId];
+        useTokenSpeedStore.setState({ tabs: nextSpeedTabs });
+      }
+      migrateBatchDedupKey(tabId, cliSessionId);
+    }
+    useSessionStore.getState().promoteDraft(tabId, cliSessionId);
+    // DSH panels key by sessionId: goal/todo/feedback seeded under the
+    // draft tab id must move to the promoted id or they silently vanish
+    // (GoalBar never shows, TodoDock loses the first plan, feedback
+    // entries become unreachable).
+    useGoalStore.getState().moveSession(tabId, cliSessionId);
+    useTodoStore.getState().moveSession(tabId, cliSessionId);
+    useFeedbackStore.getState().moveSession(tabId, cliSessionId);
+  }
+
+  useSessionStore.getState().fetchSessions();
+}
+
+/**
  * useStreamProcessor — extracts stream message handling from InputBar.
  *
  * Returns handleStreamMessage (foreground) and handleBackgroundStreamMessage
@@ -761,6 +869,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       _lastProgressThrottle.set(tabId, now);
       store.setSessionMeta(tabId, { lastProgressAt: now });
     }
+
+    // F1: 与前台一致地捕获 CLI sessionId 并升级 draft —— 否则"发完首条消息
+    // 立即切 tab"时 draft 永不升级（ghost draft + 磁盘重复项双写 JSONL）。
+    promoteDraftIfNeeded(tabId, msg.session_id || msg.sessionId);
 
     switch (msg.type) {
       case 'little_claude_permission_request': {
@@ -1038,7 +1150,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             outputTokens: (bgTab?.sessionMeta.outputTokens || 0) + deltaOut,
             totalOutputTokens: (bgTab?.sessionMeta.totalOutputTokens || 0) + deltaOut,
           };
-          if (u.input_tokens && !bgTab?.sessionMeta.turnInputLogged) {
+          // DSH backend: per-step requests — accumulate every step's input
+          // (no single-request gate), Ctx bar stays last-wins.
+          const bgIsDsh = useSettingsStore.getState().cliBackend === 'deepseek';
+          if (u.input_tokens && (bgIsDsh || !bgTab?.sessionMeta.turnInputLogged)) {
             const full = semanticContextTokens({
               input: u.input_tokens,
               cacheRead: u.cache_read_input_tokens || 0,
@@ -1057,7 +1172,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             updates.contextInputTokens = u.input_tokens;
             updates.contextCacheReadTokens = cacheRead;
             updates.contextCacheCreationTokens = cacheCreation;
-            updates.turnInputLogged = true;
+            if (!bgIsDsh) {
+              updates.turnInputLogged = true;
+            }
           }
           store.setSessionMeta(tabId, updates);
           // NOTE: Usage persistence for the proxy path happens in Rust
@@ -1209,13 +1326,22 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             }
             if (block.name === 'AskUserQuestion') {
               const questions = block.input?.questions;
-              const bgQuestionId = block.id || generateMessageId();
-              // Guard: skip if question already exists in background tab (resolved or not)
+              // fix5: 对齐前台——哨兵 id + 先精确后模糊（任意未决问题卡）查重
+              const bgQuestionId = block.id || 'ask_question_current';
               const bgSnap = store.getTab(tabId);
               const bgExisting = bgSnap?.messages.find(
                 (m) => m.id === bgQuestionId && m.type === 'question',
+              ) || bgSnap?.messages.find(
+                (m) => m.type === 'question' && !m.resolved && m.toolName === 'AskUserQuestion',
               );
-              if (bgExisting) break;
+              if (bgExisting) {
+                // fix5: 已存在（可能由 control_request 路径创建并带 permissionData）——
+                // 只补 awaiting 状态，不新建卡片
+                if (!bgExisting.resolved) {
+                  store.setActivityStatus(tabId, { phase: 'awaiting' });
+                }
+                break;
+              }
 
               bgNewMessages.push({
                 id: bgQuestionId,
@@ -1414,31 +1540,44 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const streamedInput = prevMeta?.inputTokens || 0;
           const streamedCacheRead = prevMeta?.cacheReadTokens || 0;
           const streamedCacheCreation = prevMeta?.cacheCreationTokens || 0;
+          // DSH backend: same rule as the foreground path — per-step usage was
+          // accumulated live from message_delta; the result's usage is the
+          // turn SUM and must not be added again (Ctx bar stays last-wins).
+          const bgIsDshResult = useSettingsStore.getState().cliBackend === 'deepseek';
           store.setSessionMeta(tabId, {
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
             turns: msg.num_turns,
-            inputTokens: resultFull,
-            outputTokens: resultOutput,
-            totalInputTokens: (prevMeta?.totalInputTokens || 0)
-              + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
-            totalOutputTokens: (prevMeta?.totalOutputTokens || 0)
-              + Math.max(0, resultOutput - streamedOutput),
-            totalCacheReadTokens: (prevMeta?.totalCacheReadTokens || 0)
-              + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
-            totalCacheCreationTokens: (prevMeta?.totalCacheCreationTokens || 0)
-              + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
-            cacheReadTokens: bd.cacheRead,
-            cacheCreationTokens: bd.cacheCreation,
-            // B2/E2: full last-request context (incl. cached), same as foreground.
-            // Usage-less results keep the streamed value instead of blanking.
-            ...(resultFull > 0 ? {
-              contextTokens: resultFull,
-              // Breakdown for the Ctx bar tooltip + cache-miss detection
-              contextInputTokens: bd.input,
-              contextCacheReadTokens: bd.cacheRead,
-              contextCacheCreationTokens: bd.cacheCreation,
-            } : {}),
+            ...(bgIsDshResult
+              ? {
+                  inputTokens: prevMeta?.inputTokens,
+                  outputTokens: prevMeta?.outputTokens,
+                  cacheReadTokens: prevMeta?.cacheReadTokens,
+                  cacheCreationTokens: prevMeta?.cacheCreationTokens,
+                }
+              : {
+                  inputTokens: resultFull,
+                  outputTokens: resultOutput,
+                  totalInputTokens: (prevMeta?.totalInputTokens || 0)
+                    + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
+                  totalOutputTokens: (prevMeta?.totalOutputTokens || 0)
+                    + Math.max(0, resultOutput - streamedOutput),
+                  totalCacheReadTokens: (prevMeta?.totalCacheReadTokens || 0)
+                    + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
+                  totalCacheCreationTokens: (prevMeta?.totalCacheCreationTokens || 0)
+                    + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
+                  cacheReadTokens: bd.cacheRead,
+                  cacheCreationTokens: bd.cacheCreation,
+                  // B2/E2: full last-request context (incl. cached), same as foreground.
+                  // Usage-less results keep the streamed value instead of blanking.
+                  ...(resultFull > 0 ? {
+                    contextTokens: resultFull,
+                    // Breakdown for the Ctx bar tooltip + cache-miss detection
+                    contextInputTokens: bd.input,
+                    contextCacheReadTokens: bd.cacheRead,
+                    contextCacheCreationTokens: bd.cacheCreation,
+                  } : {}),
+                }),
             turnStartTime: undefined,
             lastProgressAt: undefined,
             // Turn finished — the per-turn input gate resets with it (the next
@@ -1494,6 +1633,30 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             });
           }
         }
+        // F9: 对齐前台——失败回合且无可显示结果文本时补系统错误消息，
+        // 否则后台会话的失败完全静默（只剩红点，用户不知道为什么）
+        if (msg.subtype !== 'success') {
+          const bgResultText = (typeof msg.result === 'string' && msg.result)
+            || (typeof msg.content === 'string' && msg.content)
+            || '';
+          if (!bgResultText) {
+            const bgErrField: any = msg.error;
+            const bgResField: any = msg.result;
+            const bgRawErr =
+              (typeof bgErrField === 'string' && bgErrField)
+              || bgErrField?.message
+              || (typeof bgResField === 'object' && bgResField !== null && bgResField?.message)
+              || (typeof bgResField === 'object' && bgResField !== null && bgResField?.reason)
+              || 'Unknown error';
+            store.addMessage(tabId, {
+              id: generateMessageId(),
+              role: 'system',
+              type: 'text',
+              content: formatErrorForUser(String(bgRawErr)),
+              timestamp: Date.now(),
+            });
+          }
+        }
         // B5: background tabs also auto-compact (previously foreground-only, so
         // a long session left running in a background tab could hit the context
         // limit with no warning). Same trigger logic as foreground.
@@ -1502,8 +1665,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // FIFO drain for background tabs (#142/#70): same logic as foreground.
         if (!bgCompacted) {
           const bgDrainTab = store.getTab(tabId);
-          const bgNextMsg = store.shiftPendingMessage(tabId);
+          // fix4: 同前台——先读 stdinId，可用才出队，缺失时消息留在队列
           const bgFlushStdinId = bgDrainTab?.sessionMeta.stdinId;
+          const bgNextMsg = bgFlushStdinId ? store.shiftPendingMessage(tabId) : undefined;
           if (bgNextMsg && bgFlushStdinId) {
             store.setSessionStatus(tabId, 'running');
             store.setSessionMeta(tabId, { turnStartTime: Date.now(), turnStartSource: 'auto', lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0, compactTurnPending: undefined });
@@ -1594,6 +1758,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // still deliver the OLD process's process_exit late (after the new
         // stdinId is in sessionMeta). Guard before touching any tab state.
         const bgStdinId = msg.__stdinId as string | undefined;
+        // fix11: 与前台一致——被 Stop/kill 杀掉的进程，迟到 exit 按 stale 处理
+        if (bgStdinId && _killedStdinIds.has(bgStdinId)) {
+          _killedStdinIds.delete(bgStdinId);
+          flushStreamBuffer(bgStdinId);
+          cleanupStreamListener(bgStdinId);
+          useSessionStore.getState().unregisterStdinTab(bgStdinId);
+          break;
+        }
         const bgCurTab = store.getTab(tabId);
         const bgCurStdinId = bgCurTab?.sessionMeta.stdinId;
         const bgIsStaleExit = !!bgStdinId
@@ -1881,38 +2053,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
     const agentId = resolveAgentId(msg.parent_tool_use_id, agentActions.agents);
     const agentDepth = getAgentDepth(agentId, agentActions.agents);
 
-    // Capture the CLI's own session ID from stream events (used for --resume)
-    const cliSessionId = msg.session_id || msg.sessionId;
-    if (cliSessionId) {
-      const currentId = useChatStore.getState().getTab(tabId)?.sessionMeta.sessionId;
-      if (currentId !== cliSessionId) {
-        setSessionMeta({ sessionId: cliSessionId });
-        bridge.trackSession(cliSessionId).catch(() => {});
-
-        // Promote draft tab to real session ID so it merges with disk session
-        if (tabId.startsWith('draft_')) {
-          // Migrate tab data under old draft key to new real key
-          const chatState = useChatStore.getState();
-          const tabData = chatState.getTab(tabId);
-          if (tabData) {
-            const newTabs = new Map(chatState.tabs);
-            newTabs.set(cliSessionId, { ...tabData, tabId: cliSessionId });
-            newTabs.delete(tabId);
-            useChatStore.setState({ tabs: newTabs, sessionCache: newTabs });
-          }
-          useSessionStore.getState().promoteDraft(tabId, cliSessionId);
-          // DSH panels key by sessionId: goal/todo/feedback seeded under the
-          // draft tab id must move to the promoted id or they silently vanish
-          // (GoalBar never shows, TodoDock loses the first plan, feedback
-          // entries become unreachable).
-          useGoalStore.getState().moveSession(tabId, cliSessionId);
-          useTodoStore.getState().moveSession(tabId, cliSessionId);
-          useFeedbackStore.getState().moveSession(tabId, cliSessionId);
-        }
-
-        useSessionStore.getState().fetchSessions();
-      }
-    }
+    // Capture the CLI's own session ID from stream events (used for --resume).
+    // F1: sessionId 捕获 + draft 升级抽成共享函数，后台路径同样执行。
+    promoteDraftIfNeeded(tabId, msg.session_id || msg.sessionId);
 
     // Helper: clear accumulated partial text (it will be replaced by the full message)
     const clearPartial = () => {
@@ -2109,13 +2252,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             outputTokens: (meta.outputTokens || 0) + deltaOut,
             totalOutputTokens: (meta.totalOutputTokens || 0) + deltaOut,
           };
-          // OpenAI-compat proxy (opencode) sends the full tail usage on its
-          // final message_delta: input_tokens + cache fields. The tail is the
-          // turn's authoritative input — log it exactly once (gate set by
-          // message_start when it carried usage) and last-wins the per-turn
-          // counter; previously it was added AGAIN on top of message_start's
-          // input, double-counting every turn.
-          if (u.input_tokens && !meta.turnInputLogged) {
+          // DSH backend: every step is an INDEPENDENT API request and DSH
+          // emits one usage message_delta per step — accumulate each step's
+          // input into the totals (no turnInputLogged gate, which is designed
+          // for single-request turns and would drop all but the first step).
+          // Ctx bar stays last-wins (current request's full context).
+          const isDsh = useSettingsStore.getState().cliBackend === 'deepseek';
+          if (u.input_tokens && (isDsh || !meta.turnInputLogged)) {
             const full = semanticContextTokens({
               input: u.input_tokens,
               cacheRead: u.cache_read_input_tokens || 0,
@@ -2135,7 +2278,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             updates.contextInputTokens = u.input_tokens;
             updates.contextCacheReadTokens = cacheRead;
             updates.contextCacheCreationTokens = cacheCreation;
-            updates.turnInputLogged = true;
+            if (!isDsh) {
+              updates.turnInputLogged = true;
+            }
           }
           setSessionMeta(updates);
           // NOTE: Usage persistence for the OpenAI-compat proxy path now happens
@@ -2825,8 +2970,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           silentRestartRef.current = true;
           // Sync restart status to ActivityIndicator
           setActivityStatus({ phase: 'thinking', statusMessage: t('chat.retrying') });
-          setInputSync('Continue.');
-          requestAnimationFrame(() => handleSubmitRef.current());
+          // fix14: 仅在输入框为空时写入；非空则直接发送，不动编辑器内容
+          const resumeDraft = useChatStore.getState().getTab(tabId)?.inputDraft ?? '';
+          if (!resumeDraft.trim()) {
+            setInputSync('Continue.');
+            requestAnimationFrame(() => handleSubmitRef.current());
+          } else {
+            handleSubmitRef.current('Continue.', { preserveDraft: true });
+          }
           break;
         }
         // H2: turn over without auto-restart — drop this tab's flag slot.
@@ -2921,6 +3072,28 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
 
+        // A failed turn with no displayable result text (DSH turn/end errors
+        // carry objects, not strings) used to fail SILENTLY — the tab just
+        // flipped to a red dot and the user had no idea why. Surface the
+        // error detail as a classified system message.
+        if (msg.subtype !== 'success' && !resultDisplayText) {
+          const errField: any = msg.error;
+          const resField: any = msg.result;
+          const rawErr =
+            (typeof errField === 'string' && errField)
+            || errField?.message
+            || (typeof resField === 'object' && resField !== null && resField?.message)
+            || (typeof resField === 'object' && resField !== null && resField?.reason)
+            || 'Unknown error';
+          addMessage({
+            id: generateMessageId(),
+            role: 'system',
+            type: 'text',
+            content: formatErrorForUser(String(rawErr)),
+            timestamp: Date.now(),
+          });
+        }
+
         // Keep the sidebar's green dot lit while the turn's tools are still
         // executing: a result success ending in tool_use means the CLI is busy
         // running that tool (possibly for minutes) — same idle semantic as
@@ -2972,38 +3145,57 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const streamedInput = meta.inputTokens || 0;
           const streamedCacheRead = meta.cacheReadTokens || 0;
           const streamedCacheCreation = meta.cacheCreationTokens || 0;
-          setSessionMeta({
+          // DSH backend: every step's usage was already accumulated live from
+          // message_delta events (each step is an independent request), and
+          // the result's usage is the turn SUM — adding it again would
+          // double-count, and the Ctx bar must stay last-wins (the current
+          // request's context), not the turn sum.
+          const isDshResult = useSettingsStore.getState().cliBackend === 'deepseek';
+          const baseMeta = {
             cost: msg.total_cost_usd,
             duration: msg.duration_ms,
             turns: msg.num_turns,
-            inputTokens: resultFull,
-            outputTokens: resultOutput,
-            totalInputTokens: (meta.totalInputTokens || 0)
-              + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
-            totalOutputTokens: (meta.totalOutputTokens || 0)
-              + Math.max(0, resultOutput - streamedOutput),
-            totalCacheReadTokens: (meta.totalCacheReadTokens || 0)
-              + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
-            totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0)
-              + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
-            cacheReadTokens: bd.cacheRead,
-            cacheCreationTokens: bd.cacheCreation,
-            // B2/E2: full last-request context (incl. cached) for the Ctx bar —
-            // input_tokens alone undercounts by the cache-read share. When the
-            // result carries no usable usage (CLI writes zero/missing), keep
-            // the streamed value instead of blanking the bar.
-            ...(resultFull > 0 ? {
-              contextTokens: resultFull,
-              // Breakdown for the Ctx bar tooltip + cache-miss detection
-              contextInputTokens: bd.input,
-              contextCacheReadTokens: bd.cacheRead,
-              contextCacheCreationTokens: bd.cacheCreation,
-            } : {}),
             turnStartTime: undefined,
             lastProgressAt: undefined,
             // Turn finished — the per-turn input gate resets with it (the next
             // message_start re-arms logging for the fresh turn).
             turnInputLogged: undefined,
+          };
+          setSessionMeta({
+            ...baseMeta,
+            ...(isDshResult
+              ? {
+                  // Keep the live per-step values; nothing to correct at result.
+                  inputTokens: meta.inputTokens,
+                  outputTokens: meta.outputTokens,
+                  cacheReadTokens: meta.cacheReadTokens,
+                  cacheCreationTokens: meta.cacheCreationTokens,
+                }
+              : {
+                  inputTokens: resultFull,
+                  outputTokens: resultOutput,
+                  totalInputTokens: (meta.totalInputTokens || 0)
+                    + (streamedLogged ? Math.max(0, resultFull - streamedInput) : resultFull),
+                  totalOutputTokens: (meta.totalOutputTokens || 0)
+                    + Math.max(0, resultOutput - streamedOutput),
+                  totalCacheReadTokens: (meta.totalCacheReadTokens || 0)
+                    + (streamedLogged ? Math.max(0, bd.cacheRead - streamedCacheRead) : bd.cacheRead),
+                  totalCacheCreationTokens: (meta.totalCacheCreationTokens || 0)
+                    + (streamedLogged ? Math.max(0, bd.cacheCreation - streamedCacheCreation) : bd.cacheCreation),
+                  cacheReadTokens: bd.cacheRead,
+                  cacheCreationTokens: bd.cacheCreation,
+                  // B2/E2: full last-request context (incl. cached) for the Ctx bar —
+                  // input_tokens alone undercounts by the cache-read share. When the
+                  // result carries no usable usage (CLI writes zero/missing), keep
+                  // the streamed value instead of blanking the bar.
+                  ...(resultFull > 0 ? {
+                    contextTokens: resultFull,
+                    // Breakdown for the Ctx bar tooltip + cache-miss detection
+                    contextInputTokens: bd.input,
+                    contextCacheReadTokens: bd.cacheRead,
+                    contextCacheCreationTokens: bd.cacheCreation,
+                  } : {}),
+                }),
           });
           // F3: runtime learning — a success turn whose context exceeded 900K
           // proves the model's real window is ≥1M (a 200K-class model would
@@ -3110,14 +3302,48 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           break; // Skip pending message flush — compact takes priority
         }
 
+        // F12: 失败回合命中限流/额度类错误时跳过 FIFO drain——继续发射排队
+        // 消息只会连环 429；toast 提示（rateLimits.resetsAt 有值时给倒计时）。
+        // 排队消息留在队列，用户稍后手动触发或新回合成功时自然恢复 drain。
+        let fgRateLimited = false;
+        if (msg.subtype !== 'success') {
+          const rlErrField: any = msg.error;
+          const rlResField: any = msg.result;
+          const rlErrText = String(
+            (typeof rlErrField === 'string' && rlErrField)
+            || rlErrField?.message
+            || (typeof rlResField === 'string' && rlResField)
+            || (typeof rlResField === 'object' && rlResField !== null && rlResField?.message)
+            || (typeof rlResField === 'object' && rlResField !== null && rlResField?.reason)
+            || '',
+          );
+          fgRateLimited = /429|rate.?limit|too.many.request|quota|insufficient.*balance|余额|额度|限流|配额/i.test(rlErrText);
+        }
+        if (fgRateLimited) {
+          const rlLimits = Object.values(useChatStore.getState().getTab(tabId)?.sessionMeta.rateLimits ?? {});
+          const rlNow = Date.now();
+          const rlFutureResets = rlLimits
+            .map((l) => l?.resetsAt)
+            .filter((v): v is number => typeof v === 'number' && v > rlNow);
+          if (rlFutureResets.length > 0) {
+            const rlSecs = Math.max(0, Math.round((Math.min(...rlFutureResets) - rlNow) / 1000));
+            const rlCountdown = `${String(Math.floor(rlSecs / 60)).padStart(2, '0')}:${String(rlSecs % 60).padStart(2, '0')}`;
+            showToast(t('chat.rateLimitedCountdown').replace('{time}', rlCountdown), 'info');
+          } else {
+            showToast(t('chat.rateLimited'), 'info');
+          }
+          break;
+        }
+
         // FIFO drain: dequeue ONE pending message and send it (#142/#70).
         // When this turn completes, the next result event will dequeue the next one.
         // Previously all pending messages were joined and sent at once, which could
         // overwhelm the CLI. Sequential turn-by-turn processing is safer.
         {
           const drainTab = useChatStore.getState().getTab(tabId);
-          const nextMsg = useChatStore.getState().shiftPendingMessage(tabId);
+          // fix4: 先读 stdinId，可用才出队——否则 stdinId 缺失时排队消息凭空消失
           const flushStdinId = drainTab?.sessionMeta.stdinId;
+          const nextMsg = flushStdinId ? useChatStore.getState().shiftPendingMessage(tabId) : undefined;
           if (nextMsg && flushStdinId) {
             const nextTurnStartedAt = Date.now();
             setSessionStatus('running');
@@ -3206,6 +3432,16 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // onSessionExit safety net ("Only act if this is still the active
         // stdinId (avoid stale cleanup)").
         const exitStdinId = msg.__stdinId as string | undefined;
+        // fix11: Stop/kill 杀掉的进程，其迟到 exit 一律按 stale 处理——
+        // 不回滚 completed→idle，也不弹"任务完成"通知
+        if (exitStdinId && _killedStdinIds.has(exitStdinId)) {
+          _killedStdinIds.delete(exitStdinId);
+          debugLog('session', 'process_exit from killed process treated as stale', { stdinId: exitStdinId });
+          flushStreamBuffer(exitStdinId);
+          cleanupStreamListener(exitStdinId);
+          useSessionStore.getState().unregisterStdinTab(exitStdinId);
+          break;
+        }
         const exitCurTab = useChatStore.getState().getTab(tabId);
         const exitCurStdinId = exitCurTab?.sessionMeta.stdinId;
         // Stale when the event names a stdinId that differs from the tab's
@@ -3320,7 +3556,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           newStreams.set(tabId, { partialText: '', partialThinking: '', isStreaming: false });
           useChatStore.setState({ streams: newStreams });
         }
-        if (!document.hasFocus() && 'Notification' in window) {
+        // F10: 通知区分成败——仅当退出前状态为 completed 或已有过 assistant
+        // 回复才弹"任务完成"；error/启动失败退出一律不弹（此前一律弹成功通知）
+        const exitHadReply = exitMsgs.some(
+          (m: ChatMessage) => m.role === 'assistant' && (m.type === 'text' || m.type === 'tool_use'),
+        );
+        if ((exitStatus === 'completed' || exitHadReply) && !document.hasFocus() && 'Notification' in window) {
           if (Notification.permission === 'granted') {
             new Notification('Little Claude', { body: t('notification.chatComplete') });
           } else if (Notification.permission === 'default') {
@@ -3335,6 +3576,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         setSessionMeta({ stdinId: undefined, lastProgressAt: undefined });
         // Session exited — stop any live token speed badge.
         useTokenSpeedStore.getState().end(tabId);
+        // Drop the per-tab progress throttle entry (session is over) — the
+        // background branch already does this; without it the module-level
+        // map grows one entry per foreground session, forever.
+        _lastProgressThrottle.delete(tabId);
         // H2: process is gone — drop this tab's ExitPlanMode-seen slot so the
         // per-tab map cannot grow across session restarts.
         delete _getExitPlanMap(exitPlanModeSeenRef)[tabId];

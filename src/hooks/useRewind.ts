@@ -26,14 +26,17 @@ export type RewindAction = 'restore_all' | 'restore_conversation' | 'restore_cod
 /**
  * Restore files to a CLI checkpoint via bridge.rewindFiles().
  * Returns true if files were restored, false if no checkpoint available.
+ * B3d: session context (stdinId/sessionId/cwd) is captured ONCE by the caller
+ * and passed in — re-reading the active tab inside an await would target a
+ * different session if the user switched tabs mid-restore.
  */
-async function restoreFilesViaCheckpoint(turn: Turn): Promise<boolean> {
+async function restoreFilesViaCheckpoint(
+  turn: Turn,
+  stdinId: string,
+  sessionId: string,
+  cwd: string,
+): Promise<boolean> {
   if (!turn.checkpointUuid) return false;
-
-  const tabState = getActiveTabState();
-  const stdinId = tabState.sessionMeta.stdinId;
-  const sessionId = tabState.sessionMeta.sessionId;
-  const cwd = useSettingsStore.getState().workingDirectory;
   if (!sessionId || !cwd) return false;
 
   try {
@@ -113,12 +116,23 @@ export function useRewind() {
     }
 
     // For file-restore actions, send rewind via stdin BEFORE killing the process
-    // (SDK control protocol is fast and needs the process alive)
+    // (SDK control protocol is fast and needs the process alive). B3d: capture
+    // stdinId/sessionId/cwd ONCE here and pass them through — the earlier
+    // implementation re-read the active tab inside restoreFilesViaCheckpoint,
+    // so switching tabs mid-restore targeted the wrong session.
     const needsFileRestore = action === 'restore_all' || action === 'restore_code';
+    const restoreStdinId = state.sessionMeta.stdinId;
+    const restoreSessionId = state.sessionMeta.sessionId;
+    const restoreCwd = useSettingsStore.getState().workingDirectory;
     let fileRestoreOk = false;
     if (needsFileRestore && turn.checkpointUuid) {
       try {
-        fileRestoreOk = await restoreFilesViaCheckpoint(turn);
+        fileRestoreOk = await restoreFilesViaCheckpoint(
+          turn,
+          restoreStdinId || '',
+          restoreSessionId || '',
+          restoreCwd || '',
+        );
       } catch { /* handled below */ }
     }
 

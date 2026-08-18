@@ -17,8 +17,10 @@ const WEB_VERSION_KEY = 'tokenicode_web_version';
  */
 const RAW_LATEST = 'https://raw.githubusercontent.com/qingyu321/Little-Claude/main/latest.json';
 const JSDELIVR_LATEST = 'https://cdn.jsdelivr.net/gh/qingyu321/Little-Claude@main/latest.json';
-const MIRROR_LATEST =
-  'https://mirror.ghproxy.com/https://raw.githubusercontent.com/qingyu321/Little-Claude/main/latest.json';
+// C3: mirror.ghproxy.com removed — a third-party proxy could serve a
+// modified latest.json + zip with a matching (forged) sha256, defeating the
+// integrity check. jsdelivr mirrors the same repo content over HTTPS and is
+// the fallback where raw.githubusercontent is unstable.
 // Gitee 镜像预留（与发布脚本同步启用时再打开）
 // const GITEE_LATEST = 'https://gitee.com/qingyu321/Little-Claude/raw/main/latest.json';
 
@@ -119,14 +121,13 @@ export function currentWebVersion(): string {
 }
 
 async function fetchLatestInfo(url: string): Promise<UpdateInfo | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
     const resp = await fetch(url, {
       signal: ctrl.signal,
       headers: { Accept: 'application/json' },
     });
-    clearTimeout(timer);
     if (!resp.ok) return null;
     const data = await resp.json();
     const version = String(data?.version || '');
@@ -142,6 +143,10 @@ async function fetchLatestInfo(url: string): Promise<UpdateInfo | null> {
     };
   } catch {
     return null; // 超时 / 网络错误 → 下一个源
+  } finally {
+    // A8: clear the abort timer on EVERY path — the old code only cleared
+    // it on success, leaking one 5s timer per failed check.
+    clearTimeout(timer);
   }
 }
 
@@ -151,10 +156,10 @@ async function doCheck(): Promise<CheckOutcome> {
   await syncWebVersion();
   const local = localVersion();
 
-  // 多源依次尝试：raw → jsdelivr CDN → ghproxy 镜像（Gitee 预留）。
-  // 第一个成功的源即为权威结果——无论是否发现更新都停止尝试，
-  // 避免"raw 说无更新、镜像说有更新"的抖动。
-  const sources = [RAW_LATEST, JSDELIVR_LATEST, MIRROR_LATEST];
+  // 多源依次尝试：raw → jsdelivr CDN（Gitee 预留）。第一个成功的源即为
+  // 权威结果——无论是否发现更新都停止尝试，避免"raw 说无更新、镜像说有
+  // 更新"的抖动。
+  const sources = [RAW_LATEST, JSDELIVR_LATEST];
   for (const src of sources) {
     const info = await fetchLatestInfo(src);
     if (!info) continue;

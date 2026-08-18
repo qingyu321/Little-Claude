@@ -48,6 +48,9 @@ export function PetTab() {
         filters: [{ name: 'Pet config', extensions: ['json'] }],
       });
       if (!jsonPath || typeof jsonPath !== 'string') return;
+      // B1: dialog-picked paths need backend authorization before the file
+      // commands accept them.
+      bridge.authorizeExternalPath(jsonPath).catch(() => {});
       const petJson = await bridge.readFileContent(jsonPath);
 
       // Validate minimal structure
@@ -71,6 +74,7 @@ export function PetTab() {
       });
       let spritesheetB64 = '';
       if (sheetPath && typeof sheetPath === 'string') {
+        bridge.authorizeExternalPath(sheetPath).catch(() => {});
         spritesheetB64 = await bridge.readFileBase64(sheetPath);
       }
 

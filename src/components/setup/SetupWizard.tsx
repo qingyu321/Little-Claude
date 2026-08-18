@@ -67,6 +67,8 @@ export function SetupWizard() {
         if (cancelled) return;
         if (status.installed && !status.git_bash_missing) {
           setCliInfo(status.version ?? null, status.path ?? null);
+          // F22: CLI 已就绪——清掉跳过标记（横幅不再显示）
+          useSettingsStore.getState().setSetupSkipped(false);
           setSetupCompleted(true);
           return;
         }
@@ -107,6 +109,7 @@ export function SetupWizard() {
       const status = await bridge.checkClaudeCli();
       if (status.installed) {
         setCliInfo(status.version ?? null, status.path ?? null);
+        useSettingsStore.getState().setSetupSkipped(false); // F22: 安装成功清标记
         setStep('installed');
         setTimeout(() => setSetupCompleted(true), 1200);
       } else {
@@ -123,6 +126,8 @@ export function SetupWizard() {
   }, []);
 
   const handleSkip = useCallback(() => {
+    // F22: 记录跳过标记——聊天区顶部显示"CLI 未安装"常驻横幅
+    useSettingsStore.getState().setSetupSkipped(true);
     setSetupCompleted(true);
   }, []);
 

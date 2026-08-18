@@ -268,7 +268,12 @@ export function useFileAttachments() {
   const lastDropRef = useRef<{ time: number; key: string }>({ time: 0, key: '' });
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    // B3b: onDragDropEvent resolves asynchronously; the cleanup must not miss
+    // the unlisten. Keep it in a ref; if the component already unmounted when
+    // registration resolves, release the listener immediately.
+    const unlistenRef: { current: (() => void) | null } = { current: null };
+    let unmounted = false;
+
     getCurrentWindow().onDragDropEvent((event) => {
       const { type } = event.payload;
 
@@ -349,8 +354,19 @@ export function useFileAttachments() {
           }
         }
       }
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => {
+      if (unmounted) {
+        fn(); // unmounted while registering — release immediately
+      } else {
+        unlistenRef.current = fn;
+      }
+    });
+
+    return () => {
+      unmounted = true;
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+    };
   }, []);
 
   const removeFile = useCallback((id: string) => {

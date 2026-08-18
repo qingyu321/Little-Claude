@@ -124,6 +124,16 @@ pub(crate) async fn download_file_with_skill_progress(
         return Err(format!("HTTP {} from {}", resp.status(), url));
     }
 
+    // M1/B4: cap the total download — a hijacked endpoint must not be able
+    // to fill the disk. Speech runtimes are < 200MB; 2GiB is a generous
+    // ceiling that still stops runaway streams.
+    const MAX_RUNTIME_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    if let Some(total) = resp.content_length() {
+        if total > MAX_RUNTIME_BYTES {
+            return Err(format!("下载过大 ({} bytes, 上限 2 GiB)", total));
+        }
+    }
+
     let total = resp.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut stream = resp.bytes_stream();
@@ -136,9 +146,16 @@ pub(crate) async fn download_file_with_skill_progress(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        downloaded += chunk.len() as u64;
+        if downloaded > MAX_RUNTIME_BYTES {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!(
+                "下载超过 2 GiB 上限（已下载 {} bytes），已中止",
+                downloaded
+            ));
+        }
         file.write_all(&chunk)
             .map_err(|e| format!("Write error {}: {}", dest.display(), e))?;
-        downloaded += chunk.len() as u64;
 
         // Throttle UI updates (~every 256 KiB or on completion).
         if downloaded - last_emit >= 256 * 1024 || (total > 0 && downloaded >= total) {

@@ -29,7 +29,25 @@ use crate::resolve_git_bash;
 // growth. Note: codex sessions register their requests in start_codex_session
 // (lib.rs, out of scope) — the codex branch of respond_permission therefore
 // validates format only.
-const PERMISSION_REQUEST_TTL_SECS: u64 = 5 * 60;
+// User feedback: 5 minutes was too aggressive — a permission/question card
+// left unanswered while the user reads/thinks/steps away expired, and the
+// late click failed with "Unknown or expired permission request" (surfaced
+// as the generic "出了点问题" fallback). The CLI itself waits indefinitely
+// for the response, so a longer TTL matches reality; the registry still
+// rejects ids that were never issued by the CLI.
+const PERMISSION_REQUEST_TTL_SECS: u64 = 60 * 60;
+
+/// cmd /C re-parses the command line: a model/tool/permission value
+/// containing cmd metacharacters (& | < > ^ % " etc.) could inject
+/// extra commands. Model names and tool names are enumerated values —
+/// reject anything outside a safe charset instead of trying to escape.
+/// Shared by session start (start_claude_session) and the one-shot title
+/// generation process (metadata.rs) — both can end up in a cmd /C wrapper.
+pub(crate) fn cmd_arg_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/@[]()".contains(c))
+}
 
 static PENDING_PERMISSION_REQUESTS: OnceLock<Mutex<HashMap<String, std::time::Instant>>> =
     OnceLock::new();
@@ -88,6 +106,11 @@ pub async fn start_claude_session(
         .session_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // B1: register this session's project root so the file commands'
+    // authorized-path gate accepts files under it. Rust-internal — there is
+    // deliberately no IPC path that can add roots.
+    crate::commands::files::register_project_root(std::path::Path::new(&params.cwd));
 
     // ─── CLI Backend routing ────────────────────────────────────────────
     let mut cli_backend = params.cli_backend.as_deref().unwrap_or("claude").to_string();
@@ -148,10 +171,11 @@ pub async fn start_claude_session(
         "--strict-mcp-config".to_string(),
     ];
 
-    // A2: --include-partial-messages is opt-out (default true for backward compat).
-    // Disabling it reduces stream event volume 10-50×, dramatically improving
-    // performance on low-CPU / integrated-GPU machines.
-    if params.include_partial_messages.unwrap_or(true) {
+    // A2/P3: --include-partial-messages is now opt-IN (default false) —
+    // the per-token delta events multiply IPC traffic 10-50×, and the
+    // frontend's 150ms full-message flush already keeps streaming smooth.
+    // Users who want maximum smoothness can re-enable it in Settings.
+    if params.include_partial_messages.unwrap_or(false) {
         args.push("--include-partial-messages".to_string());
     }
 
@@ -159,11 +183,8 @@ pub async fn start_claude_session(
     // containing cmd metacharacters (& | < > ^ % " etc.) could inject
     // extra commands. Model names and tool names are enumerated values —
     // reject anything outside a safe charset instead of trying to escape.
-    fn cmd_arg_safe(s: &str) -> bool {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_.:/@[]()".contains(c))
-    }
+    // (Implementation lives at module level so metadata.rs's one-shot title
+    // process shares the same guard.)
 
     // Resume an existing CLI session if requested
     eprintln!("[LITTLECLAUDE] resume_session_id={:?}", params.resume_session_id);
@@ -437,6 +458,16 @@ pub async fn start_claude_session(
     ));
     if let Err(e) = std::fs::write(&settings_path, &settings_json) {
         return Err(format!("Failed to write settings file: {}", e));
+    }
+    // M1 (security): the file holds ANTHROPIC_API_KEY/AUTH_TOKEN for ~60s —
+    // on multi-user Unix the default 0644 would make it world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &settings_path,
+            std::fs::Permissions::from_mode(0o600),
+        );
     }
     // Best-effort cleanup: the CLI reads the file at startup, so deleting
     // it 60s later is safe even for long-running sessions.
@@ -1079,16 +1110,21 @@ pub async fn start_claude_session(
             // a preview for display purposes.
             let json_to_emit = {
                 let serialized_len = line.len();
-                const MAX_IPC_BYTES: usize = 2 * 1024 * 1024; // 2MB threshold
+                // Perf #3: align with the frontend display cap (256KB in
+                // useStreamProcessor) — previously a near-2MB tool_result was
+                // parsed, cloned and shipped over IPC in full only for the
+                // JS side to throw away all but 256KB. Cut it here instead.
+                const MAX_IPC_BYTES: usize = 1024 * 1024; // 1MB threshold
+                const BLOCK_CAP: usize = 300 * 1024; // just above the JS display cap
                 if serialized_len > MAX_IPC_BYTES {
                     let mut truncated = json.clone();
                     // Truncate content in tool_result blocks and message content
                     if let Some(content) = truncated.get_mut("content") {
-                        truncate_large_content(content, MAX_IPC_BYTES / 2);
+                        truncate_large_content(content, BLOCK_CAP);
                     }
                     if let Some(msg) = truncated.get_mut("message") {
                         if let Some(content) = msg.get_mut("content") {
-                            truncate_large_content(content, MAX_IPC_BYTES / 2);
+                            truncate_large_content(content, BLOCK_CAP);
                         }
                     }
                     truncated
@@ -1191,12 +1227,34 @@ pub async fn start_claude_session(
     tokio::spawn(async move {
         let reader = BufReader::with_capacity(256 * 1024, stderr);
         let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = emit_to_frontend(
-                &app_clone2,
-                &format!("claude:stderr:{}", sid_clone2),
-                serde_json::json!(line),
-            );
+        // #25 (bug): `while let Ok(Some(..))` exited the loop on the FIRST
+        // error — one GBK/non-UTF-8 stderr line (common from Windows tools)
+        // permanently silenced all later stderr, including codex error
+        // translation. Mirror the F1 skip-and-continue strategy from stdout.
+        let mut err_count = 0u32;
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    err_count = 0;
+                    let _ = emit_to_frontend(
+                        &app_clone2,
+                        &format!("claude:stderr:{}", sid_clone2),
+                        serde_json::json!(line),
+                    );
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    err_count += 1;
+                    eprintln!(
+                        "[LITTLECLAUDE:WARN] stderr read error (consecutive #{}), skipping line: {}",
+                        err_count, e
+                    );
+                    if err_count >= 100 {
+                        break; // permanently broken pipe — stop
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
         }
     });
 
@@ -1274,13 +1332,77 @@ pub async fn send_stdin(
         )
         .await;
         if result.is_err() {
-            // The service may have been restarted under us (H1 respawn),
-            // orphaning this tab's DSH session on the new service. Drop the
-            // mapping so the next start_deepseek_session creates a fresh
-            // session instead of erroring forever.
+            // R11 (bug): the service may have been restarted under us (H1
+            // respawn), orphaning this tab's DSH session on the new service.
+            // Old behavior just dropped the mapping and left the tab dead
+            // ("No DSH session" on every later message, context silently
+            // gone). Now: rebuild a session in the same cwd, re-register the
+            // route, retry THIS prompt once, and tell the user the context
+            // was reset.
+            let old_cwd = process_mgr.get_deepseek_session_cwd(&session_id).await;
+            let old_route = {
+                let routes = service.session_routes.lock().await;
+                routes.get(&dsh_sid).cloned()
+            };
             process_mgr.remove_deepseek_session(&session_id).await;
+            service.session_routes.lock().await.remove(&dsh_sid);
+            if let Some(cwd) = old_cwd {
+                if let Ok(created) = crate::commands::dsh_service::unary(
+                    &service.base_url,
+                    "session.create",
+                    serde_json::json!({ "cwd": cwd }),
+                )
+                .await
+                {
+                    if let Some(new_sid) = created
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                    {
+                        process_mgr
+                            .insert_deepseek_session(
+                                &session_id,
+                                new_sid.clone(),
+                                Some(cwd.clone()),
+                            )
+                            .await;
+                        {
+                            let mut routes = service.session_routes.lock().await;
+                            routes.insert(
+                                new_sid.clone(),
+                                old_route.unwrap_or(crate::commands::dsh_service::DshRoute {
+                                    stdin_id: session_id.clone(),
+                                    auto_allow: false,
+                                }),
+                            );
+                        }
+                        let retried = crate::commands::dsh_service::unary(
+                            &service.base_url,
+                            "session.prompt",
+                            serde_json::json!({
+                                "sessionId": new_sid,
+                                "mode": mode,
+                                "content": [{ "type": "text", "text": message }],
+                            }),
+                        )
+                        .await;
+                        if retried.is_ok() {
+                            let _ = crate::emit_stream_event(
+                                &session_id,
+                                serde_json::json!({
+                                    "type": "system",
+                                    "subtype": "info",
+                                    "message": "DSH 服务已重启：会话已重建（上下文已重置），本条消息已重新发送",
+                                }),
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            return result.map(|_| ());
         }
-        result.map(|_| ())
+        Ok(())
     } else {
         // Claude: wrap user text in stream-json NDJSON format
         let json_msg = serde_json::json!({
@@ -1353,17 +1475,25 @@ pub async fn respond_permission(
             .await
             .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
         let outcome = if allow { "allowed-once" } else { "denied" };
+        let mut resp_value = serde_json::json!({
+            "sessionId": dsh_sid,
+            "approvalId": request_id,
+            "outcome": outcome,
+        });
+        // AskUserQuestion: QuestionCard puts the selected answers into
+        // updatedInput.answers — forward them (additive field; tool
+        // approvals simply ignore it). Without this the DSH agent received
+        // an allow-with-no-answer for question cards.
+        if let Some(ans) = updated_input.as_ref().and_then(|u| u.get("answers")) {
+            resp_value["answers"] = ans.clone();
+        }
         let result = crate::commands::dsh_service::unary(
             &service.base_url,
             "respond",
             serde_json::json!({
                 "type": "client-response",
                 "rpcId": request_id,
-                "result": { "ok": true, "value": {
-                    "sessionId": dsh_sid,
-                    "approvalId": request_id,
-                    "outcome": outcome,
-                } },
+                "result": { "ok": true, "value": resp_value },
             }),
         )
         .await;
@@ -1376,12 +1506,16 @@ pub async fn respond_permission(
         result.map(|_| ())
     } else if backend_name.as_deref() == Some("codex") {
         // M4: codex permission requests are registered in start_codex_session
-        // (lib.rs, out of scope for this module's registry). Their request_ids
-        // are JSON-RPC integer ids (backends/codex.rs translate_approval_request)
-        // — enforce that format as the codex-side guard.
+        // (lib.rs, out of scope for this module's registry). JSON-RPC ids can
+        // be numeric OR string ("req_…" — see codex.rs translate_approval_request);
+        // #5 (bug): the old digits-only guard rejected every string id, so those
+        // approvals could never be answered. Accept both, restricted to a safe
+        // charset (the id travels as a JSON value, never a command line).
         if request_id.is_empty()
             || request_id.len() > 64
-            || !request_id.chars().all(|c| c.is_ascii_digit())
+            || !request_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
         {
             return Err(format!("Invalid codex permission request id: {}", request_id));
         }
@@ -2549,8 +2683,17 @@ pub async fn truncate_session_history(
         }
         Some(kept) => {
             let kept_lines = kept.split_inclusive('\n').count();
-            std::fs::write(&path, kept)
+            // #15 (bug): atomic rewrite — fs::write truncates the destination
+            // FIRST; a crash/power loss mid-write used to destroy the whole
+            // session history. Write tmp + rename instead (same pattern the
+            // other session writers already use).
+            let tmp = path.with_extension("jsonl.trunc-tmp");
+            std::fs::write(&tmp, kept)
                 .map_err(|e| format!("Failed to write truncated session: {}", e))?;
+            std::fs::rename(&tmp, &path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("Failed to replace session file: {}", e)
+            })?;
             Ok(Some(kept_lines))
         }
     }

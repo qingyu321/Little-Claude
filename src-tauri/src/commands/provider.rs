@@ -516,6 +516,9 @@ pub async fn test_provider_connection(
             if status == 401 {
                 // Definitely auth failure
                 let text = resp.text().await.unwrap_or_default();
+            // M3: some upstreams echo the Authorization header/key back in
+            // error bodies — strip key material before it reaches the UI.
+            let text = crate::commands::anthropic_proxy::redact_secrets(&text);
                 (
                     StepResult {
                         ok: false,
@@ -531,6 +534,9 @@ pub async fn test_provider_connection(
                 // 403 is ambiguous: could be auth failure OR model access restriction.
                 // Read body to disambiguate.
                 let text = resp.text().await.unwrap_or_default();
+            // M3: some upstreams echo the Authorization header/key back in
+            // error bodies — strip key material before it reaches the UI.
+            let text = crate::commands::anthropic_proxy::redact_secrets(&text);
                 let text_lower = text.to_lowercase();
                 let is_auth_error = text_lower.contains("invalid")
                     && (text_lower.contains("api key")
@@ -578,6 +584,9 @@ pub async fn test_provider_connection(
             } else {
                 // 400, 404, 429, 500, etc. -- auth is OK (server processed the request)
                 let text = resp.text().await.unwrap_or_default();
+            // M3: some upstreams echo the Authorization header/key back in
+            // error bodies — strip key material before it reaches the UI.
+            let text = crate::commands::anthropic_proxy::redact_secrets(&text);
                 let text_lower = text.to_lowercase();
                 let is_model_error = (status == 404)
                     || (text_lower.contains("model")

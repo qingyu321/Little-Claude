@@ -279,12 +279,15 @@ export const useMcpStore = create<McpState>()((set, get) => ({
     set({ isScanning: true, scanMessage: '' });
     const discovered: DiscoveredMcpServer[] = [];
     const seen = new Set<string>();
-    const home = await bridge.getHomeDir();
-    const currentJson = await readClaudeJson();
-    const imported = parseServers(currentJson.mcpServers as Record<string, unknown> | undefined);
-    const importedNames = new Set(imported.map((s) => s.name));
-
     try {
+      // B5: these awaits were previously OUTSIDE the try — a corrupt
+      // ~/.claude.json (readClaudeJson throws) left isScanning stuck true
+      // forever and an unhandled rejection.
+      const home = await bridge.getHomeDir();
+      const currentJson = await readClaudeJson();
+      const imported = parseServers(currentJson.mcpServers as Record<string, unknown> | undefined);
+      const importedNames = new Set(imported.map((s) => s.name));
+
       for (const server of imported) {
         mergeDiscovered(discovered, server, '~/.claude.json', importedNames, seen);
       }

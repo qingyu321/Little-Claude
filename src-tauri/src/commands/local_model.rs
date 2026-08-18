@@ -135,6 +135,11 @@ pub(crate) fn validate_ollama_model_name(model: &str) -> Result<String, String> 
     if model.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("Model name must not contain spaces or control characters".to_string());
     }
+    // M9 (security): a leading `-` makes ollama parse the "model name" as a
+    // flag (e.g. `--insecure` silently downgrades TLS on the pull).
+    if model.starts_with('-') {
+        return Err("Model name must not start with '-'".to_string());
+    }
     Ok(model.to_string())
 }
 

@@ -173,12 +173,47 @@ impl DshServiceState {
                         "try {{ $p = Get-Process -Id {} -ErrorAction Stop; [int64]($p.StartTime.ToUniversalTime().Subtract([datetime]::new(1970,1,1,0,0,0,[datetimekind]::Utc)).TotalSeconds) }} catch {{ -1 }}",
                         pid
                     );
-                    let out = std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                        .creation_flags(0x08000000)
-                        .output();
+                    // #19 (bug): .output() had NO timeout — a hung PowerShell
+                    // blocked this sync fn forever (and with it ensure()/exit
+                    // hooks that call it). Spawn + poll with a hard deadline.
+                    let out = (|| -> Option<std::process::Output> {
+                        let mut child = std::process::Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                            .creation_flags(0x08000000)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .ok()?;
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(3);
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    let mut stdout = Vec::new();
+                                    if let Some(mut s) = child.stdout.take() {
+                                        use std::io::Read;
+                                        let _ = s.read_to_end(&mut stdout);
+                                    }
+                                    return Some(std::process::Output {
+                                        status,
+                                        stdout,
+                                        stderr: Vec::new(),
+                                    });
+                                }
+                                Ok(None) => {
+                                    if std::time::Instant::now() >= deadline {
+                                        let _ = child.kill();
+                                        let _ = child.wait();
+                                        return None;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                Err(_) => return None,
+                            }
+                        }
+                    })();
                     match out {
-                        Ok(o) if o.status.success() => {
+                        Some(o) if o.status.success() => {
                             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
                             match s.parse::<i64>() {
                                 Ok(born) => {
@@ -367,8 +402,29 @@ async fn route_mux_frames(
                         let seq = payload.pointer("/event/seq").and_then(|v| v.as_u64());
                         if let Some(seq) = seq {
                             let mut seqs = last_seqs.lock().await;
-                            if seqs.get(&sid).is_some_and(|&last| seq <= last) {
-                                continue; // duplicate / out-of-order — drop
+                            if let Some(&last) = seqs.get(&sid) {
+                                if seq <= last {
+                                    if last - seq > 1000 {
+                                        // #23: a huge backwards jump means the
+                                        // service restarted and seq counters
+                                        // reset — holding the old watermark
+                                        // would silently drop ALL new frames
+                                        // until they climb past it. Re-arm.
+                                        log::warn!(
+                                            "[dsh:service] {} seq reset detected ({} → {}), re-arming watermark",
+                                            sid, last, seq
+                                        );
+                                    } else {
+                                        continue; // duplicate / out-of-order — drop
+                                    }
+                                } else if seq > last + 1 {
+                                    // #23: surface server-side frame loss instead
+                                    // of swallowing it without a trace.
+                                    log::warn!(
+                                        "[dsh:service] {} seq gap {} → {} ({} frames lost upstream)",
+                                        sid, last, seq, seq - last - 1
+                                    );
+                                }
                             }
                             seqs.insert(sid.clone(), seq);
                         }
@@ -412,20 +468,30 @@ async fn route_mux_frames(
                                 .unwrap_or("")
                                 .to_string();
                             if !approval_id.is_empty() {
-                                let _ = unary(
-                                    &base_url,
-                                    "respond",
-                                    json!({
-                                        "type": "client-response",
-                                        "rpcId": approval_id,
-                                        "result": { "ok": true, "value": {
-                                            "sessionId": sid,
-                                            "approvalId": approval_id,
-                                            "outcome": "allowed-once",
-                                        } },
-                                    }),
-                                )
-                                .await;
+                                // #20 (bug): fire the respond RPC from a spawned
+                                // task. This mux consumer is the SINGLE reader of
+                                // the broadcast(512) channel — a synchronous wait
+                                // (up to 30s per unary) used to stall every other
+                                // session's frames until >512 piled up and were
+                                // dropped as Lagged.
+                                let base = base_url.clone();
+                                let sid_owned = sid.clone();
+                                tokio::spawn(async move {
+                                    let _ = unary(
+                                        &base,
+                                        "respond",
+                                        json!({
+                                            "type": "client-response",
+                                            "rpcId": approval_id,
+                                            "result": { "ok": true, "value": {
+                                                "sessionId": sid_owned,
+                                                "approvalId": approval_id,
+                                                "outcome": "allowed-once",
+                                            } },
+                                        }),
+                                    )
+                                    .await;
+                                });
                             }
                         } else {
                             for ev in dsh_events::translate_interaction_frame(&payload) {

@@ -4,6 +4,8 @@ import type { McpServer, McpServerConfig } from '../../stores/mcpStore';
 import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
 import { friendlyError } from '../../lib/error-format';
+// F24: 删除确认改用现成的 ConfirmDialog（替代 window.confirm）
+import { ConfirmDialog } from '../shared/ConfirmDialog';
 
 export function McpPanel() {
   const t = useT();
@@ -22,16 +24,24 @@ export function McpPanel() {
     fetchServers();
   }, [fetchServers]);
 
-  const handleDelete = useCallback(async (name: string) => {
-    if (confirm(t('mcp.confirmDelete'))) {
-      try {
-        await deleteServer(name);
-      } catch (e) {
-        // A5: 原始错误经分类器转成友好文案
-        showToast(friendlyError(String(e)), 'error');
-      }
+  // F24: window.confirm → ConfirmDialog（组件现成，含键盘可达性）
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+
+  const handleDelete = useCallback((name: string) => {
+    setDeleteTarget(name);
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    const name = deleteTarget;
+    setDeleteTarget(null);
+    if (!name) return;
+    try {
+      await deleteServer(name);
+    } catch (e) {
+      // A5: 原始错误经分类器转成友好文案
+      showToast(friendlyError(String(e)), 'error');
     }
-  }, [deleteServer, t]);
+  }, [deleteTarget, deleteServer]);
 
   return (
     <div className="flex flex-col h-full">
@@ -146,6 +156,18 @@ export function McpPanel() {
           ))
         )}
       </div>
+
+      {/* F24: 删除确认对话框（替代 window.confirm） */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={t('mcp.delete')}
+        message={t('mcp.confirmDelete')}
+        detail={deleteTarget ?? undefined}
+        variant="danger"
+        confirmLabel={t('mcp.delete')}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

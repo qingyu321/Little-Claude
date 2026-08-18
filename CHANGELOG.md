@@ -6,6 +6,48 @@ All notable changes to Little Claude will be documented in this file.
 
 ---
 
+## [1.1.8] - 2026-08-16
+
+### Fixed
+
+- **权限/问题卡过期体验** — 等待时限 5 分钟放宽至 60 分钟；过期卡片显示明确的"停止并重发"指引（移除无用重试按钮）；错误分类器补全中文模式（超时/限流/余额/密钥/模型/网络/过载/上下文），中文报错不再落入无信息兜底文案；失败的对话回合在聊天区显示具体原因（前台+后台）
+- **DSH（DeepSeek）会话自动重建** — 服务重启后 send 失败时自动重建会话、重发本条消息并提示"上下文已重置"，不再静默失忆；AskUserQuestion 的选项答案现在真正回传 DSH（原先只发"允许"不带内容）
+- **面试助手修复批** — mimo SSE 逐 chunk UTF-8 解码导致中文答案乱码（改为字节层切行）；30 秒全请求超时掐断长流式答案（改为 120 秒 chunk 看门狗）；停止后 239MB ASR 模型复活常驻（代际守卫）；ASR 三命令异步化不再卡界面；畸形 WAV（sample_rate=0）崩溃防护；WASAPI EXTENSIBLE 混音格式按 SubFormat GUID 正确解码（整型 PCM 混音不再解码成垃圾）；env-key 白名单补齐"测试连接"入口；上游错误体密钥脱敏
+- **后台流路径 draft promote** — 修复"发完首条消息立即切 tab"时的幽灵会话与双进程并发写同一 JSONL 风险
+- **资源生命周期** — LRU 淘汰不再泄漏存活 CLI 进程；prewarm 孤儿进程回收；kill 重建路径回收 stdin 映射；磁盘加载中途切走不再永久卡"运行中"
+- **交互正确性** — QueueDock 插话（steer）明确仅 DeepSeek 后端可用（原先非 DSH 后端静默丢消息）；中文输入法组合态 + Ctrl+Tab 不再把组合文本写进别的 tab 草稿；429/额度错误时暂停排队消息自动发射；process_exit 通知区分成败；非流式代理回合 usage 记录补 `msg_` 前缀修复统计双算；npm 安装链 `--prefix/--cache` cmd 元字符校验；git checkout 禁止 pathspec 恢复形式（filter.smudge 执行面）；tracked_sessions 原子写；web_update 无 v 版本目录清理失效修复
+
+### Changed / Performance
+
+- 文件命令（树扫描/读文件/base64/复制）移入阻塞池，大项目扫描不再阻塞 IPC 管线
+- 文件搜索树深度重扫链掐断：清空查询即释放、结构变更只标脏、下次输入再重建；搜索结果 memo + 150ms 防抖 + 500 条上限
+- `includePartialMessages` 默认关闭（逐 token 事件量降 10-50 倍，设置可重新打开）
+- 大文件预览护栏（>1MB 先载前 512KB）、文件树节点 memo、filteredTree 免深拷贝、changedFiles 上限 500、会话列表条目 memo
+
+### Added
+
+- 新会话空状态起步示例提示（点击填入输入框）；CLI 未安装常驻横幅一键直达安装；会话高级搜索支持 DeepSeek 后端筛选；若干硬编码文案国际化（Sending.../Retry/月份后缀/原生 confirm 替换）
+
+---
+
+## [1.1.7] - 2026-08-16
+
+### Security
+
+- **严重**：标题生成 Windows 命令注入修复（每会话自动触发、恶意项目内容可达 RCE）— 提示词改走 stdin、API 配置改走 0600 临时文件、对齐 session.rs 方案
+- API key 不再出现在进程命令行；`claude plugin` 参数 cmd 元字符拦截；git 命令全面收紧（授权工作区、--no-ext-diff/--no-textconv、恶意仓库 fsmonitor/hooks 压制、stdout 限量读、破坏性变体拦截）
+- 外部打开命令路径门控（拒 UNC/`-` 开头 + 授权校验）；热更防降级 + 主机白名单 + 随机临时文件名；敏感目录黑名单补齐 Windows/macOS 浏览器/编辑器凭据库；temp 白名单收窄；CLI pin 限已知二进制名；原生更新 manifest 文件名校验 + 下载上限；SmartScreen 恢复；CSP 残留源清理；provider 错误体脱敏；面试 env-key 白名单；权限请求 TTL 5 分钟 → 60 分钟
+
+### Fixed
+
+- 发消息期间切换导致消息串会话/监听器丢失（提交全程快照）；多标签缓存真 LRU + Ctrl+Tab 磁盘回退；Codex 握手双分支死锁、字符串审批 id 无法应答、错误响应静默丢弃；权限卡进程死亡后点击无反应；排队消息出队顺序；后台问题卡重复；模型切换不再删除思考历史；draft promote 迁移旁路结构；会话历史截断原子写；stderr 一行乱码即永久静默；未登录误报已认证；SSE 转换背压丢帧、redact 多字节 panic、缓冲上限与 idle 超时；dsh_service shutdown 超时/auto-approve 异步化/seq gap 检测；DSH turn/end 错误详情透传 + 失败回合消息展示；过期卡片静态提示
+
+### Performance
+
+- 统计弹窗 DSH 同步移入阻塞池 + assistant 行预过滤；大工具结果 IPC 前截断至 ~300KB；右侧五面板 React.lazy；会话列表轮询 300s；流式前段 50ms 节流；磁盘加载历史批量化；Codex 每事件日志移除
+
+---
+
 ## [0.10.0] - 2026-04-05
 
 ### Added

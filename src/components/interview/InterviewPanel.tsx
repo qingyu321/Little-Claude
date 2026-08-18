@@ -14,6 +14,8 @@ const SILENCE_DURATION_MS = 1500;
 //    音频无限累积。超限强制判句，防止内存/请求体积失控；
 // 2) 超长连续语音（无 1.5s 停顿）也靠它强制分段，避免一次发送整段长音频。
 const MAX_QA_AUDIO_CHUNKS = 75;
+// F6: 本地 ASR 冷启动暂存环形上限——引擎启动失败/冷启动过长时不再无界增长（超出丢最旧）
+const MAX_PENDING_ASR_CHUNKS = 30;
 // 系统音频采集失败后自动重启的退避间隔与最大重试次数（防无限重启循环）。
 const SYS_AUDIO_RESTART_MS = 5000;
 const SYS_AUDIO_MAX_RESTARTS = 3;
@@ -586,6 +588,10 @@ export function InterviewPanel() {
           });
         } else {
           // 引擎尚未就绪（冷启动窗口）→ 暂存，等就绪后一次性 flush
+          // F6: 环形上限，超出丢最旧（启动失败时暂存不再无界增长）
+          if (pendingAudioRef.current.length >= MAX_PENDING_ASR_CHUNKS) {
+            pendingAudioRef.current.shift();
+          }
           pendingAudioRef.current.push(wavBase64);
         }
       }
@@ -659,6 +665,10 @@ export function InterviewPanel() {
         }
       }).catch((e) => {
         debugWarn('local-asr', 'Failed to start session:', e);
+        // F6: 启动失败——清空冷启动暂存（永远不会被 flush，此前无界增长），
+        // 并把错误写入 audioError 显示给用户
+        pendingAudioRef.current = [];
+        setAudioError(`本地 ASR 启动失败: ${e}`);
       });
     } else if (!needsLocal && localAsrActive) {
       bridge.stopLocalAsrSession().then(() => {
@@ -778,6 +788,10 @@ export function InterviewPanel() {
             debugWarn('local-asr', 'push (sys audio) error:', e);
           });
         } else {
+          // F6: 环形上限，超出丢最旧（与麦克风暂存路径一致）
+          if (pendingAudioRef.current.length >= MAX_PENDING_ASR_CHUNKS) {
+            pendingAudioRef.current.shift();
+          }
           pendingAudioRef.current.push(wavBase64);
         }
       }

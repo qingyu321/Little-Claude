@@ -83,7 +83,6 @@ export function usePetBridge() {
     let petShown = false;
     let timer: number | undefined;
     let lastJson: string | null = null;
-    let unsubCmd: (() => void) | null = null;
     // Notification state: per-agent phase of the last pushed payload (an
     // active → completed/error transition is the notify trigger), per-agent
     // cooldown, and a one-shot permission check.
@@ -167,6 +166,11 @@ export function usePetBridge() {
       }, PET_THROTTLE_MS);
     };
 
+    // B3b: same async-registration race as useFileAttachments — the unlisten
+    // may resolve after unmount; release it immediately in that case, and
+    // swallow registration errors instead of an unhandled rejection.
+    const unsubCmdRef: { current: (() => void) | null } = { current: null };
+    let unmounted = false;
     onPetCommand((cmd) => {
       switch (cmd.type) {
         case "focus-main":
@@ -210,7 +214,13 @@ export function usePetBridge() {
         }
       }
     }).then((un) => {
-      unsubCmd = un;
+      if (unmounted) {
+        un(); // unmounted while registering — release immediately
+      } else {
+        unsubCmdRef.current = un;
+      }
+    }).catch((err) => {
+      console.error('[petBridge] onPetCommand registration failed:', err);
     });
 
     // Basic store subscription (zustand v5 vanilla): fires on every state change,
@@ -242,11 +252,13 @@ export function usePetBridge() {
     push();
 
     return () => {
+      unmounted = true;
       if (timer) clearTimeout(timer);
       unsubSession();
       unsubChat();
       unsubEnable();
-      unsubCmd?.();
+      unsubCmdRef.current?.();
+      unsubCmdRef.current = null;
     };
   }, []);
 }

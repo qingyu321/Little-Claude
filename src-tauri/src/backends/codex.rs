@@ -230,9 +230,18 @@ impl CliBackend for CodexBackend {
         _tool_use_id: Option<&str>,
     ) -> String {
         let allow = matches!(behavior, PermissionBehavior::Allow);
+        // #5 (bug): JSON-RPC ids may be numbers OR strings — codex approval
+        // requests can carry string ids ("req_…"). Parsing to u64 with
+        // unwrap_or(0) answered every string-id request with id 0, which the
+        // server never matches → the approval hung forever. Echo the id back
+        // with its original type.
+        let id_val: Value = match request_id.parse::<u64>() {
+            Ok(n) => Value::Number(n.into()),
+            Err(_) => Value::String(request_id.to_string()),
+        };
         let resp = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": request_id.parse::<u64>().unwrap_or(0),
+            "id": id_val,
             "result": {
                 "allow": allow
             }
@@ -752,6 +761,36 @@ impl CodexBackend {
                         "session_id": result.get("thread").and_then(|t| t.get("id")).and_then(|v| v.as_str()).unwrap_or("")
                     }),
                 ));
+            }
+        }
+        // #9 (bug): JSON-RPC error responses (rejected turn/start, expired
+        // thread, auth failure) used to be dropped without a trace — the UI
+        // sat in "generating" forever with zero diagnostics. Surface them as
+        // result/error events the frontend already knows how to render.
+        if msg.get("id").is_some() {
+            if let Some(err) = msg.get("error") {
+                let message = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown codex error");
+                return Some(UnifiedEvent::Result {
+                    subtype: "error".to_string(),
+                    usage: Usage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_write_tokens: None,
+                        extra: empty_object(),
+                    },
+                    total_cost_usd: None,
+                    duration_ms: 0,
+                    num_turns: 0,
+                    uuid: None,
+                    result: Some(format!("Codex error: {}", message)),
+                    parent_tool_use_id: None,
+                    extra: empty_object(),
+                });
             }
         }
         None

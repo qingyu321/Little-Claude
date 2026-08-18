@@ -8,6 +8,7 @@ import { useLightboxStore } from './ImageLightbox';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useFileStore } from '../../stores/fileStore';
 import { bridge } from '../../lib/tauri-bridge';
+import { isPathInsideWorkspace } from '../../lib/path-safety';
 import { useT } from '../../lib/i18n';
 
 /* ================================================================
@@ -26,13 +27,6 @@ const SAFE_LINK_RE = /^(https?|mailto|tel):/i;
 
 function isSafeExternalLink(href: string): boolean {
   return SAFE_LINK_RE.test(href);
-}
-
-/** True if a local file path is inside the given workspace directory. */
-function isPathInsideWorkspace(filePath: string, wd: string): boolean {
-  const base = wd.replace(/\\/g, '/').replace(/\/+$/, '');
-  const p = filePath.replace(/\\/g, '/');
-  return p === base || p.startsWith(base + '/');
 }
 
 /** Broken/rejected image placeholder (shared by AsyncImage and the img handler). */
@@ -443,7 +437,9 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
     [hasHugeCode, skipHighlight],
   );
 
-  // Stable components object — only recreated when `t` changes
+  // Stable components object — only recreated when `t` changes or when the
+  // basePath prop changes (img/code handlers close over basePath; a stale
+  // memo would resolve relative paths against the previous workspace).
   const components = useMemo(() => ({
     table: ({ children }: { children?: ReactNode }) => (
       <div className="my-3 overflow-x-auto rounded-lg border border-border-subtle">
@@ -537,14 +533,19 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
         <img
           src={resolvedSrc}
           alt={alt || ''}
+          // Privacy: third-party image hosts must not see the workspace path
+          // (the app origin) via the Referer header.
+          referrerPolicy="no-referrer"
+          loading="lazy"
           className="max-w-full max-h-96 object-contain cursor-zoom-in"
           onClick={() => {
             if (!resolvedSrc) return;
             if (resolvedSrc.startsWith('data:')) {
               useLightboxStore.getState().open(resolvedSrc, undefined, alt);
-            } else {
+            } else if (/^https:/i.test(resolvedSrc)) {
               openUrl(resolvedSrc);
             }
+            // http: links are not opened externally (downgrade-prone).
           }}
           onError={(e) => {
             const el = e.currentTarget;
@@ -610,12 +611,11 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
         // Security: never turn an out-of-workspace path into a clickable
         // file chip — a malicious/accidental model output could otherwise
         // point at C:\Users\...\.ssh\config and read secrets into the
-        // preview pane on a single click. Absolute paths and paths outside
-        // the current working directory render as plain text instead.
+        // preview pane on a single click. Both absolute paths AND relative
+        // paths that fold (`../`) outside the workspace render as plain
+        // text instead.
         const wd = basePath || useSettingsStore.getState().workingDirectory || '';
-        const inWorkspace = resolved.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(text)
-          ? isPathInsideWorkspace(resolved, wd)
-          : true; // relative path (resolved against the workspace base) is fine
+        const inWorkspace = isPathInsideWorkspace(resolved, wd);
         if (!inWorkspace) {
           return <code>{text}</code>;
         }
@@ -637,7 +637,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
       }
       return <code>{children}</code>;
     },
-  }), [t]); // A6: removed resolveBase dep — workingDirectory read imperatively at call time
+  }), [t, basePath]); // A6: workingDirectory still read imperatively at call time
 
   return (
     <div className={`prose prose-sm max-w-none

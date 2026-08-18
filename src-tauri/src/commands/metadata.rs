@@ -52,7 +52,7 @@ pub async fn generate_session_title(
         user_msg, asst_msg
     );
 
-    // Resolve model and env vars for provider
+    // ── Resolve model and env vars for provider ──
     let (provider_env, provider_keys_to_remove, model_name) = if let Some(ref pid) = provider_id {
         let (env, keys, _args, provider_used) = resolve_provider_env(Some(pid))?;
         // If the provider was skipped (OpenAI-format for Claude), fall back to
@@ -79,19 +79,26 @@ pub async fn generate_session_title(
         (HashMap::new(), vec![], "claude-haiku-4-5-20251001".to_string())
     };
 
+    // The model name lands in `--model` on the CLI command line. On Windows a
+    // .cmd wrapper re-parses the line, so cmd metacharacters in a provider-
+    // configured model name could inject extra arguments — same guard as
+    // start_claude_session (session.rs::cmd_arg_safe).
+    if !crate::commands::session::cmd_arg_safe(&model_name) {
+        return Err(format!("Invalid model name for title generation: {}", model_name));
+    }
+
     // Resolve claude binary
     let claude_bin = find_claude_binary().ok_or_else(|| "Claude CLI not found".to_string())?;
 
     let enriched_path = build_enriched_path();
 
     // M2 (security): run the one-shot CLI in an isolated temp directory instead
-    // of the app's working directory. Claude Code auto-loads {cwd}/CLAUDE.md
-    // and the `--dangerously-skip-permissions` flag (kept so a would-be tool
-    // call cannot block the unattended title generation on an unanswerable
-    // permission prompt) would otherwise let it act on project files. Title
-    // generation needs no project context — an empty temp cwd leaves nothing
-    // sensitive for a tool call to touch, and `--max-turns 1` plus the prompt
-    // ("only the title text") keep it to a single response.
+    // of the app's working directory. Claude Code auto-loads {cwd}/CLAUDE.md,
+    // which would otherwise let a planted project file act as injected context.
+    // Title generation needs no project context — an empty temp cwd leaves
+    // nothing sensitive for a tool call to touch, and `--max-turns 1` plus the
+    // prompt ("only the title text") keep it to a single response. (B2: the
+    // `--dangerously-skip-permissions` flag has been removed — see below.)
     // Random, per-call temp dir: a PID-based name is predictable, so another
     // local process could pre-create it and plant a malicious CLAUDE.md or
     // skill that the one-shot CLI (run with --dangerously-skip-permissions)
@@ -110,16 +117,29 @@ pub async fn generate_session_title(
     let _title_cwd_guard = TempDirGuard(title_cwd.clone());
 
     // Spawn a one-shot CLI process: -p for single prompt, --output-format json for structured output
+    // B2: NO --dangerously-skip-permissions here. The prompt embeds raw
+    // conversation text that may carry prompt injection; with permissions
+    // skipped, an injected "read ~/.ssh/id_rsa" would execute silently and
+    // the result could leak back through the generated title. Default
+    // permission mode means a would-be tool call blocks on an unanswered
+    // permission prompt → 45s timeout → title generation fails → the
+    // frontend falls back to its default title. Safe degradation.
+    // S1/H1 (security): the prompt embeds raw conversation text (attacker-
+    // influenceable via prompt injection) and must NEVER land on the command
+    // line. On Windows the npm-installed CLI is `claude.cmd`; CreateProcess
+    // implicitly re-parses the whole command line through cmd.exe, so quotes
+    // or `& | ^ %` in an argv prompt enable argument breakage at best and
+    // arbitrary command execution at worst. Fix: pass the prompt through the
+    // child's stdin (`claude -p` with no prompt argument reads stdin) — same
+    // escape hatch the main session path uses for untrusted content.
     let mut args = vec![
         "-p".to_string(),
-        prompt,
         "--model".to_string(),
         model_name,
         "--output-format".to_string(),
         "json".to_string(),
         "--max-turns".to_string(),
         "1".to_string(),
-        "--dangerously-skip-permissions".to_string(),
     ];
 
     // When a provider is active, pass API config via --settings so it overrides
@@ -127,6 +147,18 @@ pub async fn generate_session_title(
     // e.g. CCSwitch writing ANTHROPIC_AUTH_TOKEN). Always emit the block to
     // clear the OAuth token — even providers without base_url/api_key need
     // this protection.
+    //
+    // S1/H1/M1 (security): write the settings JSON (which contains the API
+    // key) to a 0600 temp file and pass the PATH — never inline JSON on the
+    // command line (cmd.exe quote mangling on Windows + any local process can
+    // read keys off the command line). Mirrors session.rs.
+    struct SettingsFileGuard(std::path::PathBuf);
+    impl Drop for SettingsFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let mut _settings_guard: Option<SettingsFileGuard> = None;
     if provider_id.is_some() {
         let base_url = provider_env
             .get("ANTHROPIC_BASE_URL")
@@ -160,8 +192,24 @@ pub async fn generate_session_title(
             "skipWebFetchPreflight": true,
             "env": settings_env,
         });
+        let settings_path = std::env::temp_dir().join(format!(
+            "little-claude-title-settings-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&settings_path, settings_val.to_string())
+            .map_err(|e| format!("Failed to write title-gen settings file: {}", e))?;
+        // M1: keep the API key out of other users' reach on multi-user Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &settings_path,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+        _settings_guard = Some(SettingsFileGuard(settings_path.clone()));
         args.push("--settings".to_string());
-        args.push(settings_val.to_string());
+        args.push(settings_path.to_string_lossy().to_string());
     }
 
     let mut cmd = tokio::process::Command::new(&claude_bin);
@@ -170,6 +218,7 @@ pub async fn generate_session_title(
         .env("PATH", &enriched_path)
         .env_remove("CLAUDECODE") // Allow nested CLI launch
         .env_remove("CLAUDE_CODE_ENTRY") // Remove any other nesting guards
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // Kill the child if the timeout future is dropped (spawned process is
@@ -204,9 +253,16 @@ pub async fn generate_session_title(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn claude for title gen: {}", e))?;
+    // S1: deliver the untrusted prompt via stdin, never argv. EPIPE (child
+    // died early) is ignored — wait_with_output below surfaces the failure.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    }
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(45),
         child.wait_with_output(),

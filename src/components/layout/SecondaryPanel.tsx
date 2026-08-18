@@ -1,12 +1,15 @@
-import { useEffect } from 'react';
+import { useEffect, lazy, Suspense } from 'react';
 import { useSettingsStore, SecondaryPanelTab } from '../../stores/settingsStore';
-import { FileExplorer } from '../files/FileExplorer';
-import { SkillsPanel } from '../skills/SkillsPanel';
-import { PluginsPanel } from '../plugins/PluginsPanel';
-import { PreviewPanel } from '../preview/PreviewPanel';
-import { InterviewPanel } from '../interview/InterviewPanel';
 import { useInterviewStore } from '../../stores/interviewStore';
 import { useT } from '../../lib/i18n';
+
+// fix21: 静态 import 改 React.lazy + Suspense——按 activeTab 分块加载，
+// 首屏不再为未打开的面板付出解析/执行成本（与 App.tsx 的 lazy 模式一致）
+const FileExplorer = lazy(() => import('../files/FileExplorer').then(m => ({ default: m.FileExplorer })));
+const SkillsPanel = lazy(() => import('../skills/SkillsPanel').then(m => ({ default: m.SkillsPanel })));
+const PluginsPanel = lazy(() => import('../plugins/PluginsPanel').then(m => ({ default: m.PluginsPanel })));
+const PreviewPanel = lazy(() => import('../preview/PreviewPanel').then(m => ({ default: m.PreviewPanel })));
+const InterviewPanel = lazy(() => import('../interview/InterviewPanel').then(m => ({ default: m.InterviewPanel })));
 
 const tabs: { id: SecondaryPanelTab; labelKey: string; icon: string }[] = [
   { id: 'files', labelKey: 'panel.files', icon: 'M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3z' },
@@ -87,13 +90,15 @@ export function SecondaryPanel() {
         </button>
       </div>
 
-      {/* Content */}
+      {/* Content — fix21: lazy 面板套 Suspense，fallback 用 null（切换瞬间保持空白即可） */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === 'files' && <FileExplorer />}
-        {activeTab === 'preview' && <PreviewPanel />}
-        {activeTab === 'skills' && <SkillsPanel />}
-        {activeTab === 'plugins' && <PluginsPanel />}
-        {activeTab === 'interview' && <InterviewPanel />}
+        <Suspense fallback={null}>
+          {activeTab === 'files' && <FileExplorer />}
+          {activeTab === 'preview' && <PreviewPanel />}
+          {activeTab === 'skills' && <SkillsPanel />}
+          {activeTab === 'plugins' && <PluginsPanel />}
+          {activeTab === 'interview' && <InterviewPanel />}
+        </Suspense>
       </div>
     </div>
   );

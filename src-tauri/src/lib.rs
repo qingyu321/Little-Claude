@@ -980,6 +980,24 @@ pub(crate) fn safe_data_dir() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "Cannot determine home directory".to_string())
 }
 
+/// Ensure the safe data dir exists with tightened permissions. On Unix the
+/// directory is set to 0700: it holds providers.json + providers.key,
+/// usage_log.jsonl and localStorage snapshots — other local users must not
+/// even list its contents (C1: the master key file is 0600, but a 0755
+/// directory would leak file names and, on some setups, enable traversal).
+/// Idempotent; called once at setup and re-applied whenever a writer creates
+/// the directory later.
+pub(crate) fn ensure_safe_data_dir() -> Result<std::path::PathBuf, String> {
+    let dir = safe_data_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建数据目录: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(dir)
+}
+
 /// Truncate to at most `max_bytes` bytes, never splitting a UTF-8 character.
 /// For log previews of CLI output (which contains Chinese text).
 pub(crate) fn utf8_prefix(s: &str, max_bytes: usize) -> &str {
@@ -1214,10 +1232,15 @@ pub(crate) fn extract_node_archive(
     _archive_name: &str,
     install_dir: &std::path::Path,
 ) -> Result<(), String> {
+    // M1: cap the TOTAL decompressed size so a crafted archive cannot
+    // exhaust disk (zip-bomb defense on top of the per-entry path guards;
+    // the data is SHA-256-verified today, keep the belt-and-braces anyway).
+    const MAX_EXTRACT_TOTAL: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
     match ext {
         "tar.gz" => {
             let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(data));
             let mut archive = tar::Archive::new(decoder);
+            let mut total_written: u64 = 0;
 
             // Node.js tar.gz extracts to a subdirectory like "node-v22.22.0-darwin-arm64/"
             // We want the contents directly in install_dir
@@ -1268,6 +1291,21 @@ pub(crate) fn extract_node_archive(
                     let _ = std::fs::create_dir_all(parent);
                 }
 
+                // Count the declared entry size toward the total cap before
+                // unpacking (tar headers are attacker-controlled, but a lying
+                // size only makes unpack fail — the cap is a disk guard).
+                let size = entry
+                    .header()
+                    .size()
+                    .map_err(|e| format!("tar size error: {}", e))?;
+                total_written = total_written.saturating_add(size);
+                if total_written > MAX_EXTRACT_TOTAL {
+                    return Err(format!(
+                        "解压总量超过 {} GiB 上限，已中止",
+                        MAX_EXTRACT_TOTAL / (1024 * 1024 * 1024)
+                    ));
+                }
+
                 entry
                     .unpack(&target)
                     .map_err(|e| format!("unpack error for {:?}: {}", stripped, e))?;
@@ -1278,6 +1316,7 @@ pub(crate) fn extract_node_archive(
             let reader = std::io::Cursor::new(data);
             let mut archive =
                 zip::ZipArchive::new(reader).map_err(|e| format!("zip open error: {}", e))?;
+            let mut total_written: u64 = 0;
 
             for i in 0..archive.len() {
                 let mut file = archive
@@ -1326,8 +1365,15 @@ pub(crate) fn extract_node_archive(
                     }
                     let mut outfile = std::fs::File::create(&target)
                         .map_err(|e| format!("create file error: {}", e))?;
-                    std::io::copy(&mut file, &mut outfile)
+                    let n = std::io::copy(&mut file, &mut outfile)
                         .map_err(|e| format!("write error: {}", e))?;
+                    total_written = total_written.saturating_add(n);
+                    if total_written > MAX_EXTRACT_TOTAL {
+                        return Err(format!(
+                            "解压总量超过 {} GiB 上限，已中止",
+                            MAX_EXTRACT_TOTAL / (1024 * 1024 * 1024)
+                        ));
+                    }
                 }
             }
             Ok(())
@@ -1626,12 +1672,14 @@ async fn start_codex_session(
         // Phase 2: streaming (handshake complete)
         let mut phase: u8 = 0;
 
-        // Helper: check if a JSON line is a response (success or error)
-        // matching the given request id.
+        // Helper: check if a JSON line is a SUCCESS response matching the
+        // given request id. #4 (bug): error responses must NOT match here —
+        // they used to, letting error frames flow down the success path.
         fn is_response(line: &str, expected_id: u64) -> bool {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                 v.get("id").and_then(|i| i.as_u64()) == Some(expected_id)
-                    && (v.get("result").is_some() || v.get("error").is_some())
+                    && v.get("result").is_some()
+                    && v.get("error").is_none()
             } else {
                 false
             }
@@ -1782,7 +1830,15 @@ async fn start_codex_session(
                         eprintln!(
                             "[LITTLECLAUDE:codex] Handshake: sent thread/start (fallback after resume failure)"
                         );
-                        // Stay in phase 1 — wait for the new id=2 response
+                        // Stay in phase 1 — wait for the new id=2 response.
+                        // #4 (bug): MUST continue here. The error frame has no
+                        // result.thread.id; falling through into the success
+                        // branch used to store nothing yet still advance to
+                        // phase 2, where the fallback thread/start response
+                        // was then dropped — every later turn/start lacked
+                        // the threadId (required by Codex ≥0.146) and the
+                        // session hung permanently.
+                        continue;
                     }
                     if is_response(&line, 2) {
                         eprintln!(
@@ -1851,10 +1907,8 @@ async fn start_codex_session(
                     {
                         match serde_json::to_value(&event) {
                             Ok(payload) => {
-                                eprintln!(
-                                    "[LITTLECLAUDE:codex] EMITTED event type={}",
-                                    payload.get("type").and_then(|v| v.as_str()).unwrap_or("?")
-                                );
+                                // Perf #17: no per-event eprintln — at token
+                                // rate this flooded stderr for every frame.
                                 let _ = app_clone.emit(&stream_event, payload);
                             }
                             Err(e) => {
@@ -1864,8 +1918,9 @@ async fn start_codex_session(
                                 );
                             }
                         }
-                    } else {
-                        // Debug: log dropped notifications
+                    } else if line.contains("\"method\"") {
+                        // Debug: log dropped notifications (cheap prefilter
+                        // before re-parsing — perf #17).
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                             if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
                                 eprintln!("[LITTLECLAUDE:codex] DROPPED method={}", method);
@@ -1981,7 +2036,9 @@ async fn start_deepseek_session(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "dsh session.create returned no sessionId".to_string())?
                 .to_string();
-            state.insert_deepseek_session(&stdin_id, sid.clone()).await;
+            state
+                .insert_deepseek_session(&stdin_id, sid.clone(), Some(params.cwd.clone()))
+                .await;
             sid
         }
     };
@@ -2137,8 +2194,10 @@ fn app_window_url(path: &str) -> tauri::WebviewUrl {
 /// msWebOOUI 等 disable 参数。additional_browser_args 仅 Windows
 /// 生效（其他平台 no-op），方法本身全平台可调用。
 fn create_app_windows(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let browser_args =
-        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --ignore-gpu-blocklist";
+    // M6 (security): msSmartScreenProtection removed from the disable list —
+    // turning off SmartScreen for the whole app amplified any download/run
+    // chain; the GPU-blocklist workaround stands on its own.
+    let browser_args = "--disable-features=msWebOOUI,msPdfOOUI --ignore-gpu-blocklist";
     let _main = {
         let b = tauri::WebviewWindowBuilder::new(app, "main", app_window_url(""))
             .title("Little Claude")
@@ -2251,6 +2310,10 @@ pub fn run() {
             // One-time cleanup: purge desk_* entries from tracked_sessions.txt
             cleanup_tracked_sessions();
 
+            // C1: create/tighten the safe data dir (Unix 0700) once at startup
+            // so providers.json/providers.key/usage_log live in a private dir.
+            let _ = ensure_safe_data_dir();
+
             // Release mode: frontend is bundled into the binary by Tauri's
             // native asset system (bundle.active=true, targets=[]).
             // No custom protocol navigation needed — Tauri serves the
@@ -2336,6 +2399,9 @@ pub fn run() {
             append_usage_record,
             search_sessions,
             load_session,
+            commands::files::authorize_external_path,
+            commands::files::register_workspace_root,
+            commands::profile::sync_dsh_usage,
             read_file_tree,
             read_file_content,
             write_file_content,

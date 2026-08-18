@@ -71,10 +71,22 @@ function generateId(): string {
 
 let _saveTimer: ReturnType<typeof setTimeout> | undefined;
 
+// B3a: serialize save() calls. saveToLocalStorage + syncToRust are async
+// (encrypt + IPC); two overlapping saves could otherwise land out of order
+// and let an OLD snapshot overwrite a NEWER config. Chain them so each save
+// starts only after the previous one finished.
+let _saveChain: Promise<void> = Promise.resolve();
+
+function enqueueSave(fn: () => Promise<void>) {
+  _saveChain = _saveChain
+    .then(fn)
+    .catch((e) => console.error('[providerStore] save failed:', e));
+}
+
 function debouncedSave(state: ProviderState) {
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
-    state.save().catch((e) => console.error('[providerStore] save failed:', e));
+    enqueueSave(() => state.save());
   }, 500);
 }
 
@@ -315,7 +327,9 @@ export const useProviderStore = create<ProviderState>()((set, get) => ({
 
   save: async () => {
     await saveToLocalStorage(get());
-    syncToRust(get());
+    // fix20: await 纳入串行链——上一次 syncToRust 完成前不开始下一次 save，
+    // 避免 fire-and-forget 造成 Rust 端乱序落盘
+    await syncToRust(get());
   },
 
   addProvider: (p) => {

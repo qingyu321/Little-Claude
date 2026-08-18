@@ -1035,6 +1035,44 @@ pub fn get_pinned_cli() -> Option<String> {
 
 /// Pin a specific CLI binary as the preferred one.
 pub fn pin_cli(path: &str) -> Result<(), String> {
+    // H6 (security): the pin is persisted and used to spawn "claude" for
+    // EVERY future session — pinning an arbitrary executable is a persistent
+    // execution point. Validate hard: known basename, existing regular file,
+    // no symlinks.
+    let p = Path::new(path);
+    let basename = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    const ALLOWED_BASENAMES: &[&str] = &[
+        "claude",
+        "claude.exe",
+        "claude.cmd",
+        "claude.ps1",
+        "codex",
+        "codex.exe",
+        "codex.cmd",
+        "dsh",
+        "dsh.exe",
+        "dsh.cmd",
+    ];
+    if !ALLOWED_BASENAMES.contains(&basename.as_str()) {
+        return Err(format!(
+            "Only known CLI binaries can be pinned (rejected: {})",
+            basename
+        ));
+    }
+    match std::fs::symlink_metadata(p) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err("Cannot pin a symlink".to_string());
+            }
+            if !meta.is_file() {
+                return Err("Pin target must be a regular file".to_string());
+            }
+        }
+        Err(e) => return Err(format!("Pin target not accessible: {}", e)),
+    }
     let pin_path = pin_file_path().ok_or("Cannot determine home directory")?;
     if let Some(parent) = pin_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {}", e))?;

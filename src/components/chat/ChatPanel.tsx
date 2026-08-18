@@ -28,7 +28,8 @@ import { useT } from '../../lib/i18n';
 import { envFingerprint, resolveModelForProvider, resolveThinkingLevelForProvider } from '../../lib/api-provider';
 import { useProviderStore } from '../../stores/providerStore';
 import { MarkdownRenderer } from '../shared/MarkdownRenderer';
-import { registerStreamListener } from '../../lib/stream-cleanup';
+// F5: 孤儿 prewarm 回收还需要 cleanupStreamListener
+import { registerStreamListener, cleanupStreamListener } from '../../lib/stream-cleanup';
 import { debugWarn } from '../../lib/debug-log';
 import { SetupWizard } from '../setup/SetupWizard';
 import { AiAvatar } from '../shared/AiAvatar';
@@ -1485,10 +1486,18 @@ export function ChatPanel() {
   // Search result jump highlight
   const highlightMessageIndex = useChatStore((s) => s.highlightMessageIndex);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  // fix10: displayItems 走 ref，让下面的 effect 依赖只留 highlightMessageIndex
+  const displayItemsRef = useRef(displayItems);
+  displayItemsRef.current = displayItems;
 
   useEffect(() => {
-    if (highlightMessageIndex == null || highlightMessageIndex < 0 || highlightMessageIndex >= messages.length) return;
-    const targetMsg = messages[highlightMessageIndex];
+    if (highlightMessageIndex == null || highlightMessageIndex < 0) return;
+    // fix10: effect 内用 getState() 读当前 messages——依赖只留 highlightMessageIndex，
+    // 流式期间 messages/displayItems 变化不再反复重跑（回拉视图/高亮不消失）
+    const hlTabId = useSessionStore.getState().selectedSessionId;
+    const hlMessages = (hlTabId ? useChatStore.getState().getTab(hlTabId)?.messages : undefined) ?? [];
+    if (highlightMessageIndex >= hlMessages.length) return;
+    const targetMsg = hlMessages[highlightMessageIndex];
     if (!targetMsg) return;
 
     setHighlightedMessageId(targetMsg.id);
@@ -1497,7 +1506,7 @@ export function ChatPanel() {
     userScrolledAwayRef.current = true;
 
     // Scroll to target via Virtuoso scrollToIndex
-    const idx = displayItems.findIndex((item) => item.kind === 'message' && item.msg.id === targetMsg.id);
+    const idx = displayItemsRef.current.findIndex((item) => item.kind === 'message' && item.msg.id === targetMsg.id);
     if (idx >= 0) {
       virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'smooth' });
     }
@@ -1509,7 +1518,7 @@ export function ChatPanel() {
     }, 2000);
 
     return () => clearTimeout(timer);
-  }, [highlightMessageIndex, messages, displayItems]);
+  }, [highlightMessageIndex]);
 
   // (setMessageNode removed — Virtuoso manages DOM nodes via computeItemKey)
 
@@ -1918,6 +1927,8 @@ export function ChatPanel() {
       <div className="flex flex-1 min-h-0 relative">
       {/* Main chat area */}
       <div ref={chatAreaRef} className="flex flex-col flex-1 min-w-0">
+      {/* F22: CLI 缺失常驻横幅（跳过 SetupWizard 且 CLI 未安装时） */}
+      <CliMissingBanner />
       {!workingDirectory && messages.length === 0 && !isStreaming ? (
         <div className="flex-1 flex items-center justify-center px-5">
           <WelcomeScreen />
@@ -2053,6 +2064,38 @@ async function startDraftSession(folderPath: string) {
   // Pre-warm: spawn CLI process in background so first message is fast.
   // Send empty prompt — Rust will skip the NDJSON send.
   const preWarmId = `desk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // F8: 先注册 stdinId→tab 映射，再挂监听与 spawn（参考 InputBar 的"先注册"
+  // 模式）——否则 prewarm 早期事件（尤其启动失败 exit）落在注册前的窗口里，
+  // 会污染当前活动 tab。
+  useSessionStore.getState().registerStdinTab(preWarmId, draftId);
+
+  // F5: spawn 新 prewarm 前回收孤儿 prewarm 进程：没有任何 tab 通过
+  // sessionMeta.stdinId 引用的 desk_* 映射（旧代码直接覆盖 stdinId 不 kill，
+  // 或 draft 被移除后残留），以及本 draft 即将被替换的旧 stdinId。
+  {
+    const csNow = useChatStore.getState();
+    const ssNow = useSessionStore.getState();
+    const claimed = new Set<string>();
+    for (const [, tab] of csNow.tabs) {
+      if (tab.sessionMeta.stdinId) claimed.add(tab.sessionMeta.stdinId);
+    }
+    const oldDraftStdinId = csNow.getTab(draftId)?.sessionMeta.stdinId;
+    for (const [sid, mappedTabId] of Object.entries(ssNow.stdinToTab)) {
+      if (!sid.startsWith('desk_')) continue;
+      if (sid === preWarmId) continue; // 即将 spawn 的新 prewarm 本身
+      const beingReplaced = sid === oldDraftStdinId && mappedTabId === draftId;
+      if (!beingReplaced && claimed.has(sid)) continue; // 仍有 tab 引用
+      // 正在跑活的进程不杀（只回收空闲 prewarm）
+      if (csNow.streams.get(mappedTabId)?.isStreaming
+          || csNow.getTab(mappedTabId)?.sessionStatus === 'running') continue;
+      bridge.killSession(sid).catch(() => {});
+      cleanupStreamListener(sid);
+      ssNow.unregisterStdinTab(sid);
+      if (beingReplaced) csNow.setSessionMeta(draftId, { stdinId: undefined });
+    }
+  }
+
   try {
     // Register stream listeners before spawning
     const unlisten = await onClaudeStream(preWarmId, (msg: any) => {
@@ -2072,6 +2115,10 @@ async function startDraftSession(folderPath: string) {
       } else {
         // Handler not yet available (InputBar not mounted or React effect cycle) — queue the event
         if (!window.__claudeStreamQueue) window.__claudeStreamQueue = [];
+        // fix18: 队列设上界 256 条，超出丢最旧，防无界增长
+        if (window.__claudeStreamQueue.length >= 256) {
+          window.__claudeStreamQueue.shift();
+        }
         window.__claudeStreamQueue.push(msg);
         console.warn('[LITTLECLAUDE] pre-warm event queued (handler not ready):', msg.type);
       }
@@ -2126,8 +2173,7 @@ async function startDraftSession(folderPath: string) {
       spawnedModel: resolvedModel,
     });
 
-    // Register stdinId → tabId mapping for background stream routing
-    useSessionStore.getState().registerStdinTab(preWarmId, draftId);
+    // F8: stdinId→tabId 映射已提前到 spawn 之前注册（见函数开头）
 
     // Skip desk_* IDs — they pollute tracked_sessions.txt (multi-session isolation fix)
     if (!session.session_id.startsWith('desk_')) {
@@ -2226,6 +2272,20 @@ function WelcomeScreen() {
 function EmptyReadyState() {
   const t = useT();
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
+  // F21: 起步示例 chips —— 点击填入输入框（不自动发送）
+  const exampleChips = [
+    t('chat.exampleStructure'),
+    t('chat.exampleFixBug'),
+    t('chat.exampleReadme'),
+    t('chat.exampleTests'),
+  ];
+  const fillInput = (text: string) => {
+    const tabId = useSessionStore.getState().selectedSessionId;
+    if (!tabId) return;
+    // InputBar 的 inputDraft 同步 effect 会把文本写进编辑器
+    useChatStore.getState().ensureTab(tabId);
+    useChatStore.getState().setInputDraft(tabId, text);
+  };
   return (
     <div className="flex flex-col items-center justify-center h-full text-center">
       {/* App icon — customizable AI avatar */}
@@ -2241,6 +2301,88 @@ function EmptyReadyState() {
           {workingDirectory}
         </p>
       )}
+      {/* F21: 可点击示例（只填入输入框，发送由用户决定） */}
+      <div className="flex flex-wrap justify-center gap-2 mt-5 max-w-md">
+        {exampleChips.map((chip) => (
+          <button
+            key={chip}
+            onClick={() => fillInput(chip)}
+            className="px-3 py-1.5 rounded-full border border-border-subtle
+              text-xs text-text-muted hover:border-accent hover:text-accent
+              hover:bg-accent/5 transition-smooth cursor-pointer"
+          >
+            {chip}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** F22: CLI 缺失常驻横幅 —— SetupWizard 跳过且 CLI 确实未安装（或检测失败）
+ *  时显示在聊天区顶部；"立即安装"打开设置 CLI 页，可关闭。 */
+function CliMissingBanner() {
+  const t = useT();
+  const setupSkipped = useSettingsStore((s) => s.setupSkipped);
+  const [dismissed, setDismissed] = useState(false);
+  const [cliMissing, setCliMissing] = useState(false);
+
+  useEffect(() => {
+    if (!setupSkipped) return;
+    let cancelled = false;
+    bridge.checkClaudeCli().then((status) => {
+      if (cancelled) return;
+      if (status.installed && !status.git_bash_missing) {
+        // CLI 实际已安装（用户手动装过）——清标记，横幅不再出现
+        useSettingsStore.getState().setSetupSkipped(false);
+      } else {
+        setCliMissing(true);
+      }
+    }).catch(() => {
+      // checkClaudeCli 失败同样视为缺失，提示用户去 CLI 页处理
+      if (!cancelled) setCliMissing(true);
+    });
+    return () => { cancelled = true; };
+  }, [setupSkipped]);
+
+  if (!setupSkipped || dismissed || !cliMissing) return null;
+
+  const openCliSettings = () => {
+    const st = useSettingsStore.getState();
+    st.setSettingsOpenRequest({ tab: 'cli' });
+    if (!st.settingsOpen) st.toggleSettings();
+  };
+
+  return (
+    <div className="mx-4 mt-2 mb-1 px-4 py-2.5 rounded-xl bg-status-warning/10
+      border border-status-warning/30 flex items-center gap-3 text-sm
+      text-text-secondary flex-shrink-0">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        strokeWidth="1.5" className="flex-shrink-0 text-status-warning">
+        <path d="M8 1.5L1.5 13h13L8 1.5z" strokeLinejoin="round" />
+        <path d="M8 6v3" strokeLinecap="round" />
+        <circle cx="8" cy="11.5" r="0.5" fill="currentColor" stroke="none" />
+      </svg>
+      <span className="flex-1">{t('setup.bannerCliMissing')}</span>
+      <button
+        onClick={openCliSettings}
+        className="px-3 py-1 rounded-lg text-xs font-medium
+          bg-status-warning/20 hover:bg-status-warning/30
+          text-status-warning transition-smooth cursor-pointer"
+      >
+        {t('setup.bannerInstallNow')}
+      </button>
+      <button
+        onClick={() => setDismissed(true)}
+        className="p-1 rounded-lg text-text-tertiary hover:text-text-primary
+          hover:bg-bg-secondary transition-smooth cursor-pointer"
+        title={t('common.dismiss')}
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+          <path d="M2 2l8 8M10 2l-8 8" />
+        </svg>
+      </button>
     </div>
   );
 }

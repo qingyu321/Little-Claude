@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Build the frontend hot-update package for Little Claude (免重装升级).
     Produces:
@@ -120,6 +120,12 @@ $latest = @{
 $latestPath = Join-Path $outDir "latest.json"
 [System.IO.File]::WriteAllText($latestPath, $latest, (New-Object System.Text.UTF8Encoding($false)))
 
+# 6.5 D2: the in-app checker reads the repo ROOT latest.json (raw/jsdelivr),
+# so write the same manifest there — the release process only needs to
+# `git add latest.json && git commit` afterwards, no manual copy/edit.
+$rootLatestPath = Join-Path $root "latest.json"
+[System.IO.File]::WriteAllText($rootLatestPath, $latest, (New-Object System.Text.UTF8Encoding($false)))
+
 # 7. Report
 Write-Host ""
 Write-Host "Hot-update package ready:" -ForegroundColor Green
@@ -130,8 +136,7 @@ Write-Host ""
 Write-Host "Upload steps:" -ForegroundColor Yellow
 Write-Host "  1. Create GitHub release v$Version (tag v$Version) and attach:"
 Write-Host "       $([System.IO.Path]::GetFileName($zipPath))"
-Write-Host "  2. Commit web-dist\latest.json to the repo ROOT as latest.json:"
-Write-Host "       $latestPath"
-Write-Host "     (plain file in the repo — NOT a release asset; keep it updated"
-Write-Host "      for every hot-update release, overwrite each time)"
+Write-Host "  2. Commit the repo-root manifest (auto-written by this script):"
+Write-Host "       git add latest.json && git commit -m \"release: web resources v$Version\" && git push"
+Write-Host "     (plain file in the repo — NOT a release asset; overwrite each time)"
 Write-Host "  3. Users see the update on their next auto-check (or Settings > 检查更新)"

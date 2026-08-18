@@ -1,6 +1,6 @@
 [package]
 name = "little-claude"
-version = "1.1.6"
+version = "1.1.8"
 description = "Little Claude - Claude Code desktop GUI client"
 authors = ["TinyZ"]
 license = "UNLICENSED"
@@ -58,6 +58,9 @@ which = "6"
 sysinfo = "0.31"
 chrono = "0.4"
 sherpa-onnx = { version = "1.13", optional = true }
+# Pure-Rust zstd decoder — used to sync DSH session usage (session.jsonl.zstd)
+# into Little Claude's usage_log so DSH-GUI-direct sessions are counted too.
+ruzstd = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

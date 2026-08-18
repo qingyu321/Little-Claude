@@ -52,6 +52,14 @@ const messages: Record<Locale, Record<string, string>> = {
     'chat.welcomeWithProject': '开始与 Little Claude 协作，CLI 会话在后台无缝运行。',
     'chat.welcomeNoProject': '选择一个项目文件夹以开始。',
     'chat.compactFailed': '上下文压缩失败，请重试',
+    // F12: 限流/额度错误后跳过 FIFO drain 的 toast
+    'chat.rateLimited': '限流中，稍后重试',
+    'chat.rateLimitedCountdown': '限流中，请在 {time} 后重试',
+    // F21: 空状态起步示例 chips
+    'chat.exampleStructure': '介绍这个项目的结构',
+    'chat.exampleFixBug': '帮我修一个 bug',
+    'chat.exampleReadme': '写一份 README',
+    'chat.exampleTests': '为这个模块写单元测试',
 
     // InputBar
     'input.working': `${APP_NAME} 正在工作...`,
@@ -74,6 +82,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'input.pendingQueued': '{n} 条消息排队中，本轮结束后自动发送',
     'input.pendingCancel': '取消排队',
     'input.pendingSteer': '插话发送（中断当前轮次）',
+    // F2: QueueDock 插话后端守卫提示
+    'input.steerUnsupported': '插话仅 DeepSeek 后端支持，消息保持排队',
     'input.pendingRemove': '移除该消息',
     'input.busyEnterQueue': '排队',
     'input.busyEnterSteer': '插话',
@@ -120,6 +130,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.older': '更早',
     'conv.empty': '空任务',
     'conv.sessions': '个任务',
+    // F24: 会话列表月份分组标签（按 locale）
+    'conv.monthGroup': '{month}月',
     'conv.noMatch': '没有匹配的任务',
     'conv.noConv': '暂无任务',
     'conv.refresh': '刷新',
@@ -288,6 +300,11 @@ const messages: Record<Locale, Record<string, string>> = {
     'files.closePreview': '关闭预览',
     'files.refresh': '刷新',
     'files.noFiles': '未找到文件',
+    // F14: 搜索结果截断提示
+    'files.searchTruncated': '结果已达上限（500 条），请使用更精确的关键词',
+    // F17: 大文件截断预览
+    'files.largeFileTruncated': '大文件仅显示前 512KB',
+    'files.loadFullFile': '加载完整文件',
     'files.openVscode': '双击在 VS Code 中打开',
     'files.search': '搜索文件...',
     'files.revealInFinder': '在 {fileManager} 中显示',
@@ -352,8 +369,10 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.cliNotInstalled': '⚙️ CLI 未正确安装，请在设置中重新安装。',
     'error.tokenLimit': '📏 对话太长了，请新建一个任务继续。',
     'error.genericFallback': '出了点问题，请稍后重试。',
+    'error.requestExpired': '⏰ 该请求已过期（等待回应的时间太长）。请重新发送消息，或让助手重试刚才的操作。',
     'error.cliExitedSilently': 'CLI 意外退出且无输出，请检查 CLI 是否已正确安装（设置 → CLI），以及 API 服务商是否已配置。',
     'error.sendFailed': '发送响应失败，请重试',
+    'msg.expiredStatic': '⏰ 请求已过期：点击输入栏「停止」后重新发送消息即可',
 
     // CommandPalette
     'cmd.newChat': '新任务',
@@ -460,6 +479,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'msg.allow': '允许',
     'msg.deny': '拒绝',
     'msg.responded': '已响应',
+    // F24: PermissionCard 发送中状态（原硬编码 "Sending..."）
+    'msg.sending': '发送中...',
     'msg.planTitle': '执行计划',
     'msg.planSteps': '个步骤',
     'msg.viewPlan': '查看 Plan',
@@ -1154,6 +1175,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'setup.readyDesc': 'Claude Code CLI 已安装并登录，可以开始使用了。',
     'setup.start': '开始使用',
     'setup.skip': '跳过',
+    // F22: CLI 缺失常驻横幅
+    'setup.bannerCliMissing': 'CLI 未安装 — 消息将无法发送',
+    'setup.bannerInstallNow': '立即安装',
     'setup.version': '版本',
     'setup.gitBashMissing': '需要安装 Git for Windows',
     'setup.gitBashMissingDesc': 'Claude Code 在 Windows 上运行需要 Git Bash，正在自动安装...',
@@ -1288,6 +1312,14 @@ const messages: Record<Locale, Record<string, string>> = {
     'chat.welcomeWithProject': `Start working with ${APP_NAME}. Your CLI session runs seamlessly in the background.`,
     'chat.welcomeNoProject': 'Select a project folder to get started.',
     'chat.compactFailed': 'Compact failed. Please try again.',
+    // F12: toast shown when FIFO drain is skipped after a rate-limit error
+    'chat.rateLimited': 'Rate limited — try again shortly',
+    'chat.rateLimitedCountdown': 'Rate limited — retry after {time}',
+    // F21: empty-state starter chips
+    'chat.exampleStructure': 'Walk me through this project structure',
+    'chat.exampleFixBug': 'Help me fix a bug',
+    'chat.exampleReadme': 'Write a README',
+    'chat.exampleTests': 'Write unit tests for this module',
 
     // InputBar
     'input.working': `${APP_NAME} is working...`,
@@ -1310,6 +1342,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'input.pendingQueued': '{n} message(s) queued — will send after this turn',
     'input.pendingCancel': 'Cancel queue',
     'input.pendingSteer': 'Steer (interrupt current turn)',
+    // F2: QueueDock steer backend-guard notice
+    'input.steerUnsupported': 'Steer is only supported on the DeepSeek backend; message stays queued',
     'input.pendingRemove': 'Remove this message',
     'input.busyEnterQueue': 'Queue',
     'input.busyEnterSteer': 'Steer',
@@ -1356,6 +1390,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.older': 'Older',
     'conv.empty': 'Empty task',
     'conv.sessions': 'tasks',
+    // F24: conversation list month group label (locale-aware)
+    'conv.monthGroup': 'Month {month}',
     'conv.noMatch': 'No matching tasks',
     'conv.noConv': 'No tasks yet',
     'conv.refresh': 'Refresh',
@@ -1524,6 +1560,11 @@ const messages: Record<Locale, Record<string, string>> = {
     'files.closePreview': 'Close preview',
     'files.refresh': 'Refresh',
     'files.noFiles': 'No files found',
+    // F14: search results truncation hint
+    'files.searchTruncated': 'Result limit (500) reached — refine your keywords',
+    // F17: large file truncated preview
+    'files.largeFileTruncated': 'Large file — only the first 512KB is shown',
+    'files.loadFullFile': 'Load full file',
     'files.openVscode': 'Double-click to open in VS Code',
     'files.search': 'Search files...',
     'files.revealInFinder': 'Reveal in {fileManagerEn}',
@@ -1588,8 +1629,10 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.cliNotInstalled': '⚙️ CLI is not properly installed. Please reinstall in settings.',
     'error.tokenLimit': '📏 Conversation is too long. Please start a new task to continue.',
     'error.genericFallback': 'Something went wrong. Please try again later.',
+    'error.requestExpired': '⏰ This request expired because it waited too long for a response. Re-send your message, or ask the assistant to retry the operation.',
     'error.cliExitedSilently': 'CLI process exited unexpectedly without output. Please check that Claude CLI is installed correctly (Settings → CLI) and that your API provider is configured.',
     'error.sendFailed': 'Failed to send response. Please retry.',
+    'msg.expiredStatic': '⏰ Request expired: click Stop in the input bar, then re-send your message',
 
     // CommandPalette
     'cmd.newChat': 'New Task',
@@ -1696,6 +1739,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'msg.allow': 'Allow',
     'msg.deny': 'Deny',
     'msg.responded': 'Responded',
+    // F24: PermissionCard sending state (was hardcoded "Sending...")
+    'msg.sending': 'Sending...',
     'msg.planTitle': 'Execution Plan',
     'msg.planSteps': 'steps',
     'msg.viewPlan': 'View Plan',
@@ -2388,6 +2433,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'setup.readyDesc': 'Claude Code CLI is installed and authenticated. You\'re ready to go.',
     'setup.start': 'Get Started',
     'setup.skip': 'Skip',
+    // F22: CLI-missing persistent banner
+    'setup.bannerCliMissing': 'CLI not installed — messages cannot be sent',
+    'setup.bannerInstallNow': 'Install now',
     'setup.version': 'Version',
     'setup.gitBashMissing': 'Git for Windows Required',
     'setup.gitBashMissingDesc': 'Claude Code requires Git Bash on Windows. Installing automatically...',
@@ -2490,13 +2538,19 @@ function resolvePlatformPlaceholders(text: string): string {
 
 // --- Non-reactive t() for use outside components ---
 
+// A8: hoisted placeholder regex — the per-call `new RegExp` in t()/useT()
+// allocated a fresh matcher for every placeholder on every call (hot path in
+// list/bubble rendering). A single /g regex is safe because String.replace
+// with a global regex resets lastIndex internally per call.
+const PLACEHOLDER_RE = /\{(\w+)\}/g;
+
 export function t(key: string, params?: Record<string, string>): string {
   const locale = useSettingsStore.getState().locale;
   const raw = messages[locale]?.[key] || messages['en'][key] || key;
   let result = resolvePlatformPlaceholders(raw);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      result = result.replace(new RegExp(`\\{${k}\\}`, 'g'), v);
+      result = result.replace(PLACEHOLDER_RE, (match, name) => (name === k ? v : match));
     }
   }
   return result;
@@ -2516,7 +2570,7 @@ export function useT() {
       let result = resolvePlatformPlaceholders(raw);
       if (params) {
         for (const [k, v] of Object.entries(params)) {
-          result = result.replace(new RegExp(`\\{${k}\\}`, 'g'), v);
+          result = result.replace(PLACEHOLDER_RE, (match, name) => (name === k ? v : match));
         }
       }
       return result;

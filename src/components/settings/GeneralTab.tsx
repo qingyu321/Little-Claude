@@ -189,6 +189,8 @@ function WallpaperSection() {
 
   // Listen for compression progress
   useEffect(() => {
+    // fix9: cancelled 标志 + 卸载竞态防护——resolve 时若已卸载立即注销
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     onWallpaperProgress((ev) => {
       setProgress({ stage: ev.stage, message: ev.message, pct: ev.progress });
@@ -199,8 +201,11 @@ function WallpaperSection() {
       if (ev.stage === 'error') {
         setCompressing(false);
       }
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => { cancelled = true; unlisten?.(); };
   }, [refreshList]);
 
   const handleUpload = async () => {
@@ -209,6 +214,9 @@ function WallpaperSection() {
       filters: [{ name: 'Video', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'wmv', 'flv'] }],
     });
     if (!selected || typeof selected !== 'string') return;
+    // B1: dialog-picked input must be authorized before compress_wallpaper
+    // accepts it (it feeds the path to ffmpeg).
+    bridge.authorizeExternalPath(selected).catch(() => {});
     setCompressing(true);
     setProgress(null);
     bridge.compressWallpaper(selected, wallpaperQuality).then((info) => {
