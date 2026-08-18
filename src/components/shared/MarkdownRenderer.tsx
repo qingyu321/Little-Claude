@@ -4,7 +4,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { useLightboxStore } from './ImageLightbox';
+import { useLightboxStore } from '../../stores/lightboxStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useFileStore } from '../../stores/fileStore';
 import { bridge } from '../../lib/tauri-bridge';

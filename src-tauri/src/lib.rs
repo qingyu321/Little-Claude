@@ -2783,6 +2783,8 @@ pub fn run() {
             commands::ls_persist::receive_ls_migration_dump,
             // D1: DSH 会话进会话列表（~/.dsh/sessions 扫描）
             commands::session::list_dsh_sessions,
+            // DSH 会话删除（workspace.archiveSession，DSH 原生语义）
+            commands::session::delete_dsh_session,
             // D3: DSH 服务状态灯（自管服务优先，其次外部 3080，不 spawn）
             commands::dsh_service::dsh_service_status,
         ])

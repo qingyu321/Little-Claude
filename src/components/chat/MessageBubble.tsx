@@ -4,7 +4,7 @@ import { useFileStore } from '../../stores/fileStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useAgentStore } from '../../stores/agentStore';
-import { useLightboxStore } from '../shared/ImageLightbox';
+import { useLightboxStore } from '../../stores/lightboxStore';
 import { useT } from '../../lib/i18n';
 import { isPathInsideWorkspace } from '../../lib/path-safety';
 import { getCachedThumbnail } from '../../hooks/useFileAttachments';

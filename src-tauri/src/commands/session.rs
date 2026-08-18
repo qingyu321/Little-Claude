@@ -3544,6 +3544,25 @@ pub async fn list_dsh_sessions(limit: Option<usize>) -> Result<Vec<Value>, Strin
     .map_err(|e| format!("DSH 会话列表任务失败: {}", e))?
 }
 
+/// Delete (archive) a DSH session. DSH exposes no session.delete RPC —
+/// `workspace.archiveSession` removes it from the workspace views, which is
+/// DSH's own delete semantics (the log file stays under ~/.dsh/sessions).
+#[tauri::command]
+pub async fn delete_dsh_session(
+    app: AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+    let service = dsh_mgr.ensure().await?;
+    crate::commands::dsh_service::unary(
+        &service.base_url,
+        "workspace.archiveSession",
+        serde_json::json!({ "sessionId": session_id }),
+    )
+    .await
+    .map(|_| ())
+}
+
 #[cfg(test)]
 mod d1_dsh_list_tests {
     use super::extract_dsh_session_info;

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, lazy, Suspense } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
 import { useChatStore, useActiveTab, getActiveTabState, generateMessageId } from '../../stores/chatStore';
 import {
@@ -21,7 +21,10 @@ import { encodeProjectName } from '../../lib/platform';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
 import { FileUploadChips } from './FileUploadChips';
-import { RewindPanel } from './RewindPanel';
+// Perf: RewindPanel only mounts when opened — lazy-load it out of the
+// always-loaded InputBar chunk (the performance batch left this one due to
+// parallel-edit conflicts; now safe to do).
+const RewindPanel = lazy(() => import('./RewindPanel').then(m => ({ default: m.RewindPanel })));
 import { useFileAttachments } from '../../hooks/useFileAttachments';
 import { useRewind } from '../../hooks/useRewind';
 import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, classifyError, stopSessionGracefully } from '../../hooks/useStreamProcessor';
@@ -1877,7 +1880,9 @@ export function InputBar() {
       <div className="max-w-3xl mx-auto">
         {/* Rewind Panel — positioned above the input area */}
         {showRewindPanel && (
-          <RewindPanel key={selectedSessionId || 'new'} onClose={() => setShowRewindPanel(false)} />
+          <Suspense fallback={null}>
+            <RewindPanel key={selectedSessionId || 'new'} onClose={() => setShowRewindPanel(false)} />
+          </Suspense>
         )}
 
         {/* Floating approval card — plan_review, question, or permission awaiting user response */}

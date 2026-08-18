@@ -541,6 +541,11 @@ export const bridge = {
   listDshSessions: (limit?: number) =>
     invoke<SessionListItem[]>('list_dsh_sessions', { limit: limit ?? null }),
 
+  /** DSH 会话删除：workspace.archiveSession（DSH 无 session.delete RPC，
+   *  归档即 DSH 原生删除语义；日志文件保留在 ~/.dsh/sessions）。 */
+  deleteDshSession: (sessionId: string) =>
+    invoke<void>('delete_dsh_session', { sessionId }),
+
   getProfileStats: () =>
     invoke<ProfileStats>('get_profile_stats'),
 

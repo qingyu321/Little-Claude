@@ -439,7 +439,11 @@ export function ConversationList() {
         useChatStore.getState().setSessionStatus(sessionId, 'idle');
         useChatStore.getState().clearPendingMessages(sessionId);
       }
-      if (sessionPath) {
+      if (sessionId.startsWith('session-')) {
+        // DSH 会话（id 以 session- 开头）走 archiveSession——delete_session
+        // 只认 ~/.claude/projects 路径，对 DSH 日志会失败。
+        await bridge.deleteDshSession(sessionId);
+      } else if (sessionPath) {
         await bridge.deleteSession(sessionId, sessionPath);
       } else {
         useSessionStore.getState().removeDraft(sessionId);

@@ -106,6 +106,12 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
     let mut turns: Vec<Value> = Vec::new();
     let mut todos: Vec<Value> = Vec::new();
     let mut last_model = String::new();
+    // Fork-anchor support: the seq of the latest turn/end seen so far. When a
+    // user turn is emitted, it carries this as `forkSeq` — the fork point
+    // RIGHT BEFORE that turn (DSH forks at completed-turn boundaries). The
+    // first user turn has none (DSH cannot fork to an empty session), which
+    // mirrors the live-session anchor semantics (T02 known limitation).
+    let mut last_turn_end_seq: Option<u64> = None;
 
     for row in rows {
         let etype = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -120,7 +126,18 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
                     .map(blocks_text)
                     .unwrap_or_default();
                 if !text.trim().is_empty() {
-                    turns.push(json!({ "role": "user", "text": text, "time": time }));
+                    let mut t = json!({ "role": "user", "text": text, "time": time });
+                    if let Some(seq) = last_turn_end_seq {
+                        t["forkSeq"] = json!(seq);
+                    }
+                    turns.push(t);
+                }
+            }
+            "turn/end" => {
+                // Record the completed-turn boundary seq for the next user
+                // turn's fork anchor.
+                if let Some(seq) = row.get("seq").and_then(|v| v.as_u64()) {
+                    last_turn_end_seq = Some(seq);
                 }
             }
             "assistant/message" => {

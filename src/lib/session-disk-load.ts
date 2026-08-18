@@ -301,6 +301,13 @@ function dshTurnsToMessages(turns: any[]): ChatMessage[] {
           type: 'text',
           content: text,
           timestamp: ts,
+          // fork 锚点（handoff.rs 从 turn/end seq 提取）：重载的 DSH 会话也
+          // 能按轮次 fork 回退（T02 原"重载会话无锚点"限制的解除）。
+          // 首条用户消息无 forkSeq（DSH 无法 fork 到空会话）→ RewindPanel
+          // 对该轮显示 forkUnavailable。
+          ...(typeof turn.forkSeq === 'number' && turn.forkSeq > 0
+            ? { dshSeq: turn.forkSeq }
+            : {}),
         });
       }
     } else if (role === 'assistant') {
