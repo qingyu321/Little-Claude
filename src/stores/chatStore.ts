@@ -83,6 +83,10 @@ export interface ChatMessage {
   // user message. Set on the deepseek backend when a user message is added.
   // Rewinding to this turn calls session.fork with atSeq = dshSeq.
   dshSeq?: number;
+  // U1: 错误分类命中时写入（值为 ERROR_CATEGORIES 的 i18nKey，如
+  // 'error.invalidKey'）。role==='system' 且带此字段的消息由 MessageBubble
+  // 渲染成可行动错误卡片（打开设置 / 去安装 / 新建任务 / 重试按钮）。
+  errorCategory?: string;
 }
 
 export interface SessionMeta {
@@ -224,7 +228,9 @@ export interface SessionMeta {
   }>;
 }
 
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// U3: 'stopped' —— 用户主动 Stop 触发的退出语义（琥珀/灰点 + "已停止"文案），
+// 区别于自然完成的 'completed' 绿点。
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
 
 export type ActivityPhase = 'idle' | 'thinking' | 'writing' | 'tool' | 'awaiting' | 'completed' | 'error';
 
@@ -442,22 +448,46 @@ export function getActiveTabState(): TabSession {
 
 // --- Store ---
 
-// A5: Module-level dedup cache for batchAddMessages — avoids O(n) Map rebuild
-// on every assistant message. Keyed by tabId, invalidated when message count changes.
-const _batchDedupCache = new Map<string, { len: number; ids: Map<string, number> }>();
+// A5→P1: 统一的每 tab 消息 id→index 索引（取代原 len 探测式 _batchDedupCache）。
+// updateMessage 等高频路径靠它 O(1) 定点查找，免去对整个 messages 数组的 O(n) 扫描
+// （长会话 1000+ 消息、agent 工具密集期每个 tool_result 事件都要碎忙一次）。
+//
+// P1 一致性维护点（所有会改变 messages 数组内容/顺序的路径都必须同步本索引）：
+//   addMessage / batchAddMessages —— 追加时登记新索引（原位更新不改索引）
+//   prependMessages        —— 头部插入使全部索引偏移，直接按合并结果整体重建
+//   rewindToTurn           —— 截断后删除切口之后的条目
+//   clearMessages/resetTab —— 清空/重置时删除整个 tab 的索引
+//   _purgeTabCache         —— removeTab/LRU 淘汰/缓存未命中回收时删除
+//   migrateBatchDedupKey   —— draft→real id 改名时迁移键
+// 所有读取方在用索引前必须校验 messages[idx].id === id；索引缺失/陈旧时走
+// O(n) 线性回退并顺手自愈（getMsgIndex 缺失时也会按当前数组惰性重建）——保底不炸。
+const _msgIndex = new Map<string, Map<string, number>>();
+
+/** P1: 取某 tab 的 id→index 索引；缺失（首访/被清理后）则按当前数组惰性重建——自愈兜底。 */
+function getMsgIndex(tabId: string, messages: ChatMessage[]): Map<string, number> {
+  let index = _msgIndex.get(tabId);
+  if (!index) {
+    index = new Map<string, number>();
+    for (let i = 0; i < messages.length; i++) index.set(messages[i].id, i);
+    _msgIndex.set(tabId, index);
+  }
+  return index;
+}
 
 /** Drop all per-tab module-level caches when a tab is removed (memory hygiene). */
 function _purgeTabCache(tabId: string) {
-  _batchDedupCache.delete(tabId);
+  _msgIndex.delete(tabId); // P1 一致性维护点：tab 移除 → 索引不能留陈旧条目
   useAgentStore.getState().removeCache(tabId);
 }
 
-// fix7: draft→real id 改名时迁移 _batchDedupCache 键，不留僵尸条目
+// fix7: draft→real id 改名时迁移 per-tab 缓存键，不留僵尸条目
+// P1: _batchDedupCache 已并入 _msgIndex；导出签名保持不变（useStreamProcessor 的
+// promoteDraftIfNeeded 仍按原名调用），内部改为迁移消息索引键。
 export function migrateBatchDedupKey(oldTabId: string, newTabId?: string) {
-  const entry = _batchDedupCache.get(oldTabId);
-  _batchDedupCache.delete(oldTabId);
-  if (entry && newTabId && !_batchDedupCache.has(newTabId)) {
-    _batchDedupCache.set(newTabId, entry);
+  const entry = _msgIndex.get(oldTabId);
+  _msgIndex.delete(oldTabId);
+  if (entry && newTabId && !_msgIndex.has(newTabId)) {
+    _msgIndex.set(newTabId, entry);
   }
 }
 
@@ -482,10 +512,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         // De-duplicate: if a message with the same ID already exists, update it
         // instead of appending a duplicate. This happens when the CLI re-sends
         // a complete assistant message that was previously delivered partially.
-        const existingIdx = tab.messages.findIndex((m) => m.id === message.id);
-        const messages = existingIdx !== -1
-          ? tab.messages.map((m, i) => i === existingIdx ? { ...m, ...message } : m)
-          : [...tab.messages, message];
+        // P1: 查重走 id→index 索引（O(1)），替代对整个数组的 O(n) findIndex。
+        const index = getMsgIndex(tabId, tab.messages);
+        let existingIdx = index.get(message.id);
+        if (existingIdx === undefined || existingIdx >= tab.messages.length
+            || tab.messages[existingIdx].id !== message.id) {
+          // P1 保底回退：索引缺失/陈旧 → 线性扫描（原逻辑），命中则自愈索引
+          existingIdx = tab.messages.findIndex((m) => m.id === message.id);
+          if (existingIdx !== -1) index.set(message.id, existingIdx);
+        }
+        let messages: ChatMessage[];
+        if (existingIdx !== undefined && existingIdx !== -1) {
+          messages = tab.messages.slice();
+          messages[existingIdx] = { ...messages[existingIdx], ...message };
+        } else {
+          // P1 一致性维护点：追加时登记索引（位置 = 当前数组尾部）
+          index.set(message.id, tab.messages.length);
+          messages = [...tab.messages, message];
+        }
         return { ...tab, messages };
         // NOTE: partialText/isStreaming are NOT cleared here. Clearing is handled
         // explicitly by clearPartial() in the result/process_exit handlers and
@@ -504,28 +548,28 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const result = updateTab(state.tabs, tabId, (tab) => {
         if (messages.length === 0) return tab;
         const existing = tab.messages;
-        // A5: Reuse cached dedup Map when message count hasn't changed.
-        // Only rebuild when messages were added/removed by other operations.
-        let existingIds: Map<string, number>;
-        const cache = _batchDedupCache.get(tabId);
-        if (cache && cache.len === existing.length) {
-          existingIds = cache.ids;
-        } else {
-          existingIds = new Map<string, number>();
-          for (let i = 0; i < existing.length; i++) {
-            existingIds.set(existing[i].id, i);
-          }
-          _batchDedupCache.set(tabId, { len: existing.length, ids: existingIds });
-        }
+        // A5→P1: 用统一维护的 id→index 索引做去重（各增删路径增量维护，
+        // 不再需要 len 探测重建），每条消息 O(1) 查找。
+        const index = getMsgIndex(tabId, existing);
         const newMessages: ChatMessage[] = [];
         const updated = [...existing];
         for (const msg of messages) {
-          const idx = existingIds.get(msg.id);
-          if (idx !== undefined) {
+          let idx = index.get(msg.id);
+          if (idx !== undefined && (idx >= updated.length || updated[idx].id !== msg.id)) {
+            // P1 保底回退：索引陈旧 → 单条线性探测并自愈（不影响其余消息）
+            idx = updated.findIndex((m) => m.id === msg.id);
+            if (idx !== -1) index.set(msg.id, idx);
+          }
+          if (idx !== undefined && idx !== -1) {
             updated[idx] = { ...updated[idx], ...msg };
           } else {
             newMessages.push(msg);
           }
+        }
+        // P1 一致性维护点：批量登记追加项的索引（位置 = existing 尾部 + 批内偏移）。
+        // 批内同 id 重复保持原语义：都追加（索引最终指向最后一个，与旧缓存重建一致）。
+        for (let i = 0; i < newMessages.length; i++) {
+          index.set(newMessages[i].id, existing.length + i);
         }
         return { ...tab, messages: [...updated, ...newMessages] };
       });
@@ -544,9 +588,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         for (const m of tab.messages) existingIds.add(m.id);
         const fresh = messages.filter((m) => !existingIds.has(m.id));
         if (fresh.length === 0) return tab;
+        // P1 一致性维护点：头部插入使所有既有索引整体偏移 fresh.length。
+        // 该路径仅发生在历史分页加载（低频），直接按合并结果整体重建索引
+        // （与逐条偏移修正等价，但不会漏项）。
+        const merged = [...fresh, ...tab.messages];
+        const rebuilt = new Map<string, number>();
+        for (let i = 0; i < merged.length; i++) rebuilt.set(merged[i].id, i);
+        _msgIndex.set(tabId, rebuilt);
         return {
           ...tab,
-          messages: [...fresh, ...tab.messages],
+          messages: merged,
           sessionMeta: {
             ...tab.sessionMeta,
             historyPrepended: (tab.sessionMeta.historyPrepended ?? 0) + fresh.length,
@@ -558,12 +609,28 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   updateMessage: (tabId, id, updates) =>
     set((state) => {
-      const result = updateTab(state.tabs, tabId, (tab) => ({
-        ...tab,
-        messages: tab.messages.map((m) =>
-          m.id === id ? { ...m, ...updates } : m,
-        ),
-      }));
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        // P1: id→index 定点替换——tool_result 等高频流事件此前每次都对整个
+        // messages 数组做 O(n) map（长会话 1000+ 消息、agent 工具密集期主线程
+        // 持续碎忙）；现在 O(1) 定位 + 单点替换。
+        const index = getMsgIndex(tabId, tab.messages);
+        const idx = index.get(id);
+        if (idx !== undefined && idx < tab.messages.length && tab.messages[idx].id === id) {
+          // 仍返回新数组引用以触发 React 更新，但免去全量 map
+          const messages = tab.messages.slice();
+          messages[idx] = { ...messages[idx], ...updates };
+          return { ...tab, messages };
+        }
+        // P1 保底回退：索引缺失/陈旧 → 原有 O(n) 扫描（行为与旧实现一致），
+        // 命中时顺手自愈索引，下次即走快路径。
+        let found = -1;
+        const messages = tab.messages.map((m, i) => {
+          if (m.id === id) { found = i; return { ...m, ...updates }; }
+          return m;
+        });
+        if (found !== -1) index.set(id, found);
+        return { ...tab, messages };
+      });
       return result ?? {};
     }),
 
@@ -631,13 +698,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ...tab,
         sessionStatus: status,
         // Sync activity status with session status
+        // U3: 'stopped' falls back to an idle phase — the caller (stop flow)
+        // writes the "已停止" statusMessage right after.
         ...(status === 'completed' ? { activityStatus: { phase: 'completed' as ActivityPhase } }
           : status === 'error' ? { activityStatus: { phase: 'error' as ActivityPhase } }
           : status === 'idle' ? { activityStatus: { phase: 'idle' as ActivityPhase } }
+          : status === 'stopped' ? { activityStatus: { phase: 'idle' as ActivityPhase } }
           : {}),
       }));
-      // Clear streams when session ends
-      const newStreams = (status === 'completed' || status === 'error' || status === 'idle')
+      // Clear streams when session ends (U3: 'stopped' is also terminal)
+      const newStreams = (status === 'completed' || status === 'error' || status === 'idle' || status === 'stopped')
         ? (() => { const m = new Map(state.streams); m.delete(tabId); return m; })()
         : state.streams;
       return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
@@ -654,7 +724,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }),
 
   clearMessages: (tabId) => {
-    _batchDedupCache.delete(tabId); // fix8: 消息清空时顺手删批次去重缓存，防陈旧索引
+    _msgIndex.delete(tabId); // P1 一致性维护点：消息清空时删索引，防陈旧条目（fix8 等价物）
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => ({
         ...tab,
@@ -677,6 +747,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // restoreFromCache for this tab resurrects a stale agent tree (e.g. a
     // deleted session's sub-agents appearing in the freshly cleared tab).
     useAgentStore.getState().removeCache(tabId);
+    // P1 一致性维护点：/clear 复用同一 tabId 且消息清空 → 索引一并删除
+    // （旧实现在此路径漏删 _batchDedupCache，靠 len 探测兜底；统一索引必须显式删）
+    _msgIndex.delete(tabId);
     return set((state) => {
       const result = updateTab(state.tabs, tabId, () => createTab(tabId));
       const newStreams = new Map(state.streams);
@@ -788,7 +861,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }),
 
   rewindToTurn: (tabId, startMsgIdx) => {
-    _batchDedupCache.delete(tabId); // fix8: rewind 截断消息后顺手删批次去重缓存
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => {
         // Guard against invalid index — if out of bounds, keep messages intact
@@ -800,6 +872,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             partialThinking: '',
             activityStatus: { phase: 'idle' as ActivityPhase },
           };
+        }
+        // P1 一致性维护点：截断后删除切口之后的索引条目
+        // （Map 迭代期间 delete 是规范允许的；索引缺失则留给 getMsgIndex 惰性重建）
+        const index = _msgIndex.get(tabId);
+        if (index) {
+          for (const [msgId, idx] of index) {
+            if (idx >= startMsgIdx) index.delete(msgId);
+          }
         }
         return {
           ...tab,

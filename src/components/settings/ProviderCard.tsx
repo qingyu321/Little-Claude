@@ -9,6 +9,8 @@ interface ProviderCardProps {
   isEditing: boolean;
   testStatus: CardTestStatus;
   testTimeMs?: number;
+  /** D5: explanatory note shown under the card content (DSH test semantics). */
+  testNote?: string;
   onActivate: () => void;
   onToggleEdit: () => void;
   onRequestDelete: () => void;
@@ -22,6 +24,7 @@ export function ProviderCard({
   isEditing,
   testStatus,
   testTimeMs,
+  testNote,
   onActivate,
   onToggleEdit,
   onRequestDelete,
@@ -84,6 +87,13 @@ export function ProviderCard({
           && (!provider.apiKey || provider.apiKey.startsWith('TENC1:')) && (
           <div className="text-[11px] leading-snug text-amber-400/90 mt-1">
             {t('provider.deepseekCredGuidance')}
+          </div>
+        )}
+        {/* D5: test-result note (DSH test semantics — CLI/service checked, API
+            key validated at session start). Shown for any backend that sets it. */}
+        {testNote && (
+          <div className="text-[11px] leading-snug text-text-tertiary mt-1">
+            {testNote}
           </div>
         )}
       </div>

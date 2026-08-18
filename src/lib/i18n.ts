@@ -379,6 +379,24 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.cliExitedSilently': 'CLI 意外退出且无输出，请检查 CLI 是否已正确安装（设置 → CLI），以及 API 服务商是否已配置。',
     'error.sendFailed': '发送响应失败，请重试',
     'msg.expiredStatic': '⏰ 请求已过期：点击输入栏「停止」后重新发送消息即可',
+    // U1: 错误可行动卡片 —— 分类错误消息上的动作按钮
+    'error.action.openProviderSettings': '打开服务商设置',
+    'error.action.installCli': '去安装',
+    'error.action.newTask': '新建任务',
+    'error.action.retry': '重试',
+    // U2: 后台会话出错通知（点击跳回对应会话）
+    'notification.chatError': '后台任务出错了',
+    // U3: 主动停止的会话语义（琥珀点 + 文案，区别于 completed 绿点）
+    'session.stopped': '已停止',
+    // U4: 侧栏状态筛选 chips 与摘要
+    'conv.filter.all': '全部',
+    'conv.filter.running': '运行中',
+    'conv.filter.attention': '需处理',
+    'conv.filter.error': '出错',
+    'conv.filterSummary': '{running} 个运行中 · {waiting} 个等待',
+    'conv.stop': '停止',
+    // U5: 用户消息编辑重发（hover 操作区按钮 tooltip）
+    'msg.editAndResend': '编辑重发',
 
     // CommandPalette
     'cmd.newChat': '新任务',
@@ -867,6 +885,10 @@ const messages: Record<Locale, Record<string, string>> = {
     // T05: DSH credential guidance (key syncs into dsh's own credential store).
     'provider.deepseekKeyHint': 'DSH 后端：密钥将在会话启动时同步到 dsh 凭证库（~/.dsh/.credentials.yaml 的 DEEPSEEK_API_KEY）。留空则沿用 dsh 自身已配置的密钥或环境变量。',
     'provider.deepseekCredGuidance': '尚未配置密钥：可在此填写 API Key（启动会话时自动同步到 dsh），或在 dsh 侧配置 DEEPSEEK_API_KEY（~/.dsh/.credentials.yaml 或环境变量）。',
+    // D5: DSH provider 测试按钮升级——说明测试覆盖范围
+    'provider.dshTestNotInstalled': '未检测到 dsh CLI，请先安装',
+    'provider.dshTestServiceRunning': 'CLI 与 dsh 服务均就绪 · API 密钥将在会话启动时验证',
+    'provider.dshTestKeyAtSessionStart': 'CLI 已就绪 · 服务将在首次会话时自动启动，密钥在会话启动时验证',
 
 
     // Slash commands
@@ -1107,6 +1129,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installDone': '安装成功',
     'cli.dshServiceRunning': '服务运行中（默认端口 3080）',
     'cli.dshServiceStopped': '服务未运行 — 发消息时自动启动',
+    // D3: 服务状态灯区分自管/外部
+    'cli.dshServiceManaged': '服务运行中（本次会话自管）',
+    'cli.dshServiceExternal': '服务运行中（外部服务）',
     // G5: DshSection 标题徽章（原硬编码中文"首选"）
     'cli.recommended': '首选',
     'cli.installFail': '安装失败',
@@ -1660,6 +1685,24 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.cliExitedSilently': 'CLI process exited unexpectedly without output. Please check that Claude CLI is installed correctly (Settings → CLI) and that your API provider is configured.',
     'error.sendFailed': 'Failed to send response. Please retry.',
     'msg.expiredStatic': '⏰ Request expired: click Stop in the input bar, then re-send your message',
+    // U1: actionable error cards — action buttons on classified error messages
+    'error.action.openProviderSettings': 'Open provider settings',
+    'error.action.installCli': 'Install',
+    'error.action.newTask': 'New task',
+    'error.action.retry': 'Retry',
+    // U2: background session error notification (click jumps to the session)
+    'notification.chatError': 'Background task failed',
+    // U3: user-stopped session semantics (amber dot + label, unlike the completed green dot)
+    'session.stopped': 'Stopped',
+    // U4: sidebar status filter chips and summary line
+    'conv.filter.all': 'All',
+    'conv.filter.running': 'Running',
+    'conv.filter.attention': 'Needs attention',
+    'conv.filter.error': 'Error',
+    'conv.filterSummary': '{running} running · {waiting} waiting',
+    'conv.stop': 'Stop',
+    // U5: user message edit-and-resend (hover action button tooltip)
+    'msg.editAndResend': 'Edit & resend',
 
     // CommandPalette
     'cmd.newChat': 'New Task',
@@ -2148,6 +2191,10 @@ const messages: Record<Locale, Record<string, string>> = {
     // T05: DSH credential guidance (key syncs into dsh's own credential store).
     'provider.deepseekKeyHint': 'DSH backend: the key is synced into dsh\'s credential store (DEEPSEEK_API_KEY in ~/.dsh/.credentials.yaml) when a session starts. Leave empty to reuse the key already configured in dsh or your environment.',
     'provider.deepseekCredGuidance': 'No key configured yet: enter an API Key here (auto-synced to dsh at session start), or configure DEEPSEEK_API_KEY on the dsh side (~/.dsh/.credentials.yaml or an environment variable).',
+    // D5: DSH provider test button upgrade — explain test coverage
+    'provider.dshTestNotInstalled': 'dsh CLI not found — install it first',
+    'provider.dshTestServiceRunning': 'CLI and dsh service ready · API key is validated at session start',
+    'provider.dshTestKeyAtSessionStart': 'CLI ready · service starts on first session; key validated at session start',
 
 
     // Slash commands
@@ -2388,6 +2435,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installDone': 'Installation complete',
     'cli.dshServiceRunning': 'Service running (port 3080)',
     'cli.dshServiceStopped': 'Service not running — starts on first message',
+    // D3: service status light distinguishes managed vs external
+    'cli.dshServiceManaged': 'Service running (managed this session)',
+    'cli.dshServiceExternal': 'Service running (external)',
     // G5: DshSection title badge (was hardcoded "首选")
     'cli.recommended': 'Recommended',
     'cli.installFail': 'Installation failed',

@@ -50,11 +50,33 @@ const ERROR_CATEGORIES: ReadonlyArray<{ pattern: RegExp; i18nKey: string }> = [
   { pattern: /token.*limit|context.*length|too.long|上下文.*(超|过长)|超出.*长度|长度限制/i, i18nKey: 'error.tokenLimit' },
 ];
 
-export function formatErrorForUser(raw: string): string {
-  if (!raw || raw.length < 10) return raw;
+// U1: 错误类别 —— 分类器命中的 i18nKey。写入 ChatMessage.errorCategory 后，
+// MessageBubble 依此渲染动作按钮（打开服务商设置 / 去安装 / 新建任务 / 重试）。
+export type ErrorCategory =
+  | 'error.dshNotInstalled' | 'error.requestExpired' | 'error.invalidKey'
+  | 'error.rateLimit' | 'error.quotaExceeded' | 'error.modelNotFound'
+  | 'error.networkError' | 'error.permissionDenied' | 'error.serviceUnavailable'
+  | 'error.cliNotInstalled' | 'error.tokenLimit';
+
+export interface FormattedError {
+  /** 友好文案 + 可折叠详情块 —— 与旧 formatErrorForUser 的字符串输出完全一致 */
+  text: string;
+  /** U1: 分类命中时为对应 i18nKey；未命中（generic fallback）为 undefined */
+  category?: ErrorCategory;
+}
+
+/** U1: 分类 + 格式化。聊天流调用点用 {text, category} 组装可行动错误卡片。 */
+export function classifyError(raw: string): FormattedError {
+  if (!raw || raw.length < 10) return { text: raw };
   const match = ERROR_CATEGORIES.find((c) => c.pattern.test(raw));
   const friendly = match ? t(match.i18nKey) : t('error.genericFallback');
-  return `${friendly}\n\n<details>\n<summary>${t('error.showDetails')}</summary>\n\n\`\`\`\n${raw}\n\`\`\`\n\n</details>`;
+  const text = `${friendly}\n\n<details>\n<summary>${t('error.showDetails')}</summary>\n\n\`\`\`\n${raw}\n\`\`\`\n\n</details>`;
+  return { text, category: match ? (match.i18nKey as ErrorCategory) : undefined };
+}
+
+export function formatErrorForUser(raw: string): string {
+  // U1: 保留字符串返回 —— friendlyError 等纯文本调用点无需改动
+  return classifyError(raw).text;
 }
 
 // --- Streaming text buffer (timer-throttled + interval fallback, per-stdinId) ---
@@ -111,6 +133,168 @@ export function markKilledStdin(stdinId: string) {
   _killedStdinIds.set(stdinId, Date.now());
 }
 
+// U3: 用户主动 Stop（先中断后杀）登记的 stdinId 集合。标记有效期间到达的
+// result/process_exit 保持 'stopped' 语义：不回退成 completed/error/idle、
+// 不误发"任务完成"通知、不给被中断的回合补错误消息。
+// 有效窗口 STOPPED_STDIN_TTL_MS（2s 中断等待 + result 送达余量），过期条目
+// 由 flush interval 顺手清扫（同 _killedStdinIds 的回收方式）。
+const _stoppedStdinIds = new Map<string, number>();
+const STOPPED_STDIN_TTL_MS = 10 * 1000;
+
+/** U3: 登记用户主动停止（Stop 按钮 / 侧栏右键"停止"共用）。 */
+export function markStoppedStdin(stdinId: string) {
+  _stoppedStdinIds.set(stdinId, Date.now());
+}
+
+/** U3: 停止标记是否仍在有效窗口内（不消费）。 */
+export function isStoppedStdinActive(stdinId: string): boolean {
+  const at = _stoppedStdinIds.get(stdinId);
+  return at !== undefined && Date.now() - at < STOPPED_STDIN_TTL_MS;
+}
+
+/** U3: 消费停止标记（result/exit 已到达）。过期标记按不存在处理。 */
+export function consumeStoppedStdin(stdinId: string): boolean {
+  const at = _stoppedStdinIds.get(stdinId);
+  _stoppedStdinIds.delete(stdinId);
+  return at !== undefined && Date.now() - at < STOPPED_STDIN_TTL_MS;
+}
+
+// U2: 通知点击跳回 —— 对齐 App.tsx Ctrl+Tab 的切换路径：
+// 保存当前 tab → setSelectedSession → 内存缓存恢复，未命中则磁盘加载回退。
+// session-disk-load 反向依赖本模块（formatErrorForUser），用动态 import 破环。
+function jumpToSession(targetId: string) {
+  const sessStore = useSessionStore.getState();
+  const currentId = sessStore.selectedSessionId;
+  if (currentId === targetId) return;
+  if (currentId) {
+    useChatStore.getState().saveToCache(currentId);
+    useAgentStore.getState().saveToCache(currentId);
+  }
+  sessStore.setSelectedSession(targetId);
+  const restored = useChatStore.getState().restoreFromCache(targetId);
+  const entry = sessStore.sessions.find((s) => s.id === targetId);
+  if (restored) {
+    useAgentStore.getState().restoreFromCache(targetId);
+  } else if (entry?.path) {
+    void import('../lib/session-disk-load').then(({ loadSessionFromDisk }) =>
+      loadSessionFromDisk(targetId, entry.path, entry.origin || 'claude'),
+    );
+  } else {
+    // draft / 未知会话 —— 与 Ctrl+Tab 的 never-opened 分支一致
+    useChatStore.getState().ensureTab(targetId);
+    useChatStore.getState().resetTab(targetId);
+    useAgentStore.getState().clearAgents();
+  }
+  // 恢复工作目录（与 Ctrl+Tab 路径相同的解析规则）
+  const projectPath = entry?.project || entry?.projectDir;
+  if (projectPath) {
+    let resolved = projectPath;
+    if (!projectPath.startsWith('/') && !/^[A-Za-z]:[/\\]/.test(projectPath)
+        && !projectPath.startsWith('~/')) {
+      if (/^[A-Za-z]-/.test(projectPath)) {
+        const drive = projectPath[0];
+        resolved = `${drive}:\\${projectPath.slice(2).replace(/-/g, '\\')}`;
+      } else {
+        resolved = projectPath.replace(/-/g, '/');
+      }
+    }
+    useSettingsStore.getState().setWorkingDirectory(resolved);
+  }
+}
+
+// U2: 带"点击跳回"的系统通知 —— onclick 聚焦主窗口并选中对应会话
+// （stdinId→tab 的路由在上游已完成，这里直接拿 tabId）。
+function showNotificationWithJump(tabId: string, body: string) {
+  if (!('Notification' in window)) return;
+  const spawn = () => {
+    try {
+      const n = new Notification('Little Claude', { body });
+      n.onclick = () => {
+        window.focus();
+        jumpToSession(tabId);
+        n.close();
+      };
+    } catch {
+      // 某些平台/策略下 Notification 构造会抛异常 —— 通知失败不影响主流程
+    }
+  };
+  if (Notification.permission === 'granted') {
+    spawn();
+  } else if (Notification.permission === 'default') {
+    Notification.requestPermission().then((perm) => {
+      if (perm === 'granted') spawn();
+    }).catch(() => {});
+  }
+}
+
+// U3: 优雅停止 —— Stop 语义从"直接 kill"改为"先中断后杀"：
+//   · claude 后端：send_control_request interrupt（SDK control 协议）
+//   · codex 后端：Rust 端把 interrupt 路由成 turn/interrupt（build_interrupt_message）
+//   · deepseek 后端：保持直接 kill（kill_session 已映射 session.cancel）
+// claude/codex 中断后 2 秒内无 result/process_exit → kill 兜底（markKilledStdin
+// 保证 fix11 的 stale-exit 语义不变）。中断成功则进程保留，可直接继续对话。
+// InputBar 的 Stop 按钮与侧栏右键"停止"（U4）共用此入口。
+export async function stopSessionGracefully(tabId: string): Promise<void> {
+  const chat = useChatStore.getState();
+  const tab = chat.getTab(tabId);
+  const sid = tab?.sessionMeta.stdinId;
+
+  // 立即切 'stopped'（sessionStore 同步侧栏琥珀点）+ 活动指示文案
+  chat.setSessionStatus(tabId, 'stopped');
+  chat.setActivityStatus(tabId, { phase: 'idle', statusMessage: t('session.stopped') });
+
+  // H6 语义保留：排队中的消息回退到输入草稿，由用户决定重发或丢弃
+  const queued = chat.flushPendingMessages(tabId);
+  if (queued.length > 0) {
+    const draft = chat.getTab(tabId)?.inputDraft ?? '';
+    chat.setInputDraft(tabId, [draft, ...queued].filter(Boolean).join('\n\n'));
+  }
+
+  if (!sid) return;
+
+  const killNow = async () => {
+    // 清 stdinId 防止后续消息写进死进程
+    useChatStore.getState().setSessionMeta(tabId, { stdinId: undefined });
+    // fix11: 登记被杀 stdinId —— 迟到的 process_exit 按 stale 处理，
+    // 不把 stopped 回滚成 idle、不误发"任务完成"通知
+    markKilledStdin(sid);
+    await bridge.killSession(sid).catch(() => {});
+    // 安全网：process_exit 未到时 3s 后强制回收监听器
+    setTimeout(() => { cleanupStreamListener(sid); }, 3000);
+  };
+
+  // 后端以会话 spawn 时的快照为准（用户可能中途切了后端设置）
+  const backend = tab?.sessionMeta.snapshotCliBackend || useSettingsStore.getState().cliBackend;
+  markStoppedStdin(sid);
+  if (backend === 'deepseek') {
+    // deepseek: kill_session ≙ session.cancel —— 保持直接 kill
+    await killNow();
+    return;
+  }
+  // claude/codex: 先发 control interrupt
+  try {
+    await bridge.interruptSession(sid);
+  } catch {
+    // 中断发送失败（管道已断等）—— 直接走 kill 兜底
+    await killNow();
+    return;
+  }
+  // 2 秒内没有 result/process_exit（停止标记仍有效）→ kill 兜底。
+  // 中断成功时标记被 result/exit 处理器消费，进程保留给后续回合。
+  // kill 兜底后标记保留不消费：与 kill 竞态的迟到 result 仍能凭标记保持
+  // 'stopped' 语义（process_exit 走 fix11 killed 分支早退），过期由清扫回收。
+  const startedAt = Date.now();
+  const poll = setInterval(() => {
+    if (!isStoppedStdinActive(sid)) { clearInterval(poll); return; }
+    const cur = useChatStore.getState().getTab(tabId)?.sessionMeta.stdinId;
+    if (cur !== sid) { clearInterval(poll); return; } // process_exit 已清理
+    if (Date.now() - startedAt >= 2000) {
+      clearInterval(poll);
+      if (isStoppedStdinActive(sid)) void killNow();
+    }
+  }, 150);
+}
+
 function _ensureFlushInterval() {
   if (_flushIntervalId) return;
   _flushIntervalId = setInterval(() => {
@@ -134,6 +318,13 @@ function _ensureFlushInterval() {
       const sweepNow = Date.now();
       for (const [id, killedAt] of _killedStdinIds) {
         if (sweepNow - killedAt > KILLED_STDIN_TTL_MS) _killedStdinIds.delete(id);
+      }
+    }
+    // U3: 顺手清扫过期的停止标记（中断后 result 永不送达的兜底回收）
+    {
+      const u3SweepNow = Date.now();
+      for (const [id, markedAt] of _stoppedStdinIds) {
+        if (u3SweepNow - markedAt > STOPPED_STDIN_TTL_MS) _stoppedStdinIds.delete(id);
       }
     }
     // Stop interval when no active buffers remain
@@ -1485,8 +1676,18 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // hasPendingToolUseInTurn. The dot then extinguishes on the result of
         // a turn that actually finished (or on exit/error).
         const bgHasPendingTool = hasPendingToolUseInTurn(store.getTab(tabId)?.messages ?? []);
-        if (msg.subtype !== 'success' || !bgHasPendingTool) {
+        // U3: 用户主动停止 —— 被中断回合的 result 到达时保持 'stopped' 语义
+        const bgStopStdinId = msg.__stdinId as string | undefined;
+        const bgStopped = !!bgStopStdinId && consumeStoppedStdin(bgStopStdinId);
+        if (bgStopped) {
+          store.setSessionStatus(tabId, 'stopped');
+          store.setActivityStatus(tabId, { phase: 'idle', statusMessage: t('session.stopped') });
+        } else if (msg.subtype !== 'success' || !bgHasPendingTool) {
           store.setSessionStatus(tabId, msg.subtype === 'success' ? 'completed' : 'error');
+        }
+        // U2: 后台完成通知 —— 窗口失焦时弹，点击聚焦并跳回对应会话
+        if (msg.subtype === 'success' && !bgStopped && !document.hasFocus()) {
+          showNotificationWithJump(tabId, t('notification.chatComplete'));
         }
         // T02: DSH fork anchor — the deepseek translator stamps the result
         // with the mux seq of the turn's FINAL event (dsh_seq). Park it on
@@ -1650,7 +1851,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const bgResultText = (typeof msg.result === 'string' && msg.result)
             || (typeof msg.content === 'string' && msg.content)
             || '';
-          if (!bgResultText) {
+          // U3: 用户主动停止的回合不补错误消息（中断是预期结果）
+          if (!bgResultText && !bgStopped) {
             const bgErrField: any = msg.error;
             const bgResField: any = msg.result;
             const bgRawErr =
@@ -1659,13 +1861,21 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               || (typeof bgResField === 'object' && bgResField !== null && bgResField?.message)
               || (typeof bgResField === 'object' && bgResField !== null && bgResField?.reason)
               || 'Unknown error';
+            // U1: 带分类 —— MessageBubble 渲染动作按钮
+            const bgFormatted = classifyError(String(bgRawErr));
             store.addMessage(tabId, {
               id: generateMessageId(),
               role: 'system',
               type: 'text',
-              content: formatErrorForUser(String(bgRawErr)),
+              content: bgFormatted.text,
+              errorCategory: bgFormatted.category,
               timestamp: Date.now(),
             });
+          }
+          // U2: 后台错误通知 —— 点击聚焦窗口并跳回对应会话（窗口失焦时才弹，
+          // 与完成通知的门控一致；后台成功通知沿用完成路径，不重复弹）
+          if (!bgStopped && !document.hasFocus()) {
+            showNotificationWithJump(tabId, t('notification.chatError'));
           }
         }
         // B5: background tabs also auto-compact (previously foreground-only, so
@@ -1706,24 +1916,34 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             const bgUserMsgs = bgTab?.messages.filter(
               (m) => m.role === 'user' && m.type === 'text' && m.content,
             ) || [];
-            const bgAssistantMsgs = bgTab?.messages.filter(
-              (m) => m.role === 'assistant' && m.type === 'text' && m.content,
-            ) || [];
-            if (bgUserMsgs.length >= 3 && bgAssistantMsgs.length >= 3) {
-              const userMsg = bgUserMsgs.map((m) => m.content).join('\n').slice(0, 500);
-              const assistantMsg = bgAssistantMsgs.map((m) => m.content).join('\n').slice(0, 500);
-              bridge.generateSessionTitle(userMsg, assistantMsg,
-                useProviderStore.getState().getActiveIdForBackend(
-                  useSettingsStore.getState().cliBackend || 'claude') || undefined)
-                .then((title) => {
-                  if (title) {
-                    useSessionStore.getState().setCustomPreview(tabId, title);
-                  }
-                })
-                .catch((e) => {
-                  // Silently ignore SKIP errors (e.g. no haiku mapping for provider)
-                  if (!String(e).includes('SKIP:')) console.warn('Title gen failed:', e);
-                });
+            // D2: DSH 后端后台 tab 同样不走 LLM 标题——首条用户消息截断作标题。
+            if (bgTab?.sessionMeta.sessionOrigin === 'deepseek') {
+              if (bgUserMsgs.length >= 3) {
+                const firstUser = bgUserMsgs[0]?.content?.trim();
+                if (firstUser) {
+                  useSessionStore.getState().setCustomPreview(tabId, firstUser.slice(0, 40));
+                }
+              }
+            } else {
+              const bgAssistantMsgs = bgTab?.messages.filter(
+                (m) => m.role === 'assistant' && m.type === 'text' && m.content,
+              ) || [];
+              if (bgUserMsgs.length >= 3 && bgAssistantMsgs.length >= 3) {
+                const userMsg = bgUserMsgs.map((m) => m.content).join('\n').slice(0, 500);
+                const assistantMsg = bgAssistantMsgs.map((m) => m.content).join('\n').slice(0, 500);
+                bridge.generateSessionTitle(userMsg, assistantMsg,
+                  useProviderStore.getState().getActiveIdForBackend(
+                    useSettingsStore.getState().cliBackend || 'claude') || undefined)
+                  .then((title) => {
+                    if (title) {
+                      useSessionStore.getState().setCustomPreview(tabId, title);
+                    }
+                  })
+                  .catch((e) => {
+                    // Silently ignore SKIP errors (e.g. no haiku mapping for provider)
+                    if (!String(e).includes('SKIP:')) console.warn('Title gen failed:', e);
+                  });
+              }
             }
           }
         }
@@ -1800,7 +2020,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (bgStdinId) {
           cleanupStreamListener(bgStdinId);
         }
-        store.setSessionStatus(tabId, 'idle');
+        // U3: 用户主动停止的后台会话（中断后进程自行退出）保持 'stopped' 语义
+        const bgExitStopped = !!bgStdinId && consumeStoppedStdin(bgStdinId);
+        store.setSessionStatus(tabId, bgExitStopped ? 'stopped' : 'idle');
+        if (bgExitStopped) {
+          store.setActivityStatus(tabId, { phase: 'idle', statusMessage: t('session.stopped') });
+        }
         store.setSessionMeta(tabId, { stdinId: undefined });
         // B10: a background process exit never ran the foreground pendingCmd
         // cleanup — clear any stuck processing card (e.g. /compact killed
@@ -1859,11 +2084,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           store.setSessionMeta(tabId, { model: msg.model });
         } else if (msg.subtype === 'error') {
           // FI-3: Surface system errors in background tabs too
+          // U1: 带分类 —— MessageBubble 渲染动作按钮
+          const bgSysFormatted = classifyError(msg.message || msg.error || 'System error');
           store.addMessage(tabId, {
             id: generateMessageId(),
             role: 'system',
             type: 'text',
-            content: formatErrorForUser(msg.message || msg.error || 'System error'),
+            content: bgSysFormatted.text,
+            errorCategory: bgSysFormatted.category,
             timestamp: Date.now(),
           });
         }
@@ -2309,11 +2537,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         } else if (msg.subtype === 'error') {
           // FI-3: Surface system-level errors instead of silently dropping them
           const rawError = msg.message || msg.error || 'System error';
+          // U1: 带分类 —— MessageBubble 渲染动作按钮
+          const sysFormatted = classifyError(rawError);
           addMessage({
             id: generateMessageId(),
             role: 'system',
             type: 'text',
-            content: formatErrorForUser(rawError),
+            content: sysFormatted.text,
+            errorCategory: sysFormatted.category,
             timestamp: Date.now(),
           });
           // Sync error status to ActivityIndicator so user sees real-time feedback
@@ -3096,7 +3327,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // carry objects, not strings) used to fail SILENTLY — the tab just
         // flipped to a red dot and the user had no idea why. Surface the
         // error detail as a classified system message.
-        if (msg.subtype !== 'success' && !resultDisplayText) {
+        // U3: 用户主动停止触发的中断 result 不补错误消息（中断是预期结果）
+        if (msg.subtype !== 'success' && !resultDisplayText
+            && !(msgStdinId && isStoppedStdinActive(msgStdinId))) {
           const errField: any = msg.error;
           const resField: any = msg.result;
           const rawErr =
@@ -3105,11 +3338,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             || (typeof resField === 'object' && resField !== null && resField?.message)
             || (typeof resField === 'object' && resField !== null && resField?.reason)
             || 'Unknown error';
+          // U1: 带分类 —— MessageBubble 渲染动作按钮
+          const fgFormatted = classifyError(String(rawErr));
           addMessage({
             id: generateMessageId(),
             role: 'system',
             type: 'text',
-            content: formatErrorForUser(String(rawErr)),
+            content: fgFormatted.text,
+            errorCategory: fgFormatted.category,
             timestamp: Date.now(),
           });
         }
@@ -3122,14 +3358,22 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         const fgHasPendingTool = hasPendingToolUseInTurn(
           useChatStore.getState().getTab(tabId)?.messages ?? [],
         );
-        if (msg.subtype !== 'success' || !fgHasPendingTool) {
+        // U3: 用户主动停止 —— 被中断回合的 result 到达时消费停止标记，
+        // 保持 'stopped' 语义（琥珀点），不覆盖成 completed/error
+        const fgStopped = !!msgStdinId && consumeStoppedStdin(msgStdinId);
+        if (fgStopped) {
+          setSessionStatus('stopped');
+          setActivityStatus({ phase: 'idle', statusMessage: t('session.stopped') });
+        } else if (msg.subtype !== 'success' || !fgHasPendingTool) {
           setSessionStatus(
             msg.subtype === 'success' ? 'completed' : 'error'
           );
         }
         // Sync error status to ActivityIndicator for real-time user feedback
-        if (msg.subtype !== 'success') {
+        if (msg.subtype !== 'success' && !fgStopped) {
           setActivityStatus({ phase: 'error', statusMessage: t('chat.error') });
+        }
+        if (msg.subtype !== 'success') {
           // B1: a failed compact turn must not leave the per-session fired
           // flag set — the session would then never auto-compact again until
           // the next spawn (a long session would keep growing unchecked).
@@ -3262,23 +3506,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // Completion system notification: when the main window is unfocused
         // (task finished while user is elsewhere), notify. Mirrors the
         // process-exit notification path. Only on success — errors are noisy.
-        if (msg.subtype === 'success' && !document.hasFocus() && 'Notification' in window) {
-          if (Notification.permission === 'granted') {
-            new Notification('Little Claude', { body: t('notification.chatComplete') });
-          } else if (Notification.permission === 'default') {
-            Notification.requestPermission().then((perm) => {
-              if (perm === 'granted') {
-                new Notification('Little Claude', { body: t('notification.chatComplete') });
-              }
-            }).catch(() => {});
-          }
+        // U2: 通知点击 → window.focus() + 选中对应会话
+        if (msg.subtype === 'success' && !fgStopped && !document.hasFocus()) {
+          showNotificationWithJump(tabId, t('notification.chatComplete'));
         }
         useSessionStore.getState().fetchSessions();
         setTimeout(() => useSessionStore.getState().fetchSessions(), 1000);
 
         // --- AI Title Generation (TK-001): on 3rd successful turn, generate a title ---
         if (msg.subtype === 'success') {
-          const sessionId = useChatStore.getState().getTab(tabId)?.sessionMeta.sessionId;
+          const fgTabMeta = useChatStore.getState().getTab(tabId)?.sessionMeta;
+          const sessionId = fgTabMeta?.sessionId;
           if (sessionId) {
             const customPreviews = useSessionStore.getState().customPreviews;
             if (!customPreviews[sessionId]) {
@@ -3286,7 +3524,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               const userTextMsgs = currentMessages.filter(
                 (m) => m.role === 'user' && m.type === 'text' && m.content,
               );
-              if (userTextMsgs.length >= 3) {
+              // D2: DSH 后端会话不走 LLM 标题（generate_session_title 依赖 claude
+              // 一次性进程，纯 DSH 用户没装 claude CLI 时会静默失败）——直接取
+              // 首条用户消息前 40 字符作标题。claude/codex 保持现有 LLM 路径。
+              if (fgTabMeta?.sessionOrigin === 'deepseek') {
+                if (userTextMsgs.length >= 3) {
+                  const firstUser = userTextMsgs[0]?.content?.trim();
+                  if (firstUser) {
+                    useSessionStore.getState().setCustomPreview(sessionId, firstUser.slice(0, 40));
+                  }
+                }
+              } else if (userTextMsgs.length >= 3) {
                 const assistantTextMsgs = currentMessages.filter(
                   (m) => m.role === 'assistant' && m.type === 'text' && m.content,
                 );
@@ -3527,11 +3775,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               const hint = isTccError && isProtectedDir
                 ? '\n\n此目录可能受 macOS 隐私保护限制。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中授权，或选择其他目录。'
                 : '';
+              // U1: 带分类 —— MessageBubble 渲染动作按钮
+              const exitFormatted = classifyError(`CLI error: ${stderr}${hint}`);
               addMessage({
                 id: generateMessageId(),
                 role: 'system',
                 type: 'text',
-                content: formatErrorForUser(`CLI error: ${stderr}${hint}`),
+                content: exitFormatted.text,
+                errorCategory: exitFormatted.category,
                 timestamp: Date.now(),
               });
             } else {
@@ -3567,7 +3818,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
 
-        setSessionStatus('idle');
+        // U3: 用户主动停止后进程自行退出（中断使 CLI 直接退出、或 deepseek
+        // kill≙cancel）——保持 'stopped' 语义，不回退成 idle。_killedStdinIds
+        // 里的 kill 退出已在上方按 stale 早退；这里覆盖"未被 kill 的主动停止"。
+        // 用 exitingStdinId（含 sessionMeta 回退），与 markStoppedStdin 的键一致。
+        const exitStopped = !!exitingStdinId && consumeStoppedStdin(exitingStdinId);
+        setSessionStatus(exitStopped ? 'stopped' : 'idle');
+        if (exitStopped) {
+          setActivityStatus({ phase: 'idle', statusMessage: t('session.stopped') });
+        }
         // B6: a process exit (interrupt, error, or kill) may arrive without a
         // final assistant message — clear any residual partial text so the UI
         // never shows a frozen half-bubble from the dead session.
@@ -3578,19 +3837,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         }
         // F10: 通知区分成败——仅当退出前状态为 completed 或已有过 assistant
         // 回复才弹"任务完成"；error/启动失败退出一律不弹（此前一律弹成功通知）
+        // U2: 通知点击 → window.focus() + 选中对应会话；U3: 主动停止不弹完成通知
         const exitHadReply = exitMsgs.some(
           (m: ChatMessage) => m.role === 'assistant' && (m.type === 'text' || m.type === 'tool_use'),
         );
-        if ((exitStatus === 'completed' || exitHadReply) && !document.hasFocus() && 'Notification' in window) {
-          if (Notification.permission === 'granted') {
-            new Notification('Little Claude', { body: t('notification.chatComplete') });
-          } else if (Notification.permission === 'default') {
-            Notification.requestPermission().then((perm) => {
-              if (perm === 'granted') {
-                new Notification('Little Claude', { body: t('notification.chatComplete') });
-              }
-            }).catch(() => {});
-          }
+        if ((exitStatus === 'completed' || exitHadReply) && !exitStopped && !document.hasFocus()) {
+          showNotificationWithJump(tabId, t('notification.chatComplete'));
         }
 
         setSessionMeta({ stdinId: undefined, lastProgressAt: undefined });

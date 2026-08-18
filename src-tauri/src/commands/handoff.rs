@@ -16,14 +16,19 @@ use serde_json::{json, Value};
 use std::io::Read;
 use tauri::State;
 
-/// Decode every zstd frame of a DSH session log into parsed event rows.
-/// DSH appends one frame per write; ruzstd decodes one frame per
-/// StreamingDecoder, so loop until the reader is exhausted (same strategy as
-/// profile.rs::decode_dsh_session).
-fn decode_dsh_session_lines(path: &std::path::Path) -> Result<Vec<Value>, String> {
+/// Generic multi-frame zstd DSH decoder core.
+///
+/// DSH appends one zstd FRAME per write; ruzstd's StreamingDecoder decodes a
+/// single frame per instance, so loop frame-by-frame until the underlying
+/// reader is exhausted (same strategy as profile.rs::decode_dsh_session).
+/// D1: factored out so both the full-file reader (`decode_dsh_session_lines`)
+/// and the bounded list reader (`decode_dsh_session_head`) share one
+/// implementation instead of copy-pasting the frame loop. A torn tail frame
+/// (file being appended right now) or a truncated reader just ends the row
+/// list early — callers keep whatever fully-decoded frames precede it.
+fn decode_dsh_frames<R: std::io::Read>(reader: R) -> Vec<Value> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(|e| format!("无法打开 DSH 会话日志: {}", e))?;
-    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, reader);
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let mut decoder = match ruzstd::StreamingDecoder::new(&mut reader) {
@@ -53,11 +58,33 @@ fn decode_dsh_session_lines(path: &std::path::Path) -> Result<Vec<Value>, String
             rows.push(v);
         }
     }
-    Ok(rows)
+    rows
+}
+
+/// Decode every zstd frame of a DSH session log into parsed event rows.
+/// D1: pub(crate) so session.rs reuses this exact multi-frame decode path
+/// instead of copy-pasting it.
+pub(crate) fn decode_dsh_session_lines(path: &std::path::Path) -> Result<Vec<Value>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("无法打开 DSH 会话日志: {}", e))?;
+    Ok(decode_dsh_frames(file))
+}
+
+/// D1: bounded variant — decode only the leading frames (at most `max_bytes`
+/// of compressed input). Used by list_dsh_sessions: listing metadata (create
+/// event with cwd/createdAt, first user message, early turns) sits at the HEAD
+/// of the log, so an 11 MB session is not fully decoded just to appear in the
+/// conversation list. Frames cut off by the byte cap are dropped cleanly.
+pub(crate) fn decode_dsh_session_head(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<Vec<Value>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("无法打开 DSH 会话日志: {}", e))?;
+    Ok(decode_dsh_frames(file.take(max_bytes)))
 }
 
 /// Extract plain text from a DSH content-block array (text blocks only).
-fn blocks_text(content: &Value) -> String {
+/// D1: pub(crate) — reused by session.rs::list_dsh_sessions preview extraction.
+pub(crate) fn blocks_text(content: &Value) -> String {
     let mut out = String::new();
     if let Some(arr) = content.as_array() {
         for block in arr {
@@ -83,6 +110,9 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
     for row in rows {
         let etype = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let data = row.get("data");
+        // D1: event timestamp (ms) — lets the conversation-list reload path
+        // stamp ChatMessage entries with real times instead of Date.now().
+        let time = row.get("time").and_then(|v| v.as_u64()).unwrap_or(0);
         match etype {
             "user/message" => {
                 let text = data
@@ -90,7 +120,7 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
                     .map(blocks_text)
                     .unwrap_or_default();
                 if !text.trim().is_empty() {
-                    turns.push(json!({ "role": "user", "text": text }));
+                    turns.push(json!({ "role": "user", "text": text, "time": time }));
                 }
             }
             "assistant/message" => {
@@ -124,6 +154,7 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
                         "role": "assistant",
                         "text": text,
                         "tools": tools,
+                        "time": time,
                     }));
                 }
             }
@@ -154,6 +185,36 @@ fn build_unified_turns(rows: Vec<Value>) -> Value {
     })
 }
 
+/// Resolve the on-disk path of a DSH session log by session id.
+///
+/// Two layouts are handled:
+///  1. flat:   ~/.dsh/sessions/<id>/session.jsonl.zstd (legacy fast path)
+///  2. nested: ~/.dsh/sessions/<encoded-cwd>/<id>/session.jsonl.zstd
+///     — the REAL layout (verified: every session.jsonl.zstd sits exactly one
+///     level below a per-cwd directory). We scan the direct subdirs once.
+/// Returns None when no layout matches.
+pub(crate) fn resolve_dsh_session_log(
+    home: &std::path::Path,
+    dsh_sid: &str,
+) -> Option<std::path::PathBuf> {
+    let sessions_root = home.join(".dsh").join("sessions");
+    // 1. flat fast path
+    let flat = sessions_root.join(dsh_sid).join("session.jsonl.zstd");
+    if flat.exists() {
+        return Some(flat);
+    }
+    // 2. nested: scan the per-cwd dirs one level down
+    if let Ok(entries) = std::fs::read_dir(&sessions_root) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join(dsh_sid).join("session.jsonl.zstd");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Read a DSH session's history as unified turns.
 /// `session_id` accepts either the LC tab id (desk_*, resolved through the
 /// live mapping) or the DSH session id directly.
@@ -167,14 +228,9 @@ pub async fn read_dsh_session_turns(
         None => session_id.clone(),
     };
     let home = dirs::home_dir().ok_or("Cannot find home dir")?;
-    let path = home
-        .join(".dsh")
-        .join("sessions")
-        .join(&dsh_sid)
-        .join("session.jsonl.zstd");
-    if !path.exists() {
-        return Err(format!("DSH 会话日志不存在: {}", dsh_sid));
-    }
+    // D1: handles both the flat and the real nested (<encoded-cwd>/<id>) layout.
+    let path = resolve_dsh_session_log(&home, &dsh_sid)
+        .ok_or_else(|| format!("DSH 会话日志不存在: {}", dsh_sid))?;
     tokio::task::spawn_blocking(move || {
         let rows = decode_dsh_session_lines(&path)?;
         Ok(build_unified_turns(rows))
@@ -207,4 +263,63 @@ pub async fn write_handoff_file(cwd: String, content: String) -> Result<String, 
     })
     .await
     .map_err(|e| format!("交接简报任务失败: {}", e))?
+}
+
+#[cfg(test)]
+mod d1_handoff_tests {
+    use super::{build_unified_turns, decode_dsh_session_lines, resolve_dsh_session_log};
+
+    /// Local-machine verification (ignored on CI — needs ~/.dsh/sessions):
+    /// the real DSH layout nests logs one level below a per-cwd dir, so the
+    /// flat path alone would find nothing. Assert resolve + decode + turns all
+    /// work end-to-end for every top-level session id on disk.
+    #[test]
+    #[ignore]
+    fn resolve_and_decode_real_dsh_sessions() {
+        let Some(home) = dirs::home_dir() else { return };
+        let sessions_root = home.join(".dsh").join("sessions");
+        if !sessions_root.is_dir() {
+            return;
+        }
+        // Collect real (encoded-cwd, session-id) pairs from the nested layout.
+        let mut ids: Vec<String> = Vec::new();
+        if let Ok(l1) = std::fs::read_dir(&sessions_root) {
+            for cwd_dir in l1.flatten() {
+                let cwd_path = cwd_dir.path();
+                if !cwd_path.is_dir() {
+                    continue;
+                }
+                if let Ok(l2) = std::fs::read_dir(&cwd_path) {
+                    for sid_dir in l2.flatten() {
+                        if sid_dir.path().join("session.jsonl.zstd").exists() {
+                            if let Some(name) = sid_dir.file_name().to_str() {
+                                ids.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!ids.is_empty(), "no nested DSH sessions found on disk");
+
+        let mut resolved = 0usize;
+        let mut with_turns = 0usize;
+        for id in &ids {
+            let Some(path) = resolve_dsh_session_log(&home, id) else {
+                panic!("resolve_dsh_session_log failed for nested session {}", id);
+            };
+            assert!(path.exists(), "resolved path does not exist: {}", path.display());
+            resolved += 1;
+            let rows = decode_dsh_session_lines(&path)
+                .unwrap_or_else(|e| panic!("decode failed for {}: {}", path.display(), e));
+            let unified = build_unified_turns(rows);
+            let turn_count = unified.get("turnCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            if turn_count > 0 {
+                with_turns += 1;
+            }
+            eprintln!("dsh {}: turns={} model={:?}", id, turn_count, unified.get("model"));
+        }
+        assert_eq!(resolved, ids.len(), "some sessions did not resolve");
+        assert!(with_turns > 0, "no DSH session produced any turns");
+    }
 }

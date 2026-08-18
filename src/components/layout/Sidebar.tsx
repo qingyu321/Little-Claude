@@ -1,15 +1,19 @@
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useSettingsStore, MODEL_OPTIONS } from '../../stores/settingsStore';
 import { useChatStore, useActiveTab } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
-import { ConversationList } from '../conversations/ConversationList';
 import { useT } from '../../lib/i18n';
 import { useAgentStore } from '../../stores/agentStore';
 import { useInterviewStore } from '../../stores/interviewStore';
 import { IS_ALPHA } from '../../lib/edition';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
-import { ProfileStatsModal } from '../profile/ProfileStatsModal';
+
+// P2: App chunk 再拆分——会话列表子树（ConversationList + SessionGroup/SessionItem/
+// SessionContextMenu/ConversationSearch）整体移出 App chunk；ProfileStatsModal
+// 仅在点头像打开资料时加载。两者均为低频/按需场景，与 App.tsx 的 lazy 模式一致。
+const ConversationList = lazy(() => import('../conversations/ConversationList').then(m => ({ default: m.ConversationList })));
+const ProfileStatsModal = lazy(() => import('../profile/ProfileStatsModal').then(m => ({ default: m.ProfileStatsModal })));
 
 /** Map raw model ID to friendly display name */
 function getModelDisplayName(modelId: string): string {
@@ -203,6 +207,7 @@ export function Sidebar() {
               ? 'bg-success shadow-[0_0_8px_var(--color-accent-glow)] animate-pulse-soft'
               : sessionStatus === 'completed' ? 'bg-success'
               : sessionStatus === 'error' ? 'bg-error'
+              : sessionStatus === 'stopped' ? 'bg-warning' // U3: 主动停止琥珀点
               : 'bg-text-tertiary'}`} />
           <span className="text-xs font-medium text-text-primary truncate">
             {sessionMeta.model ? getModelDisplayName(sessionMeta.model) : 'DeepSeek'}
@@ -214,7 +219,10 @@ export function Sidebar() {
               <span>↓{formatTokenCount(sessionMeta.totalOutputTokens || sessionMeta.outputTokens || 0)}</span>
             </span>
           ) : (
-            <span className="text-[10px] text-text-tertiary capitalize ml-auto flex-shrink-0">{sessionStatus}</span>
+            // U3: stopped 显示本地化"已停止"文案，其余状态沿用原英文显示
+            <span className="text-[10px] text-text-tertiary capitalize ml-auto flex-shrink-0">
+              {sessionStatus === 'stopped' ? t('session.stopped') : sessionStatus}
+            </span>
           )}
         </div>
       )}
@@ -222,7 +230,10 @@ export function Sidebar() {
 
       {/* Conversation History */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 -mr-1.5 pr-1.5">
-        <ConversationList />
+        {/* P2: 懒加载分块——列表数据来自本地磁盘，分块加载在毫秒级，不影响体验 */}
+        <Suspense fallback={null}>
+          <ConversationList />
+        </Suspense>
       </div>
 
       {/* Footer */}
@@ -298,7 +309,13 @@ export function Sidebar() {
           {t('settings.title')}
         </button>
       </div>
-      <ProfileStatsModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+      {/* P2: 懒加载 + 仅在打开时挂载——组件本身在 !open 时 return null 且只在
+          open 时拉取统计（loadStats），条件挂载行为完全等价 */}
+      {profileOpen && (
+        <Suspense fallback={null}>
+          <ProfileStatsModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

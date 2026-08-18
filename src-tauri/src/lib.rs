@@ -2123,6 +2123,82 @@ async fn start_deepseek_session(
         }
     }
 
+    // D4 (任务05限制项): baseUrl 透传 —— provider 的端点写入 dsh 的
+    // `llm-deepseek` settings namespace。调研结论（dsh 包内）：
+    //  - settings.update RPC（dsh-host-apiproxy settings.schema.js:37-41）：
+    //    payload { ns, patch, expectedRevision? }，patch 深合并进该 namespace
+    //    的 user 层并经 schema 校验后持久化；
+    //  - dsh-llm-deepseek 注册 namespace "llm-deepseek"（lib/index.js:634），
+    //    Config 含 baseURL: z.string()（无默认值；解析顺序 config.baseURL →
+    //    $DEEPSEEK_BASE_URL → https://api.deepseek.com），适配器请求
+    //    POST {baseURL}/chat/completions（OpenAI chat 形态）。
+    // 候选取值：extra_env.ANTHROPIC_BASE_URL 优先，其次 provider.base_url；
+    // 语义守卫：anthropic 形态端点（/anthropic、/messages 结尾）无法提供
+    // chat/completions，跳过。写入前经 settings.describe 对比当前解析值，
+    // 相同则不落盘（避免每次启动会话都写 ~/.dsh 配置文件）。失败仅告警：
+    // dsh 保留自身 baseURL（默认官方 API），不影响会话启动。
+    if let Some(ref provider) = dsh_provider {
+        let candidates = [
+            provider
+                .extra_env
+                .as_ref()
+                .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+                .cloned(),
+            Some(provider.base_url.clone()),
+        ];
+        let candidate = candidates
+            .into_iter()
+            .flatten()
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .find(|u| {
+                let l = u.to_lowercase();
+                !(l.ends_with("/anthropic") || l.ends_with("/messages"))
+            });
+        if let Some(base_url) = candidate {
+            let already = unary(&service.base_url, "settings.describe", json!({}))
+                .await
+                .ok()
+                .and_then(|desc| {
+                    desc.get("namespaces")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            arr.iter().find(|ns| {
+                                ns.get("ns").and_then(|v| v.as_str()) == Some("llm-deepseek")
+                            })
+                        })
+                        .and_then(|ns| ns.pointer("/value/baseURL"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().trim_end_matches('/').to_string())
+                })
+                .map(|cur| cur == base_url)
+                .unwrap_or(false);
+            if already {
+                eprintln!(
+                    "[LITTLECLAUDE:deepseek] D4: dsh baseURL already '{}' — no settings write",
+                    base_url
+                );
+            } else {
+                match unary(
+                    &service.base_url,
+                    "settings.update",
+                    json!({ "ns": "llm-deepseek", "patch": { "baseURL": base_url } }),
+                )
+                .await
+                {
+                    Ok(_) => eprintln!(
+                        "[LITTLECLAUDE:deepseek] D4: synced provider '{}' baseURL '{}' into dsh settings (llm-deepseek.baseURL)",
+                        provider.name, base_url
+                    ),
+                    Err(e) => eprintln!(
+                        "[LITTLECLAUDE:deepseek] D4: settings.update baseURL rejected ({}); dsh keeps its own baseURL (warn-only, session proceeds)",
+                        e
+                    ),
+                }
+            }
+        }
+    }
+
     // T05 model passthrough (see apply_deepseek_model below).
     if let Some(ref model) = params.model {
         apply_deepseek_model(&service.base_url, &dsh_session_id, model).await;
@@ -2705,6 +2781,10 @@ pub fn run() {
             commands::ls_persist::remove_ls_entry,
             commands::ls_persist::ensure_migrated,
             commands::ls_persist::receive_ls_migration_dump,
+            // D1: DSH 会话进会话列表（~/.dsh/sessions 扫描）
+            commands::session::list_dsh_sessions,
+            // D3: DSH 服务状态灯（自管服务优先，其次外部 3080，不 spawn）
+            commands::dsh_service::dsh_service_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

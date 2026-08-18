@@ -28,6 +28,9 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
   const [importError, setImportError] = useState('');
   const [cardTestStatuses, setCardTestStatuses] = useState<Record<string, CardTestStatus>>({});
   const [cardTestTimes, setCardTestTimes] = useState<Record<string, number>>({});
+  /** D5: per-card explanatory note shown under the test button (DSH backend —
+   *  where a "success" only proves the CLI/service, not the API key). */
+  const [cardTestNotes, setCardTestNotes] = useState<Record<string, string>>({});
   /** Which backend's provider selection is currently being configured.
    *  T05: "deepseek" (DSH service mode) is a first-class backend tab. */
   const [activeBackend, setActiveBackend] = useState<'claude' | 'codex' | 'deepseek'>('claude');
@@ -164,20 +167,37 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
 
     setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'testing' }));
     setCardTestTimes((prev) => { const next = { ...prev }; delete next[providerId]; return next; });
+    setCardTestNotes((prev) => { const next = { ...prev }; delete next[providerId]; return next; });
 
     // T05: a DSH-backend provider does not speak Anthropic/OpenAI HTTP itself —
-    // it rides the local dsh service. The meaningful connectivity check is
-    // "is the dsh CLI installed" (the key/model sync happens at session start).
+    // it rides the local dsh service.
+    // D5 (任务05限制项): upgrade the test beyond "is the CLI installed":
+    //  1. checkDshCli — must be installed, else failed.
+    //  2. dshServiceStatus — probe the live service WITHOUT spawning
+    //     (read-only manager + short-timeout host.describe). If a service is
+    //     already up we report it; if not we do NOT start one just to test —
+    //     the API key is only validated when a session actually starts, so we
+    //     surface that as a note instead of forcing endpoint connectivity.
     if (p.cliBackend === 'deepseek') {
       try {
         const start = Date.now();
         const status = await bridge.checkDshCli();
-        const elapsed = Date.now() - start;
-        if (status.installed) {
-          setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'success' }));
-          setCardTestTimes((prev) => ({ ...prev, [providerId]: elapsed }));
-        } else {
+        if (!status.installed) {
           setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
+          setCardTestNotes((prev) => ({ ...prev, [providerId]: t('provider.dshTestNotInstalled') }));
+          return;
+        }
+        // CLI installed — probe the service (never spawns).
+        const svc = await bridge.dshServiceStatus().catch(() => null);
+        const elapsed = Date.now() - start;
+        setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'success' }));
+        setCardTestTimes((prev) => ({ ...prev, [providerId]: elapsed }));
+        if (svc?.running) {
+          // Service live → connectivity confirmed; key still verified at session start.
+          setCardTestNotes((prev) => ({ ...prev, [providerId]: t('provider.dshTestServiceRunning') }));
+        } else {
+          // No service yet → it starts on first message; key verified then.
+          setCardTestNotes((prev) => ({ ...prev, [providerId]: t('provider.dshTestKeyAtSessionStart') }));
         }
       } catch {
         setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
@@ -330,6 +350,7 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
                   isEditing={editingId === p.id}
                   testStatus={cardTestStatuses[p.id] || 'idle'}
                   testTimeMs={cardTestTimes[p.id]}
+                  testNote={cardTestNotes[p.id]}
                   onActivate={() => setActive(p.id, activeBackend)}
                   onToggleEdit={() => { setEditingId(editingId === p.id ? null : p.id); setAutoTestId(null); }}
                   onRequestDelete={() => setDeleteTarget(p.id)}

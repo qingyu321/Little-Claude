@@ -6,7 +6,8 @@ import { encodeProjectName } from '../lib/platform';
  *  runningSessions Set stays as the "is it busy" projection (pet panel,
  *  delete warnings); sessionStatuses carries the complete state so a
  *  finished conversation (text reply end) still shows a dot. */
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// U3: 'stopped' —— 用户主动 Stop 的会话生命周期态（侧栏琥珀点 + "已停止"）
+export type SessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
 
 // Persist custom session names in localStorage as fast cache,
 // and sync to disk via Tauri backend for durability.
@@ -141,9 +142,21 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     if (isFirstLoad) set({ isLoading: true });
     try {
       // 面试助手生成的 desk_interview_* 会话不进会话列表（临时问答，非用户对话）
-      const diskSessions = (await bridge.listSessions()).filter(
-        (s) => !s.id.startsWith('desk_interview_'),
-      );
+      // D1: 并行拉取 DSH 会话（~/.dsh/sessions，origin:'deepseek'）合并进列表；
+      // DSH 侧失败不拖垮 claude 列表（降级为空，控制台留痕）
+      const [claudeSessions, dshSessions] = await Promise.all([
+        bridge.listSessions(),
+        bridge.listDshSessions(100).catch((err) => {
+          console.warn('[D1] listDshSessions failed — DSH sessions hidden this round:', err);
+          return [] as SessionListItem[];
+        }),
+      ]);
+      const diskSessions = [
+        ...claudeSessions,
+        ...dshSessions,
+      ].filter((s) => !s.id.startsWith('desk_interview_'));
+      // claude 侧 Rust 已按 mtime 排序；合并后整体重排，两个后端按时间交错
+      diskSessions.sort((a, b) => (b.modifiedAt || 0) - (a.modifiedAt || 0));
       // Preserve draft sessions (path === '') that haven't been written to disk yet
       const drafts = get().sessions.filter(
         (s) => s.path === '' && !diskSessions.some((d) => d.id === s.id),

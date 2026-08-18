@@ -24,7 +24,7 @@ import { FileUploadChips } from './FileUploadChips';
 import { RewindPanel } from './RewindPanel';
 import { useFileAttachments } from '../../hooks/useFileAttachments';
 import { useRewind } from '../../hooks/useRewind';
-import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, formatErrorForUser, markKilledStdin } from '../../hooks/useStreamProcessor';
+import { useStreamProcessor, flushStreamBuffer, resolveOwnerTab, classifyError, stopSessionGracefully } from '../../hooks/useStreamProcessor';
 import { useAgentStore } from '../../stores/agentStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useT } from '../../lib/i18n';
@@ -423,6 +423,45 @@ export function InputBar() {
     window.addEventListener('little-claude:rewind', handler);
     return () => window.removeEventListener('little-claude:rewind', handler);
   }, [canRewind, t]);
+
+  // U5: 用户消息"编辑重发"回填 —— MessageBubble 的编辑按钮派发此事件。
+  // 行为：把该消息文本回填输入框 + 截断到该轮之前 + 聚焦输入框。
+  // 截断用 chatStore.rewindToTurn（仅内存层面、不调 CLI rewind），因此
+  // 跨后端 / 无检查点场景也能用。重发后走正常提交流程（handleSubmit）。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ messageId: string; text: string }>).detail;
+      const tabId = useSessionStore.getState().selectedSessionId;
+      if (!tabId || !detail || typeof detail.text !== 'string') return;
+      const tab = useChatStore.getState().getTab(tabId);
+      // 运行中的会话不允许边跑边截断 —— 需先 Stop
+      if (tab && tab.sessionStatus === 'running') return;
+      const idx = tab ? tab.messages.findIndex((m) => m.id === detail.messageId) : -1;
+      if (idx >= 0) {
+        // 截断到该轮之前（含该用户消息本身，文本已回填到输入框）
+        useChatStore.getState().rewindToTurn(tabId, idx);
+      }
+      setInputSync(detail.text);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    window.addEventListener('little-claude:edit-user-message', handler);
+    return () => window.removeEventListener('little-claude:edit-user-message', handler);
+  }, [setInputSync]);
+
+  // U1: 错误可行动卡片"重试" —— 重发最后一条用户消息（正常提交流程）。
+  // preserveDraft: 不清空用户正在输入的内容。
+  useEffect(() => {
+    const handler = () => {
+      const tab = getActiveTabState();
+      if (tab.sessionStatus === 'running') return;
+      const lastUser = [...tab.messages].reverse().find(
+        (m) => m.role === 'user' && m.type === 'text' && m.content,
+      );
+      if (lastUser) void handleSubmitRef.current(lastUser.content, { preserveDraft: true });
+    };
+    window.addEventListener('little-claude:retry-last-message', handler);
+    return () => window.removeEventListener('little-claude:retry-last-message', handler);
+  }, []);
 
   // Double-Esc rewind shortcut disabled (#36 / #71) — rewind feature is hidden in TOKENICODE
 
@@ -1486,12 +1525,15 @@ export function InputBar() {
         useSessionStore.getState().unregisterStdinTab(sessionStdinId);
       }
       setSessionStatus(tabId, 'error');
+      // A5: 原始错误经分类器转成友好文案（markdown 渲染含可折叠详情）
+      // U1: 带分类 —— MessageBubble 渲染动作按钮（打开设置 / 去安装 / 新建任务 / 重试）
+      const spawnFormatted = classifyError(String(err));
       addMessage(tabId, {
         id: generateMessageId(),
         role: 'system',
         type: 'text',
-        // A5: 原始错误经分类器转成友好文案（markdown 渲染含可折叠详情）
-        content: formatErrorForUser(String(err)),
+        content: spawnFormatted.text,
+        errorCategory: spawnFormatted.category,
         timestamp: Date.now(),
       });
       // Spawn failure — restore queued messages to the draft (same semantics
@@ -1535,7 +1577,8 @@ export function InputBar() {
   // Guard on `=== 'completed'` specifically — the ONLY 'completed' state with
   // a non-empty pending list is the load-completion path:
   //   · load done           → 'completed', pending>0  → flush ✓
-  //   · user Stop           → 'completed', but Stop clears pending first
+  //   · user Stop           → 'stopped' (U3, not 'completed' — no flush), and
+  //     Stop clears pending back to the draft first anyway
   //   · stream result done  → 'completed', but stdinId is still live
   //   · process exit        → 'idle' — NOT flushed (Bug B restores pending
   //     to the input draft; auto-sending there would bypass the user's
@@ -2041,39 +2084,15 @@ export function InputBar() {
           {/* Stop button — visible only while running */}
           {isRunning && (
             <button
-              onClick={async () => {
+              onClick={() => {
                 const stopTabId = useSessionStore.getState().selectedSessionId;
-                const sid = getActiveTabState().sessionMeta.stdinId;
-                // Immediately clear stdinId so no further messages are sent to the dead process
-                if (stopTabId) {
-                  useChatStore.getState().setSessionMeta(stopTabId, { stdinId: undefined });
-                  useChatStore.getState().setSessionStatus(stopTabId, 'completed');
-                  useChatStore.getState().setActivityStatus(stopTabId, { phase: 'completed' });
-                  // H6: Stop abandons the queued messages — clear the queue
-                  // so the flush effect can't auto-send them, and put them
-                  // back into the input draft for the user to re-send or
-                  // discard at will.
-                  const queued = useChatStore.getState().flushPendingMessages(stopTabId);
-                  if (queued.length > 0) {
-                    const draft = useChatStore.getState().getTab(stopTabId)?.inputDraft ?? '';
-                    useChatStore.getState().setInputDraft(
-                      stopTabId,
-                      [draft, ...queued].filter(Boolean).join('\n\n'),
-                    );
-                  }
-                }
-                if (sid) {
-                  // fix11: 登记被杀的 stdinId——迟到的 process_exit 按 stale 处理，
-                  // 不把 completed 回滚成 idle、不误发"任务完成"通知
-                  markKilledStdin(sid);
-                  await bridge.killSession(sid).catch(() => {});
-                  // Don't unlisten immediately — let process_exit fire naturally to clean up.
-                  // The listener will be replaced when a new session spawns (line ~788).
-                  // As a safety net, force-clean after 3s if process_exit hasn't arrived.
-                  setTimeout(() => {
-                    cleanupStreamListener(sid);
-                  }, 3000);
-                }
+                // U3: Stop 语义重做 —— "先中断后杀"，与侧栏右键"停止"共用同一入口：
+                //   · claude/codex：先发 control interrupt，2 秒内无 result/process_exit
+                //     再 killSession 兜底（markKilledStdin 保留 fix11 stale-exit 语义）
+                //   · deepseek：保持直接 kill（kill_session 已映射 session.cancel）
+                // 被停止的会话显示 'stopped'（琥珀点 + "已停止"），不再是 completed 绿点。
+                // 中断成功时进程保留，输入框可继续对话；排队消息回退到草稿（H6 语义）。
+                if (stopTabId) void stopSessionGracefully(stopTabId);
               }}
               className="flex-shrink-0 self-end w-8 h-8 rounded-[10px]
                 bg-red-500/15 text-red-500

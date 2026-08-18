@@ -46,8 +46,23 @@ export interface SessionListItem {
   projectDir: string;
   modifiedAt: number;
   preview: string;
-  /** Which CLI backend created this session: "claude" (default) or "codex". */
+  /** Which CLI backend created this session: "claude" (default), "codex", or
+   *  "deepseek" (D1: DSH sessions from ~/.dsh/sessions). */
   origin?: string;
+  /** D1: estimated turn count (DSH sessions only — from turn/start events). */
+  turnCount?: number;
+  /** D1: session creation timestamp in ms (DSH sessions only). */
+  createdAt?: number;
+}
+
+/** D3: DSH service status — never spawns; reports the currently known service.
+ *  spawned=true → LC launched this `dsh web` itself (random port);
+ *  external=true → running but not LC-spawned (default port 3080 or adopted). */
+export interface DshServiceStatus {
+  running: boolean;
+  baseUrl: string | null;
+  spawned: boolean;
+  external: boolean;
 }
 
 /** T03: paginated session load result (load_session_tail / load_session_more).
@@ -521,6 +536,11 @@ export const bridge = {
   listSessions: () =>
     invoke<SessionListItem[]>('list_sessions'),
 
+  /** D1: 列出最近的 DSH 会话（~/.dsh/sessions/**，origin:'deepseek'），
+   *  按 mtime 取最近 limit 个（默认 100）。与 list_sessions 同形。 */
+  listDshSessions: (limit?: number) =>
+    invoke<SessionListItem[]>('list_dsh_sessions', { limit: limit ?? null }),
+
   getProfileStats: () =>
     invoke<ProfileStats>('get_profile_stats'),
 
@@ -900,6 +920,11 @@ export const bridge = {
   /** DeepSeek Harness CLI: binary + version + service probe (service mode) */
   checkDshCli: () =>
     invoke<CliStatus>('check_dsh_cli'),
+
+  /** D3: DSH 服务状态灯——报告当前已知服务（自管优先，其次外部 3080）。
+   *  绝不 spawn：只读 DshServiceManager 缓存 + 短超时探活。 */
+  dshServiceStatus: () =>
+    invoke<DshServiceStatus>('dsh_service_status'),
 
   /** Install DeepSeek Harness CLI via npm (@deepseek-ai/dsh) */
   installDshCli: () =>

@@ -12,6 +12,8 @@ import { showToast } from '../shared/Toast';
 import { cleanupStreamListener } from '../../lib/stream-cleanup';
 // fix2/fix16: 磁盘加载共享实现（内部批量入库）
 import { loadSessionFromDisk } from '../../lib/session-disk-load';
+// U4: 右键"停止"复用 U3 的先中断后杀入口
+import { stopSessionGracefully } from '../../hooks/useStreamProcessor';
 import { SessionGroup } from './SessionGroup';
 import { SessionItem } from './SessionItem';
 import { SessionContextMenu, ProjectContextMenu } from './SessionContextMenu';
@@ -134,6 +136,25 @@ export function ConversationList() {
   const [showArchived, setShowArchived] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
 
+  // U4: 状态筛选 chips（全部 / 运行中 / 需处理 / 出错）
+  const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'attention' | 'error'>('all');
+
+  // U4: "需处理"会话集合 —— 存在未解决的 permission / question / plan_review
+  // 交互卡片（等待用户授权或回答问题）。选择器只做廉价的 tabs 引用读取
+  // （流式 partial 更新不改 tabs 引用），O(消息数) 扫描放进 useMemo，仅在
+  // tabs Map 真正变化（消息增删/状态更新）时重算，避免高频流式更新下重复扫描。
+  const tabsMap = useChatStore((s) => s.tabs);
+  const attentionSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const [tabId, tab] of tabsMap) {
+      if (tab.messages.some((m) =>
+        (m.type === 'permission' || m.type === 'question' || m.type === 'plan_review')
+        && !m.resolved && m.interactionState !== 'failed'
+      )) set.add(tabId);
+    }
+    return set;
+  }, [tabsMap]);
+
   // Multi-select
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -225,7 +246,7 @@ export function ConversationList() {
     return customPreviews[session.id] || session.preview || '';
   }, [customPreviews]);
 
-  // Filtered sessions (search + archive)
+  // Filtered sessions (search + archive + U4 status chips)
   const filtered = useMemo(() => {
     let result = sessions;
 
@@ -234,6 +255,17 @@ export function ConversationList() {
       result = result.filter((s) => archivedSessions.has(s.id));
     } else {
       result = result.filter((s) => !archivedSessions.has(s.id));
+    }
+
+    // U4: status chip filter（在归档/搜索之外叠加）
+    if (statusFilter !== 'all') {
+      result = result.filter((s) => {
+        const st = sessionStatuses.get(s.id);
+        if (statusFilter === 'running') return st === 'running';
+        if (statusFilter === 'error') return st === 'error';
+        // 'attention' —— 等待权限或问题回应
+        return attentionSet.has(s.id);
+      });
     }
 
     // Search
@@ -248,7 +280,22 @@ export function ConversationList() {
     }
 
     return result;
-  }, [sessions, searchQuery, displayName, showArchived, archivedSessions]);
+  }, [sessions, searchQuery, displayName, showArchived, archivedSessions, statusFilter, sessionStatuses, attentionSet]);
+
+  // U4: 摘要行计数 —— 全量会话（不受筛选影响）中的运行中 / 需处理数量
+  const runningCount = useMemo(
+    () => sessions.filter((s) => sessionStatuses.get(s.id) === 'running').length,
+    [sessions, sessionStatuses],
+  );
+  const waitingCount = useMemo(
+    () => sessions.filter((s) => attentionSet.has(s.id)).length,
+    [sessions, attentionSet],
+  );
+
+  // U4: 右键"停止" —— 复用 U3 的先中断后杀入口（对后台会话同样有效）
+  const handleStopSession = useCallback((session: SessionListItem) => {
+    void stopSessionGracefully(session.id);
+  }, []);
 
   // Group by project
   const projectGroups = useMemo(() => {
@@ -690,6 +737,36 @@ export function ConversationList() {
             </svg>
           </button>
         </div>
+
+        {/* U4: 状态筛选 chips + 摘要行 */}
+        <div className="flex items-center gap-1 mt-2 flex-wrap">
+          {([
+            ['all', 'conv.filter.all'],
+            ['running', 'conv.filter.running'],
+            ['attention', 'conv.filter.attention'],
+            ['error', 'conv.filter.error'],
+          ] as const).map(([id, key]) => (
+            <button
+              key={id}
+              onClick={() => setStatusFilter(id)}
+              className={`px-2 py-0.5 rounded-full text-[10px] font-medium border
+                transition-smooth cursor-pointer
+                ${statusFilter === id
+                  ? 'bg-accent/15 text-accent border-accent/30'
+                  : 'text-text-tertiary border-border-subtle hover:text-text-primary hover:bg-bg-secondary'
+                }`}
+            >
+              {t(key)}
+            </button>
+          ))}
+          {(runningCount > 0 || waitingCount > 0) && (
+            <span className="ml-auto text-[10px] text-text-tertiary whitespace-nowrap">
+              {t('conv.filterSummary')
+                .replace('{running}', String(runningCount))
+                .replace('{waiting}', String(waitingCount))}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Loading */}
@@ -880,6 +957,8 @@ export function ConversationList() {
           onDelete={handleDeleteSingle}
           onPin={handleTogglePin}
           onArchive={handleToggleArchive}
+          onStop={handleStopSession}
+          isRunning={sessionStatuses.get(contextMenu.session.id) === 'running'}
           isPinned={pinnedSessions.has(contextMenu.session.id)}
           isArchived={archivedSessions.has(contextMenu.session.id)}
           onClose={() => setContextMenu(null)}

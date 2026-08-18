@@ -1,6 +1,6 @@
 import { bridge } from './tauri-bridge';
 import { parseSessionMessages } from './session-loader';
-import { useChatStore, generateMessageId } from '../stores/chatStore';
+import { useChatStore, generateMessageId, type ChatMessage } from '../stores/chatStore';
 import { useAgentStore } from '../stores/agentStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { formatErrorForUser } from '../hooks/useStreamProcessor';
@@ -44,6 +44,11 @@ export async function loadSessionFromDisk(
   sessionPath: string,
   sessionOrigin?: string,
 ): Promise<void> {
+  // D1: DSH 会话不走 claude JSONL 通道——日志是多帧 zstd，读取与消息形态都不同，
+  // 转给专用的 loadDshSessionFromDisk（read_dsh_session_turns → ChatMessage[]）。
+  if ((sessionOrigin || 'claude') === 'deepseek') {
+    return loadDshSessionFromDisk(sessionId);
+  }
   useChatStore.getState().ensureTab(sessionId);
   const { clearMessages, setSessionStatus, setSessionMeta } = useChatStore.getState();
   const agentActions = useAgentStore.getState();
@@ -209,4 +214,112 @@ export async function loadOlderHistoryPages(tabId: string): Promise<number> {
     setSessionMeta(tabId, { historyLoadingMore: false });
   }
   return totalPrepended;
+}
+
+/** D1: DSH 会话载入。
+ *
+ * 与 loadSessionFromDisk 的差异：DSH 日志是 ~/.dsh/sessions 下的
+ * session.jsonl.zstd（多帧 zstd，嵌套两层：编码 cwd 目录/会话目录），
+ * 不是 ~/.claude/projects 的 JSONL，无法走 load_session_tail 分页通道。
+ * 这里经 bridge.readDshSessionTurns（Rust 侧复用 handoff 的多帧解码）拿到统一
+ * turns，再转成 ChatMessage[] 一次性入库。
+ *
+ * sessionMeta 约定：
+ *  - sessionOrigin='deepseek'：后续消息/标题/回退都按 DSH 后端处理。
+ *  - sessionId = DSH 会话 id（列表里的条目 id，用于展示与定位）。
+ *  - stdinId = 新生成的 desk_ id：载入的历史会话是"快照"，本地没有对应的活
+ *    进程/服务路由，因此下一条消息不会续写它，而是 spawn 一个全新 DSH 会话
+ *    （InputBar 对该 desk_ id sendStdin 失败后回落到 spawn）。这也意味着该
+ *    desk_ id 在 T01 跨后端 handoff 里读不到原日志——属预期降级。
+ *
+ * 已知限制（T02）：重载的 DSH 会话没有 fork 锚点（dshSeq 只属于本进程内跑
+ * 起来的活会话），因此不支持 rewind/fork；继续对话会开启全新上下文。
+ */
+export async function loadDshSessionFromDisk(sessionId: string): Promise<void> {
+  useChatStore.getState().ensureTab(sessionId);
+  const { clearMessages, setSessionStatus, setSessionMeta } = useChatStore.getState();
+  clearMessages(sessionId);
+  useAgentStore.getState().clearAgents();
+  setSessionStatus(sessionId, 'running');
+
+  // 新 desk_ id：见上方注释——强制后续消息走全新 DSH 会话，而非续写历史快照。
+  const freshStdinId = `desk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  setSessionMeta(sessionId, {
+    sessionId,
+    stdinId: freshStdinId,
+    sessionOrigin: 'deepseek',
+    // 复位分页状态（DSH 载入不分页，一次性全量）
+    historyCursor: undefined,
+    historyHasMore: false,
+    historyProjectDir: undefined,
+    historyLoadingMore: false,
+    historyPrepended: 0,
+  });
+
+  try {
+    const payload = await bridge.readDshSessionTurns(sessionId);
+    if (useSessionStore.getState().selectedSessionId !== sessionId) {
+      // 载入中途被切走——复位状态，否则该 tab 永久卡在 running（同 F7）
+      setSessionStatus(sessionId, 'idle');
+      return;
+    }
+    const messages = dshTurnsToMessages(payload.turns);
+    useChatStore.getState().batchAddMessages(sessionId, messages);
+    setSessionStatus(sessionId, 'completed');
+  } catch (err) {
+    if (useSessionStore.getState().selectedSessionId !== sessionId) {
+      setSessionStatus(sessionId, 'idle');
+      return;
+    }
+    setSessionStatus(sessionId, 'error');
+    useChatStore.getState().addMessage(sessionId, {
+      id: generateMessageId(),
+      role: 'system',
+      type: 'text',
+      content: formatErrorForUser(String(err)),
+      timestamp: Date.now(),
+    });
+  }
+}
+
+/** D1: 把 read_dsh_session_turns 的统一 turns 转成 ChatMessage[]。
+ *  user/assistant turns → text 消息；tools 以 `[Tool: name]` 文本附在助手消息后。
+ *  时间戳优先取事件 time（ms），缺失时用 Date.now()。 */
+function dshTurnsToMessages(turns: any[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  if (!Array.isArray(turns)) return out;
+  for (const turn of turns) {
+    if (!turn || typeof turn !== 'object') continue;
+    const role = turn.role;
+    const text = typeof turn.text === 'string' ? turn.text : '';
+    const ts = typeof turn.time === 'number' && turn.time > 0 ? turn.time : Date.now();
+    if (role === 'user') {
+      if (text.trim()) {
+        out.push({
+          id: generateMessageId(),
+          role: 'user',
+          type: 'text',
+          content: text,
+          timestamp: ts,
+        });
+      }
+    } else if (role === 'assistant') {
+      const toolSuffix = Array.isArray(turn.tools) && turn.tools.length > 0
+        ? '\n\n' + turn.tools
+            .map((tl: any) => `[Tool: ${typeof tl?.name === 'string' ? tl.name : 'tool'}]`)
+            .join('\n')
+        : '';
+      const content = text + toolSuffix;
+      if (content.trim()) {
+        out.push({
+          id: generateMessageId(),
+          role: 'assistant',
+          type: 'text',
+          content,
+          timestamp: ts,
+        });
+      }
+    }
+  }
+  return out;
 }

@@ -1,8 +1,9 @@
 import { memo, useState, useCallback, type ReactNode } from 'react';
-import { type ChatMessage } from '../../stores/chatStore';
+import { type ChatMessage, useChatStore } from '../../stores/chatStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useAgentStore } from '../../stores/agentStore';
 import { useLightboxStore } from '../shared/ImageLightbox';
 import { useT } from '../../lib/i18n';
 import { isPathInsideWorkspace } from '../../lib/path-safety';
@@ -61,7 +62,9 @@ function arePropsEqual(prev: Props, next: Props): boolean {
     a.todoItems === b.todoItems &&
     a.attachments === b.attachments &&
     a.planContent === b.planContent &&
-    a.isPartial === b.isPartial
+    a.isPartial === b.isPartial &&
+    // U1: errorCategory drives the action-button row of error cards
+    a.errorCategory === b.errorCategory
   );
 }
 
@@ -69,6 +72,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isFirstInGro
   if (message.role === 'user') return <UserMsg message={message} isHighlighted={isHighlighted} />;
   if (message.role === 'system' && message.commandType === 'processing') return <CommandProcessingCard message={message} />;
   if (message.role === 'system' && message.commandType) return <CommandFeedbackMsg message={message} />;
+  // U1: 带 errorCategory 的 system 错误消息 → 可行动错误卡片（动作按钮）
+  if (message.role === 'system' && message.errorCategory) return <ErrorMsg message={message} />;
   // Unresolved question/plan_review cards are rendered as floating overlays
   // above the InputBar. Only show them inline once resolved.
   if (message.type === 'question' && !message.resolved) return null;
@@ -177,6 +182,12 @@ function UserMsg({ message, isHighlighted = false }: Props) {
     ? lines.slice(0, USER_MSG_COLLAPSE_LINES).join('\n')
     : content;
 
+  // U5: 运行中的会话不提供编辑重发（截断会与进行中的回合冲突，需先 Stop）
+  const selectedSessionId = useSessionStore((s) => s.selectedSessionId);
+  const sessionStatus = useSessionStore((s) =>
+    selectedSessionId ? s.sessionStatuses.get(selectedSessionId) : undefined);
+  const canEditResend = message.type === 'text' && sessionStatus !== 'running';
+
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(content).then(() => {
       setCopied(true);
@@ -184,19 +195,46 @@ function UserMsg({ message, isHighlighted = false }: Props) {
     });
   }, [content]);
 
+  // U5: 编辑重发 —— 派发给 InputBar：回填输入框 + rewindToTurn 内存截断到该轮
+  // 之前 + 聚焦；重发后走正常提交流程（见 InputBar 的 edit-user-message 监听）
+  const handleEditResend = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('little-claude:edit-user-message', {
+      detail: { messageId: message.id, text: content },
+    }));
+  }, [message.id, content]);
+
   return (
     <div className="flex justify-end gap-2.5 group/user relative">
-      {/* Copy button — visible on hover */}
-      <button
-        onClick={handleCopy}
-        className="absolute -top-2 right-1 z-10 opacity-0 group-hover/user:opacity-100
-          px-1.5 py-0.5 rounded-md text-[10px] font-medium
-          bg-bg-tertiary/80 text-text-muted hover:text-text-primary
-          hover:bg-bg-tertiary border border-border-subtle
-          transition-smooth cursor-pointer"
-      >
-        {copied ? t('msg.copied') : t('msg.copyText')}
-      </button>
+      {/* Hover 操作区：编辑重发（U5）+ 复制 */}
+      <div className="absolute -top-2 right-1 z-10 flex items-center gap-1
+        opacity-0 group-hover/user:opacity-100 transition-smooth">
+        {canEditResend && (
+          <button
+            onClick={handleEditResend}
+            title={t('msg.editAndResend')}
+            aria-label={t('msg.editAndResend')}
+            className="p-1 rounded-md
+              bg-bg-tertiary/80 text-text-muted hover:text-text-primary
+              hover:bg-bg-tertiary border border-border-subtle
+              transition-smooth cursor-pointer"
+          >
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none"
+              stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+              strokeLinejoin="round">
+              <path d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z" />
+            </svg>
+          </button>
+        )}
+        <button
+          onClick={handleCopy}
+          className="px-1.5 py-0.5 rounded-md text-[10px] font-medium
+            bg-bg-tertiary/80 text-text-muted hover:text-text-primary
+            hover:bg-bg-tertiary border border-border-subtle
+            transition-smooth cursor-pointer"
+        >
+          {copied ? t('msg.copied') : t('msg.copyText')}
+        </button>
+      </div>
       <div className={`message-content max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
         bg-bg-user-msg text-text-primary
         text-sm leading-relaxed shadow-sm whitespace-pre-wrap
@@ -251,6 +289,98 @@ function UserMsg({ message, isHighlighted = false }: Props) {
         )}
       </div>
       <UserAvatar size="w-8 h-8 text-xs" className="mt-0.5" />
+    </div>
+  );
+}
+
+/* ================================================================
+   U1: ErrorMsg — 可行动错误卡片
+   useStreamProcessor.classifyError 命中分类时写入 errorCategory
+   （值为 ERROR_CATEGORIES 的 i18nKey），这里按类别渲染 1-2 个动作按钮：
+     invalidKey / quotaExceeded      → 打开服务商设置（SettingsPanel provider tab）
+     cliNotInstalled / dshNotInstalled → 去安装（SettingsPanel cli tab）
+     tokenLimit                      → 新建任务（新建 draft 会话）
+     networkError / rateLimit / serviceUnavailable → 重试（重发最后一条用户消息）
+   ================================================================ */
+type ErrorActionKind = 'openProvider' | 'openCli' | 'newTask' | 'retry';
+
+const ERROR_ACTIONS: Record<string, { labelKey: string; kind: ErrorActionKind }[]> = {
+  'error.invalidKey': [{ labelKey: 'error.action.openProviderSettings', kind: 'openProvider' }],
+  'error.quotaExceeded': [{ labelKey: 'error.action.openProviderSettings', kind: 'openProvider' }],
+  'error.cliNotInstalled': [{ labelKey: 'error.action.installCli', kind: 'openCli' }],
+  'error.dshNotInstalled': [{ labelKey: 'error.action.installCli', kind: 'openCli' }],
+  'error.tokenLimit': [{ labelKey: 'error.action.newTask', kind: 'newTask' }],
+  'error.networkError': [{ labelKey: 'error.action.retry', kind: 'retry' }],
+  'error.rateLimit': [{ labelKey: 'error.action.retry', kind: 'retry' }],
+  'error.serviceUnavailable': [{ labelKey: 'error.action.retry', kind: 'retry' }],
+};
+
+/** U1: 打开设置面板指定 tab —— 复用 settingsStore.settingsOpenRequest 现有机制 */
+function openSettingsTab(tab: string) {
+  const st = useSettingsStore.getState();
+  st.setSettingsOpenRequest({ tab });
+  if (!st.settingsOpen) st.toggleSettings();
+}
+
+/** U1: 新建 draft 会话 —— 与 Sidebar"新任务"同路径 */
+function startNewDraftSession() {
+  const wd = useSettingsStore.getState().workingDirectory;
+  if (!wd) return;
+  const currentTabId = useSessionStore.getState().selectedSessionId;
+  if (currentTabId) {
+    useChatStore.getState().saveToCache(currentTabId);
+    useAgentStore.getState().saveToCache(currentTabId);
+  }
+  const newDraftId = `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  useChatStore.getState().ensureTab(newDraftId);
+  useChatStore.getState().resetTab(newDraftId);
+  useSessionStore.getState().addDraftSession(newDraftId, wd);
+}
+
+function runErrorAction(kind: ErrorActionKind) {
+  switch (kind) {
+    case 'openProvider':
+      openSettingsTab('provider');
+      break;
+    case 'openCli':
+      openSettingsTab('cli');
+      break;
+    case 'newTask':
+      startNewDraftSession();
+      break;
+    case 'retry':
+      // InputBar 监听该事件 → 重发最后一条用户消息（正常提交流程）
+      window.dispatchEvent(new CustomEvent('little-claude:retry-last-message'));
+      break;
+  }
+}
+
+function ErrorMsg({ message }: Props) {
+  const t = useT();
+  const actions = message.errorCategory ? ERROR_ACTIONS[message.errorCategory] : undefined;
+  return (
+    <div className="flex gap-3">
+      <AiAvatar size="w-8 h-8" className="mt-0.5" />
+      <div className="flex-1 min-w-0 text-base text-text-primary leading-relaxed message-content">
+        <MarkdownRenderer content={safeContent(message.content)} />
+        {/* U1: 动作按钮行 —— 文案指引落地为可点击按钮 */}
+        {actions && actions.length > 0 && (
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            {actions.map((a) => (
+              <button
+                key={a.kind}
+                onClick={() => runErrorAction(a.kind)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+                  text-xs font-medium cursor-pointer transition-smooth
+                  bg-accent/10 text-accent border border-accent/25
+                  hover:bg-accent/20"
+              >
+                {t(a.labelKey)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

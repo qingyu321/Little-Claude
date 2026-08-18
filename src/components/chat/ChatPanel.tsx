@@ -1,4 +1,4 @@
-import { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback, memo } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback, memo, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { create } from 'zustand';
@@ -21,7 +21,7 @@ import {
 import { useSessionStore } from '../../stores/sessionStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useAgentStore } from '../../stores/agentStore';
-import { AgentPanel } from '../agents/AgentPanel';
+// P2: AgentPanel 仅在 agentPanelOpen 时渲染 → 改懒加载，移出 App chunk
 import { bridge, onClaudeStream, onClaudeStderr } from '../../lib/tauri-bridge';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useT } from '../../lib/i18n';
@@ -31,7 +31,7 @@ import { MarkdownRenderer } from '../shared/MarkdownRenderer';
 // F5: 孤儿 prewarm 回收还需要 cleanupStreamListener
 import { registerStreamListener, cleanupStreamListener } from '../../lib/stream-cleanup';
 import { debugWarn } from '../../lib/debug-log';
-import { SetupWizard } from '../setup/SetupWizard';
+// P2: SetupWizard 仅首装（!setupCompleted）时渲染 → 懒加载，老用户永不付出成本
 import { AiAvatar } from '../shared/AiAvatar';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
 import { parseTurns, relativeTime, type Turn } from '../../lib/turns';
@@ -40,6 +40,11 @@ import { useTokenSpeedStore } from '../../stores/tokenSpeedStore';
 import { scheduleCompactTimeoutCheck } from '../../hooks/useStreamProcessor';
 // T03: 大会话分页——滚到顶部时向上取更早的历史页
 import { loadOlderHistoryPages } from '../../lib/session-disk-load';
+
+// P2: App chunk 再拆分——按需面板懒加载（与 App.tsx / SecondaryPanel 的 lazy 模式一致）：
+// AgentPanel 点头像状态点才展开；SetupWizard 只在 setup 未完成时出现。
+const AgentPanel = lazy(() => import('../agents/AgentPanel').then(m => ({ default: m.AgentPanel })));
+const SetupWizard = lazy(() => import('../setup/SetupWizard').then(m => ({ default: m.SetupWizard })));
 
 /** Shared plan panel toggle — used by ChatPanel (panel) and InputBar (button) */
 export const usePlanPanelStore = create<{
@@ -1988,7 +1993,10 @@ export function ChatPanel() {
               <div className="absolute left-0 top-full mt-2 z-50
                 w-72 max-h-80 rounded-xl border border-border-subtle
                 bg-bg-primary shadow-lg overflow-y-auto">
-                <AgentPanel />
+                {/* P2: 懒加载分块，首次展开时才加载 */}
+                <Suspense fallback={null}>
+                  <AgentPanel />
+                </Suspense>
               </div>
             </>
           )}
@@ -2304,7 +2312,8 @@ function WelcomeScreen() {
 
   // Show SetupWizard if setup has not been completed
   if (!setupCompleted) {
-    return <SetupWizard />;
+    // P2: 懒加载分块（首装引导，老用户不会加载到这块代码）
+    return <Suspense fallback={null}><SetupWizard /></Suspense>;
   }
 
   return (

@@ -256,6 +256,10 @@ export const SessionItem = memo(function SessionItem({
           <span className="flex-shrink-0 w-2 h-2 rounded-full bg-success" />
         ) : sessionStatus === 'error' ? (
           <span className="flex-shrink-0 w-2 h-2 rounded-full bg-error" />
+        ) : sessionStatus === 'stopped' ? (
+          // U3: 用户主动停止 —— 琥珀点，区别于 completed 绿点 / error 红点
+          <span className="flex-shrink-0 w-2 h-2 rounded-full bg-warning"
+            title={t('session.stopped')} />
         ) : null}
       </div>
       {contentSnippet && (

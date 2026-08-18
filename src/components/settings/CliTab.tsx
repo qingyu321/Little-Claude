@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { bridge, cancelDownload, invokeWithCancellation, type CliCandidate, type CliStatus } from '../../lib/tauri-bridge';
+import { bridge, cancelDownload, invokeWithCancellation, type CliCandidate, type CliStatus, type DshServiceStatus } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { APP_NAME } from '../../lib/edition';
 import { stripAnsi } from '../../lib/strip-ansi';
@@ -504,6 +504,10 @@ function DshSection() {
   const [version, setVersion] = useState<string | null>(null);
   const [path, setPath] = useState<string | null>(null);
   const [serviceRunning, setServiceRunning] = useState<boolean | undefined>(undefined);
+  // D3: authoritative service status (managed service first, then external 3080).
+  // Replaces the old external-only probe so an LC-spawned random-port service
+  // is no longer shown as "Stopped".
+  const [serviceStatus, setServiceStatus] = useState<DshServiceStatus | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [phase, setPhase] = useState<InstallPhase>('idle');
@@ -512,14 +516,21 @@ function DshSection() {
     setStatus('checking');
     setErrorMsg('');
     try {
-      const result = await bridge.checkDshCli();
+      // D3: fire the CLI check and the service-status probe in parallel; the
+      // service probe never spawns (read-only manager + short-timeout probe).
+      const [result, svc] = await Promise.all([
+        bridge.checkDshCli(),
+        bridge.dshServiceStatus().catch(() => null),
+      ]);
+      setServiceStatus(svc);
+      // Prefer the authoritative dsh_service_status; fall back to the CLI's
+      // external-only probe when the new command is unavailable.
+      setServiceRunning(svc ? svc.running : result.service_running);
       if (result.installed) {
         setVersion(result.version ?? null);
         setPath(result.path ?? null);
-        setServiceRunning(result.service_running);
         setStatus('found');
       } else {
-        setServiceRunning(result.service_running);
         setStatus('not_found');
       }
     } catch (e) {
@@ -602,15 +613,34 @@ function DshSection() {
             ✓ {t('cli.installed')}
           </span>
           <p className="text-xs text-text-tertiary truncate" title={path}>{path}</p>
-          {/* Service probe: dsh web answering on the default port? */}
-          <p className={`text-xs flex items-center gap-1 ${
-            serviceRunning ? 'text-green-500' : 'text-text-tertiary'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${
-              serviceRunning ? 'bg-green-500' : 'bg-text-tertiary/40'
-            }`} />
-            {serviceRunning ? t('cli.dshServiceRunning') : t('cli.dshServiceStopped')}
-          </p>
+          {/* D3: service status light — prefers the LC-managed service (random
+              port) over the external default-port probe, so a self-spawned
+              service is no longer mis-shown as "Stopped". */}
+          {(() => {
+            const running = serviceStatus ? serviceStatus.running : serviceRunning;
+            // Managed (spawned) → "self-managed"; external (3080/adopted) → "external".
+            const managed = serviceStatus?.running && serviceStatus.spawned;
+            let label: string;
+            if (running) {
+              label = managed ? t('cli.dshServiceManaged') : t('cli.dshServiceExternal');
+            } else {
+              label = t('cli.dshServiceStopped');
+            }
+            const baseUrl = serviceStatus?.running ? serviceStatus.baseUrl : null;
+            return (
+              <p className={`text-xs flex items-center gap-1 ${
+                running ? 'text-green-500' : 'text-text-tertiary'
+              }`} title={baseUrl || undefined}>
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  running ? 'bg-green-500' : 'bg-text-tertiary/40'
+                }`} />
+                {label}
+                {baseUrl && (
+                  <span className="text-text-tertiary truncate">· {baseUrl.replace(/^https?:\/\//, '')}</span>
+                )}
+              </p>
+            );
+          })()}
         </div>
       )}
 

@@ -13,6 +13,10 @@ interface SessionContextMenuProps {
   onDelete: (session: SessionListItem) => void;
   onPin?: (session: SessionListItem) => void;
   onArchive?: (session: SessionListItem) => void;
+  /** U4: 运行中会话的"停止"（复用 U3 的先中断后杀路径） */
+  onStop?: (session: SessionListItem) => void;
+  /** U4: 该会话当前是否运行中（决定是否显示"停止"项） */
+  isRunning?: boolean;
   isPinned?: boolean;
   isArchived?: boolean;
   onClose: () => void;
@@ -28,6 +32,8 @@ export const SessionContextMenu = memo(function SessionContextMenu({
   onDelete,
   onPin,
   onArchive,
+  onStop,
+  isRunning,
   isPinned,
   isArchived,
   onClose,
@@ -77,6 +83,22 @@ export const SessionContextMenu = memo(function SessionContextMenu({
         bg-bg-card border border-border-subtle shadow-xl animate-fade-in"
       style={{ left: x, top: y }}
     >
+      {/* U4: 运行中会话的"停止" —— 复用 U3 的先中断后杀路径 */}
+      {isRunning && onStop && (
+        <button
+          role="menuitem"
+          tabIndex={-1}
+          onClick={() => { onClose(); onStop(session); }}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5
+            text-xs text-warning hover:bg-warning/10 transition-smooth"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="3" y="3" width="10" height="10" rx="2" />
+          </svg>
+          {t('conv.stop')}
+        </button>
+      )}
+
       <button
         role="menuitem"
         tabIndex={-1}

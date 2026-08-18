@@ -3296,3 +3296,299 @@ mod t03_pagination_tests {
         let _ = std::fs::remove_file(&path);
     }
 }
+
+// ── D1: DSH 会话进会话列表 ─────────────────────────────────────────────────
+// list_sessions 只扫 ~/.claude/projects，DSH 后端会话（~/.dsh/sessions 下的
+// 多帧 zstd 日志）在会话列表永远不可见。本命令按 mtime 取最近 limit 个
+// DSH 会话，复用 handoff::decode_dsh_session_lines 的多帧解码（不复制粘贴
+// 解码循环），提取预览/cwd/时间/turn 估计，输出与 list_sessions 同形的条目
+// （origin: "deepseek"）。
+//
+// 成本控制：先纯元数据（mtime）排序选出 limit 个文件再解码；解码结果按
+// (mtime, size) 缓存（同 B4 extract_session_info_cached 思路），未变化的
+// 日志不再重复解码。
+//
+// 已知限制（T02）：从列表重载的 DSH 会话没有 fork 锚点（dshSeq 只属于
+// 本进程内跑起来的活会话），因此重载会话不支持 rewind/fork。
+
+#[derive(Clone)]
+struct DshSessionInfoCacheEntry {
+    mtime_ns: u64,
+    size: u64,
+    preview: String,
+    cwd: String,
+    created_at: u64,
+    turns: u64,
+    /// subagent 会话（delegationDepth>0 / origin=subagent）——不进列表
+    skipped: bool,
+}
+
+static DSH_SESSION_INFO_CACHE: OnceLock<Mutex<HashMap<String, DshSessionInfoCacheEntry>>> =
+    OnceLock::new();
+
+fn dsh_session_info_cache() -> &'static Mutex<HashMap<String, DshSessionInfoCacheEntry>> {
+    DSH_SESSION_INFO_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 解码单个 DSH 会话日志并提取列表元数据。
+/// 解码走 handoff::decode_dsh_session_head（共享多帧 zstd 路径，只解开头
+/// 若干帧——create 事件/首个 user 消息都在文件头部，列表无需全量解码）；
+/// 预览文本走 handoff::blocks_text（共享块提取）。
+fn extract_dsh_session_info(path: &std::path::Path) -> DshSessionInfoCacheEntry {
+    let (mtime_ns, size) = match std::fs::metadata(path) {
+        Ok(m) => (
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+            m.len(),
+        ),
+        Err(_) => (0, 0),
+    };
+    // D1: 只解头部 ~512KB（压缩）——列表元数据全在文件前端，避免为列出而
+    // 全量解码大会话（实测 11MB 日志全解一次需数秒）。
+    const HEAD_BYTES: u64 = 512 * 1024;
+    let rows = crate::commands::handoff::decode_dsh_session_head(path, HEAD_BYTES)
+        .unwrap_or_default();
+
+    let mut preview = String::new();
+    let mut cwd = String::new();
+    let mut created_at: u64 = 0;
+    let mut turns: u64 = 0;
+    let mut user_msgs: u64 = 0;
+    let mut skipped = false;
+
+    for row in &rows {
+        let etype = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match etype {
+            "session" => {
+                // create 事件（首帧）：cwd + createdAt + 是否 subagent
+                if cwd.is_empty() {
+                    if let Some(c) = row.get("cwd").and_then(|v| v.as_str()) {
+                        if !c.is_empty() {
+                            cwd = c.to_string();
+                        }
+                    }
+                }
+                if created_at == 0 {
+                    created_at = row.get("createdAt").and_then(|v| v.as_u64()).unwrap_or(0);
+                }
+                if row.get("delegationDepth").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                    || row.get("origin").and_then(|v| v.as_str()) == Some("subagent")
+                {
+                    skipped = true;
+                }
+            }
+            "user/message" => {
+                user_msgs += 1;
+                if preview.is_empty() {
+                    let text = row
+                        .pointer("/data/content")
+                        .map(crate::commands::handoff::blocks_text)
+                        .unwrap_or_default();
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        preview = trimmed.chars().take(120).collect();
+                    }
+                }
+            }
+            "turn/start" => turns += 1,
+            _ => {}
+        }
+    }
+    // D1: turn 数估计——优先数窗口内的 turn/start 事件；没有则退回用户消息数。
+    // 头部窗口解码意味着长会话的计数是下界估计（任务口径即"turn 数估计"）。
+    if turns == 0 {
+        turns = user_msgs;
+    }
+
+    DshSessionInfoCacheEntry {
+        mtime_ns,
+        size,
+        preview,
+        cwd,
+        created_at,
+        turns,
+        skipped,
+    }
+}
+
+/// (mtime, size) 缓存包装——未变化的日志跳过重复解码（同 B4 思路）。
+fn extract_dsh_session_info_cached(path: &std::path::Path) -> DshSessionInfoCacheEntry {
+    let key = path.to_string_lossy().to_string();
+    let (mtime_ns, size) = match std::fs::metadata(path) {
+        Ok(m) => (
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+            m.len(),
+        ),
+        Err(_) => (0, 0),
+    };
+    {
+        let cache = dsh_session_info_cache().lock().unwrap();
+        if let Some(entry) = cache.get(&key) {
+            if entry.mtime_ns == mtime_ns && entry.size == size {
+                return entry.clone();
+            }
+        }
+    }
+    let info = extract_dsh_session_info(path);
+    {
+        let mut cache = dsh_session_info_cache().lock().unwrap();
+        if cache.len() > 2000 {
+            cache.clear();
+        }
+        cache.insert(key, info.clone());
+    }
+    info
+}
+
+/// D1: 列出最近的 DSH 会话（~/.dsh/sessions/**/session.jsonl.zstd）。
+/// 条目形状与 list_sessions 一致，另附 turnCount/createdAt；origin 固定
+/// "deepseek"。limit 缺省 100，上限 500。
+#[tauri::command]
+pub async fn list_dsh_sessions(limit: Option<usize>) -> Result<Vec<Value>, String> {
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    let home = dirs::home_dir().ok_or("Cannot find home dir")?;
+    let root = home.join(".dsh").join("sessions");
+    if !root.is_dir() {
+        return Ok(vec![]);
+    }
+
+    // 1. 纯元数据收集（不解码）：(mtime_ms, path)
+    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.file_name().and_then(|n| n.to_str()) != Some("session.jsonl.zstd") {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&p) else {
+                continue;
+            };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            files.push((mtime, p));
+        }
+    }
+
+    // 2. mtime 取最近 limit 个，只解码这些
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(limit);
+
+    tokio::task::spawn_blocking(move || {
+        let mut sessions: Vec<Value> = Vec::new();
+        for (mtime, path) in files {
+            let info = extract_dsh_session_info_cached(&path);
+            if info.skipped {
+                continue;
+            }
+            // session id = 日志所在目录名（session-<uuid> 或裸 uuid）
+            let id = path
+                .parent()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if id.is_empty() {
+                continue;
+            }
+            // projectDir = sessions/ 下第一层目录名（DSH 的 cwd 编码形式）
+            let project_dir = path
+                .parent()
+                .and_then(|d| d.parent())
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let project = if info.cwd.is_empty() {
+                project_dir.clone()
+            } else {
+                info.cwd.clone()
+            };
+            sessions.push(serde_json::json!({
+                "id": id,
+                "path": path.to_string_lossy(),
+                "project": project,
+                "projectDir": project_dir,
+                "modifiedAt": mtime,
+                "preview": info.preview,
+                "origin": "deepseek",
+                "turnCount": info.turns,
+                "createdAt": info.created_at,
+            }));
+        }
+        // 解码后仍按 mtime 降序（truncate 前后顺序一致，这里兜底）
+        sessions.sort_by(|a, b| {
+            let ta = a["modifiedAt"].as_u64().unwrap_or(0);
+            let tb = b["modifiedAt"].as_u64().unwrap_or(0);
+            tb.cmp(&ta)
+        });
+        Ok(sessions)
+    })
+    .await
+    .map_err(|e| format!("DSH 会话列表任务失败: {}", e))?
+}
+
+#[cfg(test)]
+mod d1_dsh_list_tests {
+    use super::extract_dsh_session_info;
+
+    /// Local-machine verification (ignored on CI — needs ~/.dsh/sessions):
+    /// decode REAL multi-frame DSH logs through the same helper
+    /// list_dsh_sessions uses, and assert the listing metadata comes out.
+    #[test]
+    #[ignore]
+    fn extract_info_from_real_dsh_sessions() {
+        let Some(home) = dirs::home_dir() else { return };
+        let root = home.join(".dsh").join("sessions");
+        if !root.is_dir() {
+            return;
+        }
+        let mut stack = vec![root];
+        let mut checked = 0usize;
+        let mut with_preview = 0usize;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.file_name().and_then(|n| n.to_str()) != Some("session.jsonl.zstd") {
+                    continue;
+                }
+                let info = extract_dsh_session_info(&p);
+                eprintln!(
+                    "dsh {}: cwd={:?} preview={:?} turns={} skipped={}",
+                    p.display(),
+                    info.cwd,
+                    info.preview,
+                    info.turns,
+                    info.skipped
+                );
+                checked += 1;
+                if !info.preview.is_empty() {
+                    with_preview += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "no DSH session files found");
+        assert!(with_preview > 0, "no DSH session yielded a preview");
+    }
+}

@@ -761,6 +761,50 @@ pub async fn probe_default_service() -> bool {
     probe_unary(&base, "host.describe", json!({})).await.is_ok()
 }
 
+/// D3: 服务状态灯命令——报告当前已知的 dsh 服务，绝不 spawn。
+/// `ensure()` 在没有服务时会拉起 `dsh web`，状态探测不能走它。
+/// 优先级：LC 自管服务（ensure 缓存的 spawned/外部接管实例，探活确认）→
+/// 外部默认端口 3080 → stopped。
+/// 返回 { running, baseUrl, spawned, external }：
+///  - spawned=true  → LC 本次运行亲自 spawn 的服务（随机端口）
+///  - external=true → 非 LC spawn（外部 3080 或被接管的外部实例）
+#[tauri::command]
+pub async fn dsh_service_status(
+    mgr: tauri::State<'_, DshServiceManager>,
+) -> Result<Value, String> {
+    // 1. LC 自管服务（get() 只读缓存，不 spawn）——探活确认仍在应答
+    if let Some(state) = mgr.get().await {
+        if probe_unary(&state.base_url, "host.describe", json!({}))
+            .await
+            .is_ok()
+        {
+            return Ok(json!({
+                "running": true,
+                "baseUrl": state.base_url,
+                "spawned": state.spawned,
+                "external": !state.spawned,
+            }));
+        }
+        // 缓存实例已死——如实落到外部探测（ensure 下次会自行替换它）
+    }
+    // 2. 外部默认端口 3080
+    if probe_default_service().await {
+        return Ok(json!({
+            "running": true,
+            "baseUrl": format!("http://127.0.0.1:{}", DEFAULT_PORT),
+            "spawned": false,
+            "external": true,
+        }));
+    }
+    // 3. 都没有
+    Ok(json!({
+        "running": false,
+        "baseUrl": Value::Null,
+        "spawned": false,
+        "external": false,
+    }))
+}
+
 /// Unary RPC: `POST /api/<method>` with the client-request envelope.
 /// Returns the `result.value` on success; error code+message otherwise.
 pub async fn unary(base_url: &str, method: &str, payload: Value) -> Result<Value, String> {
