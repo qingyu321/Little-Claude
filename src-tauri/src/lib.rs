@@ -17,7 +17,7 @@ use commands::{
     open_video_analysis_skill_dir, save_video_analysis_multimodal_config,
     set_video_analysis_acceleration, set_video_analysis_asr_model,
 };
-use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_dsh_cli, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, inject_cli_path, install_claude_cli, install_codex_cli, install_dsh_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, watch_directory, write_file_content, write_skill};
+use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_dsh_cli, check_dsh_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, dsh_fork_session, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, handoff::{read_dsh_session_turns, write_handoff_file}, inject_cli_path, install_claude_cli, install_codex_cli, install_dsh_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, load_session_more, load_session_tail, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, update_dsh_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
 use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
@@ -2024,6 +2024,20 @@ async fn start_deepseek_session(
     let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
     let service = dsh_mgr.ensure().await?;
 
+    // T05: resolve the Little-Claude provider backing this DSH session
+    // (load_providers returns decrypted keys). The DSH service API accepts NO
+    // model or credential field on session.create/session.prompt payloads
+    // (dsh-host-apiproxy sessions.schema.js:68-73,225-230), so both travel via
+    // dedicated RPCs further below:
+    //   model       → session.models + session.selectModel (per-session pick)
+    //   credentials → credentials.set (writes ~/.dsh/.credentials.yaml, the
+    //                 same store dsh's own Models page uses; ref DEEPSEEK_API_KEY)
+    let dsh_provider = params.provider_id.as_ref().and_then(|pid| {
+        crate::commands::provider::load_providers()
+            .ok()
+            .and_then(|pf| pf.providers.into_iter().find(|p| p.id == *pid))
+    });
+
     // Reuse the tab's DSH session (real context continuity), else create one.
     let dsh_session_id = match state.get_deepseek_session(&stdin_id).await {
         Some(sid) => sid,
@@ -2067,6 +2081,53 @@ async fn start_deepseek_session(
         stdin_id, dsh_session_id, auto_allow
     );
 
+    // T05 credential sync: dsh's `deepseek-official` provider resolves
+    // DEEPSEEK_API_KEY through its credentials service at request time
+    // (dsh-llm-deepseek: DEFAULT_API_KEY_ENV / MISSING_CREDENTIAL). The
+    // supported write path is the credentials.set RPC — exactly what dsh's
+    // own web Models page does — landing in ~/.dsh/.credentials.yaml. An
+    // explicit DEEPSEEK_API_KEY in the provider's extra_env wins over the
+    // apiKey field (mirrors the claude-backend env layering). A rejection
+    // (e.g. the launching environment shadows the ref read-only) only warns:
+    // dsh keeps its own key and the session proceeds with it.
+    if let Some(ref provider) = dsh_provider {
+        let key = provider
+            .extra_env
+            .as_ref()
+            .and_then(|env| env.get("DEEPSEEK_API_KEY"))
+            .filter(|k| !k.trim().is_empty())
+            .cloned()
+            .or_else(|| provider.api_key.clone().filter(|k| !k.trim().is_empty()));
+        if let Some(key) = key {
+            match unary(
+                &service.base_url,
+                "credentials.set",
+                json!({ "ref": "DEEPSEEK_API_KEY", "value": key }),
+            )
+            .await
+            {
+                Ok(_) => eprintln!(
+                    "[LITTLECLAUDE:deepseek] T05: synced provider '{}' API key into dsh credentials (DEEPSEEK_API_KEY)",
+                    provider.name
+                ),
+                Err(e) => eprintln!(
+                    "[LITTLECLAUDE:deepseek] T05: credentials.set rejected ({}); dsh keeps its own DEEPSEEK_API_KEY (env / .credentials.yaml)",
+                    e
+                ),
+            }
+        } else {
+            eprintln!(
+                "[LITTLECLAUDE:deepseek] T05: provider '{}' has no API key — relying on dsh-side credentials (see settings guidance)",
+                provider.name
+            );
+        }
+    }
+
+    // T05 model passthrough (see apply_deepseek_model below).
+    if let Some(ref model) = params.model {
+        apply_deepseek_model(&service.base_url, &dsh_session_id, model).await;
+    }
+
     // Prompt (queue mode — steer/interrupts go through send_stdin/kill).
     if let Err(e) = unary(
         &service.base_url,
@@ -2096,6 +2157,112 @@ async fn start_deepseek_session(
         pid: 0,
         cli_path: dsh_bin,
     })
+}
+
+/// T05: per-session model passthrough for the DSH backend.
+///
+/// Research conclusion: the DSH service API has NO model field on
+/// `session.create` (workspaceId/cwd/sessionId/agentPreset only) or
+/// `session.prompt` (sessionId/mode/content/clientTimeZone only) — see
+/// dsh-host-apiproxy sessions.schema.js. The supported per-session path is
+/// `session.models` (current selection + provider-group catalog) followed by
+/// `session.selectModel` (sessionId + provider + model), which the host
+/// validates against the adapter catalog (api-proxy.js selectModel).
+///
+/// Best-effort by design: any failure only logs and the session keeps dsh's
+/// current/default model — a model mismatch must never sink the message.
+async fn apply_deepseek_model(base_url: &str, dsh_session_id: &str, requested: &str) {
+    use crate::commands::dsh_service::unary;
+    use serde_json::json;
+
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return;
+    }
+
+    let catalog = match unary(
+        base_url,
+        "session.models",
+        json!({ "sessionId": dsh_session_id }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "[LITTLECLAUDE:deepseek] T05: session.models failed ({}); model '{}' not passed through",
+                e, requested
+            );
+            return;
+        }
+    };
+
+    // Already the requested model — skip the selectModel churn (selectModel
+    // also rewrites dsh's saved default, so no-op calls are worth avoiding).
+    let current = catalog
+        .get("current")
+        .and_then(|c| c.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    if current.eq_ignore_ascii_case(requested) {
+        eprintln!(
+            "[LITTLECLAUDE:deepseek] T05: model '{}' already selected in dsh session",
+            requested
+        );
+        return;
+    }
+
+    // Find the provider group whose catalog lists the requested model id.
+    let mut chosen: Option<(String, String)> = None;
+    if let Some(groups) = catalog.get("groups").and_then(|g| g.as_array()) {
+        for group in groups {
+            let provider_id = group.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            if provider_id.is_empty() {
+                continue;
+            }
+            if let Some(models) = group.get("models").and_then(|m| m.as_array()) {
+                for m in models {
+                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    if id.eq_ignore_ascii_case(requested) {
+                        chosen = Some((provider_id.to_string(), id.to_string()));
+                        break;
+                    }
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+    }
+
+    match chosen {
+        Some((provider_id, model_id)) => {
+            match unary(
+                base_url,
+                "session.selectModel",
+                json!({
+                    "sessionId": dsh_session_id,
+                    "provider": provider_id,
+                    "model": model_id,
+                }),
+            )
+            .await
+            {
+                Ok(selected) => eprintln!(
+                    "[LITTLECLAUDE:deepseek] T05: model passthrough '{}' -> {}/{} (selected: {})",
+                    requested, provider_id, model_id, selected
+                ),
+                Err(e) => eprintln!(
+                    "[LITTLECLAUDE:deepseek] T05: session.selectModel rejected '{}' ({}/{}): {}; keeping the dsh default model",
+                    requested, provider_id, model_id, e
+                ),
+            }
+        }
+        None => eprintln!(
+            "[LITTLECLAUDE:deepseek] T05: model '{}' not in the dsh catalog and session.create/session.prompt accept no model field — keeping the dsh default model",
+            requested
+        ),
+    }
 }
 
 
@@ -2396,9 +2563,13 @@ pub fn run() {
             delete_session,
             list_sessions,
             get_profile_stats,
+            read_dsh_session_turns,
+            write_handoff_file,
             append_usage_record,
             search_sessions,
             load_session,
+            load_session_tail, // T03: 大会话分页——尾部首页
+            load_session_more, // T03: 大会话分页——按游标向上取更早一页
             commands::files::authorize_external_path,
             commands::files::register_workspace_root,
             commands::profile::sync_dsh_usage,
@@ -2456,6 +2627,7 @@ pub fn run() {
             translate_skill_markdown,
             run_git_command,
             rewind_files,
+            dsh_fork_session,
             truncate_session_history,
             set_dock_icon,
             run_claude_command,
@@ -2479,6 +2651,8 @@ pub fn run() {
             check_codex_update,
             check_dsh_cli,
             install_dsh_cli,
+            check_dsh_update,
+            update_dsh_cli,
             export_codex_to_claude,
             export_claude_to_codex,
             check_node_env,

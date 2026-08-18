@@ -96,6 +96,13 @@ export function AddProviderMenu({
                     ×{addedCount}
                   </span>
                 )}
+                {/* T05: preset description distinguishes lookalike providers
+                    (e.g. "DeepSeek" via Claude CLI vs "DeepSeek Harness" via dsh). */}
+                {preset.description && (
+                  <span className="block text-[10px] leading-snug text-text-tertiary mt-0.5">
+                    {preset.description}
+                  </span>
+                )}
               </button>
             );
           })}

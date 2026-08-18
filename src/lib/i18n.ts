@@ -43,6 +43,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'chat.turn': '第',
     'chat.turns': '轮',
     'chat.toggleFiles': '切换文件面板',
+    'chat.loadingEarlier': '正在加载更早的消息…',
     'chat.scrollToBottom': '滚动到底部',
     'chat.latest': '最新',
     'chat.turnHistory': '轮次历史',
@@ -153,6 +154,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.exportFailed': '导出失败',
     'conv.exportOriginBanner': '此对话从 {backend} 导入',
     'conv.convert': '转换历史',
+    // G3: 后端切换器 tooltip 与未安装标记
+    'conv.switchBackend': '切换智能体后端',
+    'conv.notInstalled': '⚠ 未安装',
     'conv.convertTo': '切换至 {target}',
     'conv.convertCurrent': '(当前)',
     'conv.backendSwitchTitle': '确认切换到 {target}',
@@ -367,6 +371,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.permissionDenied': '🚫 操作被拒绝，请检查权限设置。',
     'error.serviceUnavailable': '🔧 服务暂时繁忙，请稍后重试。',
     'error.cliNotInstalled': '⚙️ CLI 未正确安装，请在设置中重新安装。',
+    // G1: dsh 未安装的友好引导（ERROR_CATEGORIES: error.dshNotInstalled）
+    'error.dshNotInstalled': '⚠️ DeepSeek Harness (dsh) CLI 未安装。请到 设置 → CLI 管理 一键安装，或在聊天顶栏切换到 Claude/Codex 后端。',
     'error.tokenLimit': '📏 对话太长了，请新建一个任务继续。',
     'error.genericFallback': '出了点问题，请稍后重试。',
     'error.requestExpired': '⏰ 该请求已过期（等待回应的时间太长）。请重新发送消息，或让助手重试刚才的操作。',
@@ -466,6 +472,13 @@ const messages: Record<Locale, Record<string, string>> = {
     'rewind.noCheckpoint': '历史对话无法恢复代码',
     'rewind.failed': '回滚失败，请重试',
     'rewind.restoreFailed': '文件恢复失败，请重试',
+    // T02: DSH fork 式回滚（deepseek 后端）能力文案
+    'rewind.dsh.success': '已分叉到新会话（原会话保留；文件不回滚）',
+    'rewind.dsh.forkUnavailable': '该轮暂无分叉点（首轮或该轮未正常结束），无法回退',
+    'rewind.dsh.forkFailed': '会话分叉失败：{err}',
+    'rewind.dsh.noFileRollback': 'DSH 后端不支持文件回滚',
+    'rewind.dsh.hint': '回退 = 分叉到新会话：文件不回滚，原会话保留',
+    'rewind.dsh.noSession': '当前会话未连接 DSH 服务，无法回退',
 
     // Markdown rich text
     'msg.copyCode': '复制',
@@ -841,13 +854,19 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.formatAnthropicShort': 'Anthropic 格式',
     'provider.formatOpenaiShort': 'OpenAI 格式',
     'provider.cliBackend': 'CLI 后端',
-    'provider.cliBackendHint': 'Claude 使用 Anthropic 原生协议，Codex 使用 OpenAI App Server 协议。切换后端会重启会话。',
+    // T05: hint now covers the third backend (DSH) too.
+    'provider.cliBackendHint': 'Claude 使用 Anthropic 原生协议，Codex 使用 OpenAI App Server 协议，DSH 经本地 dsh web 服务直连 DeepSeek。切换后端会重启会话。',
     'provider.cliBackendClaude': 'Claude CLI',
     'provider.cliBackendCodex': 'Codex CLI',
+    // T05: third first-class backend option.
+    'provider.cliBackendDeepseek': 'DSH 服务',
     'provider.cliBackendSwitchTitle': '确认切换 CLI 后端',
     'provider.cliBackendSwitchMessage': '将从 {source} 切换至 {target}，协议及 API 提供商将随之变更。',
     'provider.cliBackendSwitchDetail': '正在运行的会话将自动迁移至新的 CLI 后端。',
     'provider.cliBackendSwitchBtn': '确认切换',
+    // T05: DSH credential guidance (key syncs into dsh's own credential store).
+    'provider.deepseekKeyHint': 'DSH 后端：密钥将在会话启动时同步到 dsh 凭证库（~/.dsh/.credentials.yaml 的 DEEPSEEK_API_KEY）。留空则沿用 dsh 自身已配置的密钥或环境变量。',
+    'provider.deepseekCredGuidance': '尚未配置密钥：可在此填写 API Key（启动会话时自动同步到 dsh），或在 dsh 侧配置 DEEPSEEK_API_KEY（~/.dsh/.credentials.yaml 或环境变量）。',
 
 
     // Slash commands
@@ -1088,6 +1107,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installDone': '安装成功',
     'cli.dshServiceRunning': '服务运行中（默认端口 3080）',
     'cli.dshServiceStopped': '服务未运行 — 发消息时自动启动',
+    // G5: DshSection 标题徽章（原硬编码中文"首选"）
+    'cli.recommended': '首选',
     'cli.installFail': '安装失败',
     'cli.notFoundAfterInstall': '安装后仍未检测到 CLI',
     'cli.retry': '重试',
@@ -1303,6 +1324,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'chat.turn': 'Turn',
     'chat.turns': 'turns',
     'chat.toggleFiles': 'Toggle file panel',
+    'chat.loadingEarlier': 'Loading earlier messages…',
     'chat.scrollToBottom': 'Scroll to bottom',
     'chat.latest': 'Latest',
     'chat.turnHistory': 'Turn history',
@@ -1413,6 +1435,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'conv.exportFailed': 'Export failed',
     'conv.exportOriginBanner': 'This conversation was imported from {backend}',
     'conv.convert': 'Convert History',
+    // G3: backend switcher tooltip + not-installed marker
+    'conv.switchBackend': 'Switch agent backend',
+    'conv.notInstalled': '⚠ Not installed',
     'conv.convertTo': 'Switch to {target}',
     'conv.convertCurrent': '(current)',
     'conv.backendSwitchTitle': 'Confirm switch to {target}',
@@ -1627,6 +1652,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'error.permissionDenied': '🚫 Operation was denied. Please check your permissions.',
     'error.serviceUnavailable': '🔧 Service is temporarily busy. Please try again later.',
     'error.cliNotInstalled': '⚙️ CLI is not properly installed. Please reinstall in settings.',
+    // G1: friendly guidance when dsh is missing (ERROR_CATEGORIES: error.dshNotInstalled)
+    'error.dshNotInstalled': '⚠️ DeepSeek Harness (dsh) CLI is not installed. Install it via Settings → CLI Management (one-click), or switch to the Claude/Codex backend in the chat header.',
     'error.tokenLimit': '📏 Conversation is too long. Please start a new task to continue.',
     'error.genericFallback': 'Something went wrong. Please try again later.',
     'error.requestExpired': '⏰ This request expired because it waited too long for a response. Re-send your message, or ask the assistant to retry the operation.',
@@ -1726,6 +1753,13 @@ const messages: Record<Locale, Record<string, string>> = {
     'rewind.noCheckpoint': 'Code restore unavailable for historical conversations',
     'rewind.failed': 'Rewind failed. Please try again.',
     'rewind.restoreFailed': 'File restore failed. Please try again.',
+    // T02: DSH fork-style rewind (deepseek backend) capability strings
+    'rewind.dsh.success': 'Forked to a new session (original kept; files not rolled back)',
+    'rewind.dsh.forkUnavailable': 'No fork point for this turn (first turn or it never finished) — cannot rewind',
+    'rewind.dsh.forkFailed': 'Session fork failed: {err}',
+    'rewind.dsh.noFileRollback': 'The DSH backend cannot roll back files',
+    'rewind.dsh.hint': 'Rewind = fork to a new session: files are not rolled back, the original session is kept',
+    'rewind.dsh.noSession': 'This session is not connected to a DSH service — cannot rewind',
 
     // Markdown rich text
     'msg.copyCode': 'Copy',
@@ -2101,13 +2135,19 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.formatAnthropicShort': 'Anthropic',
     'provider.formatOpenaiShort': 'OpenAI',
     'provider.cliBackend': 'CLI Backend',
-    'provider.cliBackendHint': 'Claude uses Anthropic native protocol, Codex uses OpenAI App Server protocol. Switching backends restarts the session.',
+    // T05: hint now covers the third backend (DSH) too.
+    'provider.cliBackendHint': 'Claude uses Anthropic native protocol, Codex uses OpenAI App Server protocol, DSH rides the local dsh web service to reach DeepSeek. Switching backends restarts the session.',
     'provider.cliBackendClaude': 'Claude CLI',
     'provider.cliBackendCodex': 'Codex CLI',
+    // T05: third first-class backend option.
+    'provider.cliBackendDeepseek': 'DSH Service',
     'provider.cliBackendSwitchTitle': 'Confirm CLI Backend Switch',
     'provider.cliBackendSwitchMessage': 'Will switch from {source} to {target}. The protocol and API provider will follow.',
     'provider.cliBackendSwitchDetail': 'Running sessions will be automatically migrated to the new CLI backend.',
     'provider.cliBackendSwitchBtn': 'Confirm Switch',
+    // T05: DSH credential guidance (key syncs into dsh's own credential store).
+    'provider.deepseekKeyHint': 'DSH backend: the key is synced into dsh\'s credential store (DEEPSEEK_API_KEY in ~/.dsh/.credentials.yaml) when a session starts. Leave empty to reuse the key already configured in dsh or your environment.',
+    'provider.deepseekCredGuidance': 'No key configured yet: enter an API Key here (auto-synced to dsh at session start), or configure DEEPSEEK_API_KEY on the dsh side (~/.dsh/.credentials.yaml or an environment variable).',
 
 
     // Slash commands
@@ -2348,6 +2388,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'cli.installDone': 'Installation complete',
     'cli.dshServiceRunning': 'Service running (port 3080)',
     'cli.dshServiceStopped': 'Service not running — starts on first message',
+    // G5: DshSection title badge (was hardcoded "首选")
+    'cli.recommended': 'Recommended',
     'cli.installFail': 'Installation failed',
     'cli.notFoundAfterInstall': 'CLI not found after installation',
     'cli.retry': 'Retry',

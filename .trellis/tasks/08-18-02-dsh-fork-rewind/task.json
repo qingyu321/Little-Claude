@@ -1,0 +1,44 @@
+{
+  "id": "02-dsh-fork-rewind",
+  "name": "02-dsh-fork-rewind",
+  "title": "DSH fork 式会话回滚集成",
+  "description": "RewindPanel 接入 DSH session.fork（已完成 turn 边界分叉），记录 turn→seq 映射，fork 后切换 tab 映射；配套 git 打点式代码回滚方案",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P2",
+  "creator": "dsh-harness-agent",
+  "assignee": "dsh-harness-agent",
+  "createdAt": "2026-08-18",
+  "completedAt": "2026-08-16",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": " | v1.2.0 实现完成",
+  "meta": {}
+}

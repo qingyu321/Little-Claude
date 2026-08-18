@@ -485,3 +485,245 @@ function formatAssistantContent(msg: any): string {
 
   return out.join('\n');
 }
+
+// ─── Task 01: unified cross-harness handoff ────────────────────────────
+// Three readers (Claude JSONL / in-memory ChatMessage[] / DSH zstd turns)
+// converge on UnifiedTurn[], then render through TWO channels:
+//   A) budgeted inline injection into the first prompt (recent turns)
+//   B) a handoff brief file (.tokenicode/handoff/*.md) every harness can
+//      read — the heavy channel that avoids blowing the context window.
+
+export interface UnifiedTurn {
+  role: 'user' | 'assistant';
+  text: string;
+  tools?: { name: string; args?: string }[];
+}
+
+export interface UnifiedTodo {
+  content: string;
+  status: string;
+}
+
+export interface HandoffContext {
+  sourceBackend: string;
+  projectDir: string;
+  turns: UnifiedTurn[];
+  todos?: UnifiedTodo[];
+  model?: string;
+}
+
+/** Claude JSONL (raw text from export_claude_to_codex) → unified turns. */
+export function unifiedTurnsFromClaudeJsonl(jsonlContent: string): UnifiedTurn[] {
+  const turns: UnifiedTurn[] = [];
+  for (const line of jsonlContent.split('\n')) {
+    if (!line.trim()) continue;
+    let msg: any;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (msg.isMeta) continue;
+    const msgType: string = msg.type || '';
+    if (msgType === 'user' || msgType === 'human') {
+      const text = extractUserText(msg);
+      if (text.trim()) turns.push({ role: 'user', text });
+    } else if (msgType === 'assistant') {
+      const blocks = msg.message?.content;
+      if (!Array.isArray(blocks)) continue;
+      const text = blocks
+        .filter((b: any) => b.type === 'text' && b.text)
+        .map((b: any) => b.text)
+        .join('\n');
+      const tools = blocks
+        .filter((b: any) => b.type === 'tool_use')
+        .map((b: any) => ({
+          name: String(b.name || 'tool'),
+          args: JSON.stringify(b.input ?? {}).slice(0, 300),
+        }));
+      if (text.trim() || tools.length > 0) {
+        turns.push({ role: 'assistant', text, tools: tools.length ? tools : undefined });
+      }
+    }
+  }
+  return turns;
+}
+
+/** In-memory ChatMessage[] (codex or any live backend) → unified turns. */
+export function unifiedTurnsFromChatMessages(messages: ChatMessage[]): UnifiedTurn[] {
+  const grouped = groupMessagesIntoTurns(messages).filter(
+    (t) => t.assistantMsgs.length > 0,
+  );
+  const turns: UnifiedTurn[] = [];
+  for (const turn of grouped) {
+    const userText = turn.userMsg.content || '';
+    if (userText.trim()) turns.push({ role: 'user', text: userText });
+    const textParts: string[] = [];
+    const tools: { name: string; args?: string }[] = [];
+    for (const m of turn.assistantMsgs) {
+      if (m.type === 'text' && m.content) textParts.push(m.content);
+      else if (m.type === 'tool_use') {
+        tools.push({
+          name: m.toolName || 'tool',
+          args: JSON.stringify(m.toolInput ?? {}).slice(0, 300),
+        });
+      }
+    }
+    if (textParts.length || tools.length) {
+      turns.push({
+        role: 'assistant',
+        text: textParts.join('\n'),
+        tools: tools.length ? tools : undefined,
+      });
+    }
+  }
+  return turns;
+}
+
+/** read_dsh_session_turns payload → unified turns + todos. */
+export function unifiedTurnsFromDsh(payload: any): {
+  turns: UnifiedTurn[];
+  todos: UnifiedTodo[];
+  model?: string;
+} {
+  const turns: UnifiedTurn[] = Array.isArray(payload?.turns)
+    ? payload.turns
+        .filter((t: any) => t && (t.text || (t.tools && t.tools.length)))
+        .map((t: any) => ({
+          role: t.role === 'user' ? 'user' as const : 'assistant' as const,
+          text: String(t.text || ''),
+          tools: Array.isArray(t.tools) && t.tools.length
+            ? t.tools.map((x: any) => ({ name: String(x.name || 'tool'), args: x.args }))
+            : undefined,
+        }))
+    : [];
+  const todos: UnifiedTodo[] = Array.isArray(payload?.todos)
+    ? payload.todos.map((t: any) => ({
+        content: String(t.content || ''),
+        status: String(t.status || 'pending'),
+      }))
+    : [];
+  return { turns, todos, model: payload?.model || undefined };
+}
+
+function renderTurnSegment(turn: UnifiedTurn): string {
+  if (turn.role === 'user') {
+    return `## User\n${turn.text}\n`;
+  }
+  const parts: string[] = [];
+  if (turn.text.trim()) parts.push(turn.text);
+  for (const tool of turn.tools ?? []) {
+    parts.push(`[Tool: ${tool.name}]${tool.args ? ` ${tool.args}` : ''}`);
+  }
+  return `## Assistant\n${parts.join('\n')}\n`;
+}
+
+/**
+ * Budgeted inline injection (channel A): most recent turns verbatim while
+ * the budget holds; older turns collapse into one-line summaries so the
+ * target harness still knows what happened without blowing its window.
+ */
+export function formatUnifiedForInjection(
+  turns: UnifiedTurn[],
+  sourceBackend: string,
+  cwd: string,
+  budgetChars = 28000,
+): string {
+  if (turns.length === 0) return '';
+
+  // Keep recent turns verbatim within budget (newest first)
+  const verbatim: UnifiedTurn[] = [];
+  let used = 0;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const seg = renderTurnSegment(turns[i]);
+    if (used + seg.length > budgetChars && verbatim.length > 0) break;
+    verbatim.unshift(turns[i]);
+    used += seg.length;
+  }
+  const summarized = turns.slice(0, turns.length - verbatim.length);
+
+  const body: string[] = [];
+  if (summarized.length > 0) {
+    body.push(`## Earlier turns (summarized, ${summarized.length} turns)\n`);
+    for (const t of summarized) {
+      const preview = t.text.replace(/\s+/g, ' ').slice(0, 100);
+      if (t.role === 'user') {
+        body.push(`- User: ${preview}${t.text.length > 100 ? '…' : ''}`);
+      } else {
+        const toolNote = t.tools && t.tools.length
+          ? ` [tools: ${t.tools.map((x) => x.name).join(', ')}]`
+          : '';
+        body.push(`- Assistant: ${preview}${t.text.length > 100 ? '…' : ''}${toolNote}`);
+      }
+    }
+    body.push('');
+  }
+  for (const t of verbatim) {
+    body.push(renderTurnSegment(t));
+  }
+
+  const header = [
+    'You are taking over a task from another AI harness. Below is the conversation history so far.',
+    'A full handoff brief may be referenced after this history — read it if you need earlier details.',
+    '',
+    `<conversation_history source="${sourceBackend}" project="${cwd}">`,
+    '',
+  ].join('\n');
+  const footer = '\n</conversation_history>\n\n---\nCurrent task: ';
+  return header + body.join('\n') + footer;
+}
+
+/**
+ * Handoff brief (channel B): markdown persisted to .tokenicode/handoff/.
+ * Carries the task state (todos, per-turn summaries, limitations) — every
+ * harness can read files, so this channel costs almost no context tokens.
+ */
+export function buildHandoffBrief(ctx: HandoffContext): string {
+  const now = new Date().toISOString();
+  const lines: string[] = [];
+  lines.push('# 任务交接简报 (Task Handoff Brief)');
+  lines.push('');
+  lines.push(`- 来源 harness: ${ctx.sourceBackend}`);
+  lines.push(`- 项目目录: ${ctx.projectDir}`);
+  if (ctx.model) lines.push(`- 来源模型: ${ctx.model}`);
+  lines.push(`- 生成时间: ${now}`);
+  lines.push(`- 交接轮次: ${ctx.turns.length}`);
+  lines.push('');
+
+  const openTodos = (ctx.todos ?? []).filter((t) => t.status !== 'completed');
+  const doneTodos = (ctx.todos ?? []).filter((t) => t.status === 'completed');
+  if (ctx.todos && ctx.todos.length > 0) {
+    lines.push('## 任务进度（待办状态）');
+    lines.push('');
+    for (const t of openTodos) {
+      lines.push(`- [ ] ${t.content}${t.status === 'in_progress' ? '（进行中）' : ''}`);
+    }
+    for (const t of doneTodos) {
+      lines.push(`- [x] ${t.content}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('## 逐轮摘要');
+  lines.push('');
+  ctx.turns.forEach((t, i) => {
+    const preview = t.text.replace(/\s+/g, ' ').slice(0, 400);
+    if (t.role === 'user') {
+      lines.push(`${i + 1}. **用户**: ${preview}${t.text.length > 400 ? '…' : ''}`);
+    } else {
+      const toolNote = t.tools && t.tools.length
+        ? `（工具: ${t.tools.map((x) => x.name).join(', ')}）`
+        : '';
+      lines.push(`   **助手**: ${preview}${t.text.length > 400 ? '…' : ''}${toolNote}`);
+    }
+  });
+  lines.push('');
+
+  lines.push('## 交接须知');
+  lines.push('');
+  lines.push('- thinking/图片/usage 未跨 harness 携带；文件改动现状请用 `git status` / `git diff --stat` 查看');
+  lines.push(`- 最近 ${Math.min(ctx.turns.length, 12)} 轮全文已内联在对话开头，更早轮次仅摘要`);
+  lines.push('- 请先确认当前进度与下一步计划，再继续未完成的工作');
+  lines.push('');
+  return lines.join('\n');
+}

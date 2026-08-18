@@ -126,6 +126,19 @@ $latestPath = Join-Path $outDir "latest.json"
 $rootLatestPath = Join-Path $root "latest.json"
 [System.IO.File]::WriteAllText($rootLatestPath, $latest, (New-Object System.Text.UTF8Encoding($false)))
 
+# 6.6 Task 04: ed25519-sign both manifests (download_web_update now REJECTS
+# unsigned manifests). Requires the private key at
+# .tokenicode/secrets/webupdate-signing.key — missing key = loud warning.
+$signKey = Join-Path $root ".tokenicode\secrets\webupdate-signing.key"
+if (Test-Path $signKey) {
+    python (Join-Path $root "scripts\sign-web-update.py") $latestPath
+    python (Join-Path $root "scripts\sign-web-update.py") $rootLatestPath
+} else {
+    Write-Host "WARNING: signing key missing ($signKey) — manifest UNSIGNED." -ForegroundColor Red
+    Write-Host "         download_web_update rejects unsigned manifests. Sign manually:" -ForegroundColor Red
+    Write-Host "         python scripts\sign-web-update.py latest.json" -ForegroundColor Red
+}
+
 # 7. Report
 Write-Host ""
 Write-Host "Hot-update package ready:" -ForegroundColor Green

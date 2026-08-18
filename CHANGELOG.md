@@ -6,6 +6,25 @@ All notable changes to Little Claude will be documented in this file.
 
 ---
 
+## [1.2.0] - 2026-08-16
+
+### Added — 立项任务落地（01/02/03/04/05）
+
+- **跨 harness 任务交接（任务 01）** — 三读取器（Claude JSONL / 内存消息 / DSH zstd 日志 `read_dsh_session_turns`）收敛为统一转轮模型；双通道交接：预算内联（近期轮次全文 + 更早轮次摘要，28K 字符预算）+ 交接简报落盘（`write_handoff_file` → `<cwd>/.tokenicode/handoff/`，含任务进度/逐轮摘要/交接须知）；全方向打通（DSH→Claude/Codex 从静默丢历史变为完整交接）；交接回执系统卡、失败显式报错
+- **DSH fork 式会话回滚（任务 02）** — translator 记录 turn 边界 seq（result.dsh_seq，跨 turn 单调）→ user 消息锚点 → `dsh_fork_session`（session.fork + routes/translators 迁移 + last_seqs 播种 at_seq）→ RewindPanel deepseek 能力矩阵与诚实文案（文件不回滚）；新增 4 个 translator 测试
+- **大会话分页加载（任务 03）** — `load_session_tail`/`load_session_more`（倒序 512KiB 块回溯、字节游标页间无缝、spawn_blocking + 6 个单测）；前端 tail-first 加载 + Virtuoso firstItemIndex 向上分页不跳顶；搜索/导出/rewind 兼容性边界文档化（docs/t03-session-pagination.md）
+- **热更新签名链（任务 04）** — ed25519-dalek 验签内置公钥，`download_web_update` 强制 `signature` 参数（payload=`version|sha256|zipUrl`）；scripts/sign-web-update.py + make-web-update.ps1 自动接线；私钥 .tokenicode/secrets/（gitignored）
+- **DSH provider 一等公民（任务 05）** — 调研确认 session.selectModel/credentials.set 可用；provider 类型/预设（DeepSeek Harness）/表单/Tab 三后端；session.rs 路由识别 cli_backend:"deepseek"；start_deepseek_session 注入凭证与模型（尽力而为 + 日志）
+- 「运行环境」补 Codex CLI / DeepSeek Harness 检测与一键安装；`update_dsh_cli`/`check_dsh_update` 更新通道
+
+### Fixed
+
+- **DeepSeek 后端发送消息弹 cmd 黑窗** — spawn_dsh_web/taskkill 补 CREATE_NO_WINDOW
+- **DSH 会话后端接线断裂（严重）** — get_backend() 以 deepseek_sessions 映射为事实来源回退识别，send_stdin/respond_permission/send_control_request/kill_session 的 DSH 分支恢复可达
+- **新用户默认后端错配** — 未装 dsh 自动回落 Claude；dsh 缺失友好错误分类；后端切换器重做（字号/tooltip/安装状态预检）；DshSection「首选」徽章 i18n
+
+---
+
 ## [1.1.8] - 2026-08-16
 
 ### Fixed

@@ -1,0 +1,44 @@
+{
+  "id": "04-webupdate-signing",
+  "name": "04-webupdate-signing",
+  "title": "前端热更新签名链",
+  "description": "为热更包引入 minisign/ed25519 签名（公钥内置），补齐 latest.json 清单伪造防线；当前仅有 SHA256 防传输篡改",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P1",
+  "creator": "dsh-harness-agent",
+  "assignee": "dsh-harness-agent",
+  "createdAt": "2026-08-18",
+  "completedAt": "2026-08-16",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": " | v1.2.0 实现完成",
+  "meta": {}
+}

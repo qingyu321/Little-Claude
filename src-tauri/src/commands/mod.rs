@@ -8,6 +8,7 @@ pub mod export;
 pub mod external;
 pub mod files;
 pub mod git;
+pub mod handoff;
 pub mod local_model;
 pub mod ls_persist;
 pub mod metadata;

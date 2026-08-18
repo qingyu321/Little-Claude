@@ -50,6 +50,18 @@ export interface SessionListItem {
   origin?: string;
 }
 
+/** T03: paginated session load result (load_session_tail / load_session_more).
+ *  `messages` are the raw JSONL rows in FILE order (oldest → newest) of the
+ *  loaded page; `cursor` is the byte offset of the earliest loaded line —
+ *  feed it back into loadSessionMore to fetch the page above; `hasMore` is
+ *  false once the file start is exhausted. */
+export interface SessionPageResult {
+  messages: any[];
+  totalLines: number;
+  cursor: number;
+  hasMore: boolean;
+}
+
 export interface ContentSearchResult {
   session_id: string;
   project: string;
@@ -538,6 +550,15 @@ export const bridge = {
   loadSession: (path: string) =>
     invoke<any[]>('load_session', { path }),
 
+  // T03: tail-first pagination for huge histories (see load_session_tail /
+  // load_session_more in commands/session.rs). projectDir is the RAW project
+  // path — same contract as truncateSessionHistory.
+  loadSessionTail: (sessionId: string, projectDir: string, limit: number) =>
+    invoke<SessionPageResult>('load_session_tail', { sessionId, projectDir, limit }),
+
+  loadSessionMore: (sessionId: string, projectDir: string, cursor: number, limit: number) =>
+    invoke<SessionPageResult>('load_session_more', { sessionId, projectDir, cursor, limit }),
+
   openInVscode: (path: string) =>
     invoke<void>('open_in_vscode', { path }),
 
@@ -776,6 +797,16 @@ export const bridge = {
       invoke<string>('rewind_files', { sessionId, checkpointUuid: userMessageId, cwd }),
     ),
 
+  // T02: DSH fork-style rewind (deepseek backend). Calls DSH `session.fork`
+  // at `atSeq` (the mux seq of the completed turn BEFORE the rewind target —
+  // Turn.dshSeq): events up to that turn boundary are copied into a NEW child
+  // session and the tab is re-pointed at it; the source session is retained
+  // server-side and files are never rolled back (DSH has no checkpoint layer).
+  // Resolves with the child's DSH session id. Rejects with the RPC error
+  // string — `fork-unavailable` when atSeq lands inside an unfinished turn.
+  dshForkSession: (sessionId: string, atSeq: number) =>
+    invoke<string>('dsh_fork_session', { sessionId, atSeq }),
+
   // Truncate the CLI session JSONL to just before the given user turn (1-based),
   // so `--resume` after a rewind rebuilds only the pre-rewind history.
   // Returns null when the whole history was cleared (file deleted).
@@ -874,6 +905,10 @@ export const bridge = {
   installDshCli: () =>
     invokeWithTimeout<void>('install_dsh_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
 
+  /** G5: Update DeepSeek Harness CLI to latest version via npm (Rust: update_dsh_cli) */
+  updateDshCli: () =>
+    invokeWithTimeout<string>('update_dsh_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),
+
   /** Export Codex session to Claude-compatible JSONL session file.
    *  Takes pre-built JSONL content and cwd, returns the new Claude session UUID. */
   exportCodexToClaude: (jsonlContent: string, cwd: string) =>
@@ -883,6 +918,18 @@ export const bridge = {
    *  Returns raw JSONL content; frontend formats via formatJsonlAsText(). */
   exportClaudeToCodex: (sessionId: string, projectDir: string) =>
     invoke<string>('export_claude_to_codex', { sessionId, projectDir }),
+
+  /** Task 01: read a DSH session's history as unified turns
+   *  ({ turns, todos, model, turnCount }). sessionId accepts desk_* or dsh id. */
+  readDshSessionTurns: (sessionId: string) =>
+    invoke<{ backend: string; turnCount: number; turns: any[]; todos: any[]; model: string }>(
+      'read_dsh_session_turns', { sessionId },
+    ),
+
+  /** Task 01: persist the handoff brief into <cwd>/.tokenicode/handoff/.
+   *  Returns the written file path. */
+  writeHandoffFile: (cwd: string, content: string) =>
+    invoke<string>('write_handoff_file', { cwd, content }),
 
   checkNodeEnv: () =>
     invokeWithTimeout<NodeEnvStatus>('check_node_env', undefined, TEST_INVOKE_TIMEOUT_MS),
@@ -988,9 +1035,11 @@ export const bridge = {
 
   // ── Web hot update ─────────────────────────────
 
-  /** 下载并原子切换前端资源包（免重装升级）。返回当前生效资源版本。 */
-  downloadWebUpdate: (url: string, sha256: string, version: string) =>
-    invoke<string>('download_web_update', { url, sha256, version }),
+  /** 下载并原子切换前端资源包（免重装升级）。返回当前生效资源版本。
+   *  G7: signature 透传 latest.json 的 sig（清单签名）；manifest 无 sig 时
+   *  传 undefined，由后端给出明确错误。 */
+  downloadWebUpdate: (url: string, sha256: string, version: string, signature?: string) =>
+    invoke<string>('download_web_update', { url, sha256, version, signature }),
 
   /** 当前生效的前端资源版本（current.json 指针；None = 未热更过）。 */
   getWebResourceVersion: () =>
@@ -1205,8 +1254,9 @@ export interface UpdateProgressEvent {
 }
 
 /** 下载并应用前端资源热更新包（Rust 侧流式下载+校验+原子切换）。 */
-export function downloadWebUpdate(url: string, sha256: string, version: string): Promise<string> {
-  return bridge.downloadWebUpdate(url, sha256, version);
+// G7: signature 可选参数透传（与 bridge.downloadWebUpdate 签名保持一致）
+export function downloadWebUpdate(url: string, sha256: string, version: string, signature?: string): Promise<string> {
+  return bridge.downloadWebUpdate(url, sha256, version, signature);
 }
 
 /** 查询当前生效的磁盘资源版本（无热更 → null，前端回退 APP_VERSION）。 */

@@ -79,6 +79,10 @@ export interface ChatMessage {
   subAgentDepth?: number;
   // CLI checkpoint UUID for file restoration (from --replay-user-messages)
   checkpointUuid?: string;
+  // T02: DSH fork anchor — the mux seq of the turn that completed BEFORE this
+  // user message. Set on the deepseek backend when a user message is added.
+  // Rewinding to this turn calls session.fork with atSeq = dshSeq.
+  dshSeq?: number;
 }
 
 export interface SessionMeta {
@@ -128,6 +132,14 @@ export interface SessionMeta {
   /** DSH automatic compaction in progress (compaction/start → end). The Ctx
    *  bar shows an animated "compacting" state while set. */
   compactionInProgress?: boolean;
+  /** T02: DSH fork anchor awaiting the next user message — the mux seq of
+   *  the just-finished turn's final event (result.dsh_seq). InputBar stamps
+   *  it onto the next user message as `dshSeq` ("rewind to before that
+   *  message" == session.fork at this seq) and clears the slot. Rewind on
+   *  the deepseek backend re-seeds it with the fork boundary so a follow-up
+   *  message after a rewind keeps a correct anchor. Only ever set for the
+   *  deepseek backend; harmless elsewhere. */
+  pendingDshSeq?: number;
   /** Last DSH compaction finished: timestamp (Date.now()) + shadowed tokens
    *  (token-meter heuristic estimate). Drives the transient "已压缩 −X" badge;
    *  the next request's usage/projection overwrites contextTokens with the
@@ -177,6 +189,18 @@ export interface SessionMeta {
   snapshotCliBackend?: string;
   /** Which backend originally created this session — from JSONL _origin field */
   sessionOrigin?: string;
+  // T03: paginated history state (tail-first disk loads of huge sessions) —
+  // byte cursor of the earliest loaded JSONL line, whether older lines exist,
+  // and the project-dir snapshot the load_session_more command needs.
+  historyCursor?: number;
+  historyHasMore?: boolean;
+  historyProjectDir?: string;
+  /** T03: a history page fetch is in flight (drives the top loading indicator). */
+  historyLoadingMore?: boolean;
+  /** T03: how many messages were prepended by paging since the initial load —
+   *  ChatPanel derives Virtuoso's firstItemIndex from it so prepends keep the
+   *  scroll position (reset to 0 by every fresh loadSessionFromDisk). */
+  historyPrepended?: number;
   /** The resolved model name used when spawning the CLI process.
    *  Compared before sending via stdin to detect mid-session model switches. */
   spawnedModel?: string;
@@ -281,6 +305,10 @@ interface ChatState {
   addMessage: (tabId: string, message: ChatMessage) => void;
   /** Batch-add multiple messages in a single set() call — avoids N re-renders */
   batchAddMessages: (tabId: string, messages: ChatMessage[]) => void;
+  /** T03: prepend older-history page to the FRONT in one set() call — dedupes
+   *  by id (a re-fetched page never duplicates) and bumps historyPrepended so
+   *  Virtuoso's firstItemIndex keeps the scroll position. */
+  prependMessages: (tabId: string, messages: ChatMessage[]) => void;
   updateMessage: (tabId: string, id: string, updates: Partial<ChatMessage>) => void;
   updatePartialMessage: (tabId: string, text: string) => void;
   updatePartialThinking: (tabId: string, text: string) => void;
@@ -500,6 +528,30 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           }
         }
         return { ...tab, messages: [...updated, ...newMessages] };
+      });
+      return result ?? {};
+    }),
+
+  /** T03: see interface. Older-history pages arrive newest-first-within-page
+   *  in FILE order (parseSessionMessages output), so they go in front of the
+   *  current head as-is. historyPrepended is bumped atomically with messages
+   *  so ChatPanel's firstItemIndex never lags a render behind the data. */
+  prependMessages: (tabId, messages) =>
+    set((state) => {
+      const result = updateTab(state.tabs, tabId, (tab) => {
+        if (messages.length === 0) return tab;
+        const existingIds = new Set<string>();
+        for (const m of tab.messages) existingIds.add(m.id);
+        const fresh = messages.filter((m) => !existingIds.has(m.id));
+        if (fresh.length === 0) return tab;
+        return {
+          ...tab,
+          messages: [...fresh, ...tab.messages],
+          sessionMeta: {
+            ...tab.sessionMeta,
+            historyPrepended: (tab.sessionMeta.historyPrepended ?? 0) + fresh.length,
+          },
+        };
       });
       return result ?? {};
     }),

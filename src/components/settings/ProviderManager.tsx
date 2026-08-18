@@ -28,8 +28,9 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
   const [importError, setImportError] = useState('');
   const [cardTestStatuses, setCardTestStatuses] = useState<Record<string, CardTestStatus>>({});
   const [cardTestTimes, setCardTestTimes] = useState<Record<string, number>>({});
-  /** Which backend's provider selection is currently being configured */
-  const [activeBackend, setActiveBackend] = useState<'claude' | 'codex'>('claude');
+  /** Which backend's provider selection is currently being configured.
+   *  T05: "deepseek" (DSH service mode) is a first-class backend tab. */
+  const [activeBackend, setActiveBackend] = useState<'claude' | 'codex' | 'deepseek'>('claude');
 
   const addBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -164,6 +165,26 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
     setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'testing' }));
     setCardTestTimes((prev) => { const next = { ...prev }; delete next[providerId]; return next; });
 
+    // T05: a DSH-backend provider does not speak Anthropic/OpenAI HTTP itself —
+    // it rides the local dsh service. The meaningful connectivity check is
+    // "is the dsh CLI installed" (the key/model sync happens at session start).
+    if (p.cliBackend === 'deepseek') {
+      try {
+        const start = Date.now();
+        const status = await bridge.checkDshCli();
+        const elapsed = Date.now() - start;
+        if (status.installed) {
+          setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'success' }));
+          setCardTestTimes((prev) => ({ ...prev, [providerId]: elapsed }));
+        } else {
+          setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
+        }
+      } catch {
+        setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
+      }
+      return;
+    }
+
     const testModel = normalizeProviderModelName(p.modelMappings.find((m) => m.providerModel)?.providerModel || '');
     if (!testModel || !p.apiKey) {
       setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
@@ -257,7 +278,8 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
         <div className="space-y-3 ml-0">
           {/* Backend selector tabs */}
           <div className="flex gap-1 p-0.5 rounded-lg bg-bg-secondary border border-border-subtle">
-            {(['claude', 'codex'] as const).map((backend) => {
+            {/* T05: three first-class backends — claude / codex / deepseek (DSH). */}
+            {(['claude', 'codex', 'deepseek'] as const).map((backend) => {
               const backendProviderId = activeProviderPerBackend[backend] ?? null;
               const backendProvider = backendProviderId
                 ? providers.find((p) => p.id === backendProviderId)
@@ -276,7 +298,7 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
                       : 'text-text-tertiary hover:text-text-secondary'
                     }`}
                 >
-                  {backend === 'claude' ? 'Claude' : 'Codex'}: {backendLabel}
+                  {backend === 'claude' ? 'Claude' : backend === 'codex' ? 'Codex' : 'DSH'}: {backendLabel}
                 </button>
               );
             })}

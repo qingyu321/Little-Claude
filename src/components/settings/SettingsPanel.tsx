@@ -312,7 +312,8 @@ function SettingsFooter() {
         }
       });
       unlistenRef.current = unlisten;
-      await bridge.downloadWebUpdate(updateInfo.zipUrl, updateInfo.sha256, updateInfo.version);
+      // G7: 透传 latest.json 的 sig 清单签名（无 sig 时为 undefined，后端报明确错误）
+      await bridge.downloadWebUpdate(updateInfo.zipUrl, updateInfo.sha256, updateInfo.version, updateInfo.sig);
       // Rust 侧切换成功后会 emit done 事件；再显式兜底一次
       setDownloadState('done');
       recordAppliedWebVersion(updateInfo.version);

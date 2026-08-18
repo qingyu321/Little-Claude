@@ -33,6 +33,11 @@ function EyeClosedIcon() {
 
 export type TestStatus = 'idle' | 'testing' | 'success' | 'auth_error' | 'failed';
 
+/** T05: human-readable backend label for the switch-confirm dialog. */
+function backendDisplayName(b: 'claude' | 'codex' | 'deepseek'): string {
+  return b === 'codex' ? 'Codex' : b === 'deepseek' ? 'DSH (DeepSeek)' : 'Claude';
+}
+
 interface ProviderFormProps {
   provider: ApiProvider;
   onClose: () => void;
@@ -59,7 +64,8 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
   const [mappings, setMappings] = useState<ModelMapping[]>(provider.modelMappings);
   const [extraEnv, setExtraEnv] = useState<Record<string, string>>(provider.extra_env || {});
   const [cliBackend, setCliBackend] = useState(provider.cliBackend || 'claude');
-  const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | null>(null);
+  // T05: deepseek (DSH) joins claude/codex as a switchable backend target.
+  const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | 'deepseek' | null>(null);
   const [testStatus, _setTestStatus] = useState<TestStatus>('idle');
   const [_testError, setTestError] = useState('');
   const [testTimeMs, setTestTimeMs] = useState<number | null>(null);
@@ -116,7 +122,7 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
   const handleProxyUrlChange = (v: string) => { setProxyUrl(v); autoSave({ proxyUrl: v || undefined }); };
   // API format selector hidden from UI — kept for backward compat
   const handleApiFormatChange = (v: 'anthropic' | 'openai') => { setApiFormat(v); autoSave({ apiFormat: v }); };
-  const handleCliBackendChange = (v: 'claude' | 'codex') => { setCliBackend(v); autoSave({ cliBackend: v }); };
+  const handleCliBackendChange = (v: 'claude' | 'codex' | 'deepseek') => { setCliBackend(v); autoSave({ cliBackend: v }); };
 
   const FIXED_TIERS = new Set(['opus', 'sonnet', 'haiku']);
 
@@ -390,8 +396,9 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
       {/* CLI Backend */}
       <div>
         <label className="text-xs text-text-muted mb-1 block">{t('provider.cliBackend')}</label>
-        <div className="grid grid-cols-2 gap-1 rounded-lg border border-border-subtle bg-bg-chat p-1">
-          {(['claude', 'codex'] as const).map((backend) => (
+        {/* T05: three first-class backends — claude / codex / deepseek (DSH). */}
+        <div className="grid grid-cols-3 gap-1 rounded-lg border border-border-subtle bg-bg-chat p-1">
+          {(['claude', 'codex', 'deepseek'] as const).map((backend) => (
             <button
               key={backend}
               onClick={() => { if (cliBackend !== backend) setConfirmTarget(backend); }}
@@ -401,7 +408,11 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
                   : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'
                 }`}
             >
-              {backend === 'codex' ? t('provider.cliBackendCodex') : t('provider.cliBackendClaude')}
+              {backend === 'codex'
+                ? t('provider.cliBackendCodex')
+                : backend === 'deepseek'
+                  ? t('provider.cliBackendDeepseek')
+                  : t('provider.cliBackendClaude')}
             </button>
           ))}
         </div>
@@ -413,11 +424,11 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
         open={confirmTarget !== null}
         title={t('provider.cliBackendSwitchTitle')}
         message={t('provider.cliBackendSwitchMessage', {
-          source: cliBackend === 'codex' ? 'Codex' : 'Claude',
-          target: confirmTarget === 'codex' ? 'Codex' : 'Claude',
+          source: backendDisplayName(cliBackend),
+          target: confirmTarget ? backendDisplayName(confirmTarget) : '',
         })}
         detail={t('provider.cliBackendSwitchDetail', {
-          targetLabel: confirmTarget === 'codex' ? 'Codex' : 'Claude',
+          targetLabel: confirmTarget ? backendDisplayName(confirmTarget) : '',
         })}
         confirmLabel={t('provider.cliBackendSwitchBtn')}
         variant="default"
@@ -458,6 +469,11 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
         </div>
         {decryptFailed && (
           <p className="text-xs text-red-400 mt-1">{t('provider.apiKeyDecryptFailed')}</p>
+        )}
+        {/* T05: DSH backend credentials guidance — the key is synced into
+            dsh's own credential store, never injected into a CLI process. */}
+        {cliBackend === 'deepseek' && (
+          <p className="text-xs text-text-tertiary mt-1">{t('provider.deepseekKeyHint')}</p>
         )}
       </div>
 

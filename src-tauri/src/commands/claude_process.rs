@@ -159,15 +159,37 @@ pub struct ProcessManager {
 }
 
 impl ProcessManager {
-    /// Look up the backend name ("claude" or "codex") for a session.
+    /// Look up the backend name ("claude", "codex" or "deepseek") for a session.
     pub async fn get_backend(&self, session_id: &str) -> Option<String> {
-        let map = self.processes.lock().await;
-        map.get(session_id)
-            .and_then(|p| {
-                // Try to lock — if the process is being modified, skip
-                p.try_lock().ok()
-            })
-            .map(|p| p.backend.clone())
+        {
+            let map = self.processes.lock().await;
+            if let Some(backend) = map
+                .get(session_id)
+                .and_then(|p| {
+                    // Try to lock — if the process is being modified, skip
+                    p.try_lock().ok()
+                })
+                .map(|p| p.backend.clone())
+            {
+                return Some(backend);
+            }
+        }
+        // CRITICAL fix: DSH service-mode sessions have NO per-session
+        // process, so they were never inserted into `processes` — this
+        // function returned None for them and the deepseek branches of
+        // send_stdin / respond_permission / send_control_request /
+        // kill_session were ALL unreachable (follow-ups fell back to the
+        // claude branch and failed; steer/stop/permission answers were
+        // dead). The deepseek_sessions mapping is the source of truth.
+        if self
+            .deepseek_sessions
+            .lock()
+            .await
+            .contains_key(session_id)
+        {
+            return Some("deepseek".to_string());
+        }
+        None
     }
 
     /// Retrieve the Codex thread ID for a session.

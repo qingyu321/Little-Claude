@@ -78,6 +78,14 @@ export function ProviderCard({
             {formatLabel}
           </span>
         </div>
+        {/* T05: DSH backend with no usable key — guide the user to configure
+            credentials (either here, synced into dsh, or on the dsh side). */}
+        {provider.cliBackend === 'deepseek'
+          && (!provider.apiKey || provider.apiKey.startsWith('TENC1:')) && (
+          <div className="text-[11px] leading-snug text-amber-400/90 mt-1">
+            {t('provider.deepseekCredGuidance')}
+          </div>
+        )}
       </div>
 
       {/* Test button — same style as form test button */}

@@ -1,0 +1,44 @@
+{
+  "id": "05-dsh-provider",
+  "name": "05-dsh-provider",
+  "title": "DSH provider 一等公民",
+  "description": "让 DeepSeek(DSH) 后端拥有完整 provider 体验：类型/预设/表单/路由四层接入 deepseek，start_deepseek_session 传入 model 与凭证（或注入 provider env），DSH 服务状态与配置引导 UI",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P1",
+  "creator": "dsh-harness-agent",
+  "assignee": "dsh-harness-agent",
+  "createdAt": "2026-08-18",
+  "completedAt": "2026-08-16",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": " | v1.2.0 实现完成",
+  "meta": {}
+}

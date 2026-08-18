@@ -45,6 +45,15 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 版本历程
 
+### v1.2.0 (2026-08-16) — 三 harness 时代：交接 / 回滚 / 分页 / provider / 签名
+
+- **跨 harness 任务交接** — 切换引擎（Claude Code ↔ Codex ↔ DeepSeek）自动携带历史：近期轮次预算内联 + 交接简报落盘（`.tokenicode/handoff/`）；DeepSeek 会话历史首次可完整带出（zstd 日志解码）；交接回执与失败显式提示
+- **DeepSeek 会话回滚** — RewindPanel 按轮次 fork 回退（`session.fork`，turn 边界 seq 锚点；原会话保留、文件不回滚有明确提示）
+- **大会话分页加载** — 首屏只解析尾部 300 条（倒序块回溯读取），向上滚动按需加载；50MB 会话从数秒冻结变为即开
+- **DeepSeek 后端 provider 一等公民** — provider 类型/预设/表单/Tab 三后端齐全；会话启动时经 `credentials.set` 注入密钥、`session.selectModel` 透传模型
+- **热更新签名链** — ed25519 强制验签（公钥内置），无签名/伪造清单直接拒绝；签名工具与发布流程接线
+- **DeepSeek 可用性大修** — 发送消息不再弹 cmd 黑窗；DSH 会话后端接线修复（追问/审批/停止/插话恢复）；默认后端错配闭环（未装 dsh 自动回落 + 安装引导）；「运行环境」补 Codex/dsh 一键安装、dsh 一键更新
+
 ### v1.1.8 (2026-08-16) — 第三轮全面修复：交互兜底 + 性能快赢
 
 - **权限/问题卡过期体验重做** — 等待时限 5 分钟 → 60 分钟；过期卡片明确提示"请停止并重发"（不再无用的重试按钮）；错误分类器补全中文模式（超时/限流/余额/密钥等不再落入"出了点问题"兜底）；失败的对话回合现在会在聊天区显示具体原因

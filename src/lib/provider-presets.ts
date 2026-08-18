@@ -16,8 +16,12 @@ export interface PresetProvider {
     sonnet?: string;
     haiku?: string;
   };
-  /** Which CLI backend this preset uses: "claude" (default) or "codex". */
-  cliBackend?: 'claude' | 'codex';
+  /** Which CLI backend this preset uses: "claude" (default), "codex", or
+   *  "deepseek" (T05: DSH service mode). */
+  cliBackend?: 'claude' | 'codex' | 'deepseek';
+  /** T05: short human-readable note distinguishing similar presets (shown as
+   *  a subtitle/tooltip in the add-provider menu). */
+  description?: string;
 }
 
 export const PROVIDER_PRESETS: PresetProvider[] = [
@@ -33,12 +37,39 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
   {
     id: 'deepseek',
     name: 'DeepSeek',
+    // T05: distinguish from the "DeepSeek Harness" preset below — this one
+    // rides the Claude CLI against the Anthropic-compatible endpoint.
+    description: '走 Claude CLI 的 Anthropic 兼容端点（api.deepseek.com/anthropic）',
     baseUrl: 'https://api.deepseek.com/anthropic',
     apiFormat: 'anthropic',
     extra_env: {},
     keyUrl: 'https://platform.deepseek.com/api_keys',
     thinkingSupport: 'full',
     defaultModels: {
+      opus: 'deepseek-v4-pro',
+      sonnet: 'deepseek-v4-flash',
+      haiku: 'deepseek-v4-flash',
+    },
+  },
+  {
+    // T05: DSH-native preset — first-class DeepSeek Harness provider. Runs on
+    // the local `dsh web` service (NOT the Claude CLI): the API key is synced
+    // into dsh's own credentials store (~/.dsh/.credentials.yaml →
+    // DEEPSEEK_API_KEY) via credentials.set, and the model mapping passes
+    // through per-session via session.selectModel. Do not confuse it with the
+    // "DeepSeek" preset above, which rides Claude CLI against the
+    // Anthropic-compatible endpoint (api.deepseek.com/anthropic).
+    id: 'deepseek-harness',
+    name: 'DeepSeek Harness',
+    description: 'DSH 原生后端：本地 dsh web 服务直连 DeepSeek 官方 API（不走 Claude CLI）',
+    baseUrl: 'https://api.deepseek.com',
+    apiFormat: 'anthropic',
+    extra_env: {},
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    thinkingSupport: 'full',
+    cliBackend: 'deepseek',
+    defaultModels: {
+      // dsh-llm-deepseek's default catalog ships exactly these two models.
       opus: 'deepseek-v4-pro',
       sonnet: 'deepseek-v4-flash',
       haiku: 'deepseek-v4-flash',

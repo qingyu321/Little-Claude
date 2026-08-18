@@ -101,6 +101,106 @@ export function useRewind() {
   }, []);
 
   /**
+   * T02: DSH fork-style rewind (deepseek backend).
+   *
+   * DSH has no checkpoint layer and no JSONL truncation — the only
+   * session-level rollback is `session.fork`, which copies events up to a
+   * completed-turn boundary into a new child session (source kept on the
+   * server, files untouched). `turn.dshSeq` is the mux seq of the turn that
+   * completed BEFORE the selected turn (stamped on the turn's user message),
+   * so forking at it keeps exactly the turns before the selection.
+   *
+   * On success the backend migrates the tab's DSH mapping / mux route /
+   * translator / seq watermark to the child (same stdinId keeps streaming),
+   * so here we only truncate the local memory view — no process kill, no
+   * listener churn. Summarize forks too, keeping the backend context in sync
+   * with the truncated UI.
+   */
+  const executeDshForkRewind = useCallback(async (
+    tid: string,
+    turn: Turn,
+    action: RewindAction,
+    state: ReturnType<typeof getActiveTabState>,
+  ) => {
+    if (action === 'restore_code') {
+      // Defensive: the panel disables it for DSH (no checkpoint layer).
+      showToast(t('rewind.dsh.noFileRollback'), 'error');
+      return;
+    }
+    const stdinId = state.sessionMeta.stdinId;
+    if (!stdinId) {
+      showToast(t('rewind.dsh.noSession'), 'error');
+      return;
+    }
+    if (turn.dshSeq === undefined || turn.dshSeq <= 0) {
+      // First turn (nothing completed before it) or a turn whose predecessor
+      // never produced a turn/end anchor (killed mid-turn, disk-loaded
+      // history) — DSH cannot cut there.
+      showToast(t('rewind.dsh.forkUnavailable'), 'error');
+      return;
+    }
+    const atSeq = turn.dshSeq;
+    let newSid = '';
+    try {
+      newSid = await bridge.dshForkSession(stdinId, atSeq);
+    } catch (err) {
+      console.error('[useRewind] dshForkSession failed:', err);
+      const raw = String(err);
+      // fork-unavailable: atSeq landed inside a still-open turn (or the
+      // session has no completed turn) — surface the dedicated hint.
+      const friendly = /fork-unavailable|not completed the turn|no completed turn/i.test(raw)
+        ? t('rewind.dsh.forkUnavailable')
+        : t('rewind.dsh.forkFailed').replace('{err}', raw);
+      showToast(friendly, 'error');
+      return;
+    }
+    debugLog('rewind', 'DSH fork ok', { stdinId, atSeq, newSid, turn: turn.index });
+
+    // Grab the original prompt BEFORE truncating (restored to the input box).
+    const originalUserText = state.messages[turn.startMsgIdx]?.content || '';
+
+    // Local memory truncation — reuses the claude-path primitive.
+    useChatStore.getState().rewindToTurn(tid, turn.startMsgIdx);
+    useChatStore.getState().setInputDraft(tid, originalUserText);
+    // The child session's last completed turn ends exactly at the fork
+    // boundary — re-seed the anchor so a next user message sent BEFORE the
+    // child's first result still carries a correct fork point.
+    useChatStore.getState().setSessionMeta(tid, { pendingDshSeq: atSeq });
+    useChatStore.getState().setSessionStatus(tid, 'idle');
+
+    // Transcript action card (same pattern as the claude path); summarize
+    // additionally compresses the discarded turns into a summary block.
+    let content = t('rewind.dsh.success');
+    if (action === 'summarize') {
+      const summaryParts: string[] = [];
+      for (const m of state.messages.slice(turn.startMsgIdx)) {
+        if (m.role === 'user' && m.content) {
+          summaryParts.push(`**User:** ${m.content.slice(0, 200)}${m.content.length > 200 ? '…' : ''}`);
+        } else if (m.role === 'assistant' && m.type === 'text' && m.content) {
+          summaryParts.push(`**Claude:** ${m.content.slice(0, 300)}${m.content.length > 300 ? '…' : ''}`);
+        } else if (m.type === 'tool_use' && m.toolName) {
+          const fp = m.toolInput?.file_path || m.toolInput?.command || '';
+          summaryParts.push(`**${m.toolName}:** ${String(fp).slice(0, 100)}`);
+        }
+      }
+      const summaryHeader = t('rewind.summaryTitle')
+        .replace('{from}', String(turn.index))
+        .replace('{to}', String(turns.length));
+      content = `**${summaryHeader}**\n\n${summaryParts.join('\n\n')}\n\n${t('rewind.dsh.success')}`;
+    }
+    useChatStore.getState().addMessage(tid, {
+      id: generateMessageId(),
+      role: 'system',
+      type: 'text',
+      content,
+      commandType: 'action',
+      commandData: { action: 'rewind', turnIndex: turn.index, mode: `dsh_fork:${action}` },
+      timestamp: Date.now(),
+    });
+    showToast(t('rewind.dsh.success'), 'success');
+  }, [turns.length]);
+
+  /**
    * Execute rewind with a specific action.
    * All actions restore the user's original input text to the input box.
    */
@@ -112,6 +212,19 @@ export function useRewind() {
     // Guard: validate turn index
     if (turn.startMsgIdx < 0 || turn.startMsgIdx > state.messages.length) {
       console.error('[useRewind] Invalid turn startMsgIdx:', turn.startMsgIdx);
+      return;
+    }
+
+    // T02: deepseek backend — fork-style rewind (see executeDshForkRewind).
+    // Prefer the session's own origin over the global setting (survives a
+    // backend switch mid-app); fresh tabs fall back to cliBackend. Claude /
+    // codex keep the legacy checkpoint path below, completely untouched.
+    const sessionBackend = state.sessionMeta.sessionOrigin
+      || state.sessionMeta.snapshotCliBackend
+      || useSettingsStore.getState().cliBackend;
+    if (sessionBackend === 'deepseek') {
+      await executeDshForkRewind(tid, turn, action, state);
+      saveToTab();
       return;
     }
 
@@ -281,7 +394,7 @@ export function useRewind() {
 
     // Save to cache
     saveToTab();
-  }, [killProcess, resetSession, saveToTab, turns.length]);
+  }, [killProcess, resetSession, saveToTab, turns.length, executeDshForkRewind]);
 
   return { turns, showRewind, canRewind, executeRewind };
 }

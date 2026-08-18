@@ -38,6 +38,8 @@ import { parseTurns, relativeTime, type Turn } from '../../lib/turns';
 import { ConfirmDialog } from '../shared/ConfirmDialog';
 import { useTokenSpeedStore } from '../../stores/tokenSpeedStore';
 import { scheduleCompactTimeoutCheck } from '../../hooks/useStreamProcessor';
+// T03: 大会话分页——滚到顶部时向上取更早的历史页
+import { loadOlderHistoryPages } from '../../lib/session-disk-load';
 
 /** Shared plan panel toggle — used by ChatPanel (panel) and InputBar (button) */
 export const usePlanPanelStore = create<{
@@ -440,6 +442,10 @@ function CliBackendToggle() {
   const [open, setOpen] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<'claude' | 'codex' | 'deepseek' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  // G3: 各后端 CLI 安装状态（true=已装 / false=未装 / null=未知或探测中）。
+  const [installStatus, setInstallStatus] = useState<Record<'claude' | 'codex' | 'deepseek', boolean | null>>({
+    claude: true, codex: null, deepseek: null,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -450,19 +456,34 @@ function CliBackendToggle() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  // G3: 下拉打开时异步探测安装状态；未安装的选项显示"⚠ 未安装"但仍可点击
+  // （切换后首条消息由 G1 的友好错误引导安装）。claude 视为已装；探测失败
+  // 保持 null（不显示徽章），避免把未知误标成未安装。
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const apply = (b: 'codex' | 'deepseek', installed: boolean) => {
+      if (!cancelled) setInstallStatus((m) => ({ ...m, [b]: installed }));
+    };
+    bridge.checkCodexCli().then((s) => apply('codex', s.installed)).catch(() => {});
+    bridge.checkDshCli().then((s) => apply('deepseek', s.installed)).catch(() => {});
+    return () => { cancelled = true; };
+  }, [open]);
+
   const label = (b: string) =>
     b === 'codex' ? 'Codex' : b === 'deepseek' ? 'DeepSeek' : 'Claude';
 
   return (
     <div ref={ref} className="relative">
+      {/* G3: 字号 9px→11px 提升可读性；tooltip 改用语义准确的 switchBackend */}
       <button
         onClick={() => setOpen(!open)}
-        className={`flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded
+        className={`flex items-center gap-0.5 text-[11px] px-1.5 py-0.5 rounded
           transition-smooth hover:bg-bg-tertiary cursor-pointer
           ${cliBackend === 'codex'
             ? 'text-accent bg-accent/10'
             : 'text-text-tertiary'}`}
-        title={t('conv.convert')}
+        title={t('conv.switchBackend')}
       >
         <span>{label(cliBackend)}</span>
         <svg
@@ -494,6 +515,10 @@ function CliBackendToggle() {
                 <span>{t('conv.convertTo', { target: label(b) })}</span>
                 {isCurrent && (
                   <span className="text-[10px] opacity-60">{t('conv.convertCurrent')}</span>
+                )}
+                {/* G3: 未安装警告徽章——不禁用点击，切换后由 G1 友好错误引导安装 */}
+                {!isCurrent && installStatus[b] === false && (
+                  <span className="text-[10px] text-amber-500">{t('conv.notInstalled')}</span>
                 )}
               </button>
             );
@@ -1014,6 +1039,25 @@ const StreamingIndicator = memo(function StreamingIndicator({
 });
 
 /**
+ * T03: Virtuoso Header rendered as a STABLE module-level component (same
+ * reasoning as ChatFooter below — an inline `Header: () => …` would be a new
+ * component type every ChatPanel render and react-virtuoso would remount it).
+ * It shows a light top indicator while an older-history page is being fetched
+ * during pagination, and nothing otherwise (returns null → zero height).
+ */
+function ChatHistoryHeader() {
+  const t = useT();
+  const loading = useActiveTab((tb) => tb.sessionMeta.historyLoadingMore === true);
+  if (!loading) return null;
+  return (
+    <div className="flex items-center justify-center gap-2 py-2 text-xs text-text-tertiary select-none">
+      <span className="inline-block w-3 h-3 rounded-full border border-text-tertiary border-t-transparent animate-spin" />
+      <span>{t('chat.loadingEarlier')}</span>
+    </div>
+  );
+}
+
+/**
  * Virtuoso Footer rendered as a STABLE module-level component. It sources its
  * own data from the stores instead of receiving ChatPanel props, so the
  * `components` object can be memoized once. This matters: an inline
@@ -1116,7 +1160,8 @@ export function ChatPanel() {
   // Stable Virtuoso components object — see ChatFooter. Memoized once so
   // react-virtuoso never remounts the Footer (which would reset the timer
   // state in CyclingThinkingText / SleepingZzz on every streaming re-render).
-  const virtuosoComponents = useMemo(() => ({ Footer: ChatFooter }), []);
+  // T03: Header carries the pagination loading indicator (ChatHistoryHeader).
+  const virtuosoComponents = useMemo(() => ({ Header: ChatHistoryHeader, Footer: ChatFooter }), []);
 
   // Agent activity for floating button badge
   const agents = useAgentStore((s) => s.agents);
@@ -1172,6 +1217,51 @@ export function ChatPanel() {
     }
     return items;
   }, [messages]);
+
+  // --- T03: paginated history (tail-first loads, prepend older pages) ---
+  // Virtuoso prepend anchor: firstItemIndex starts at a large base and is
+  // decremented by the number of display items a page prepend added — the
+  // documented react-virtuoso pattern that keeps existing items' virtual
+  // indices (and therefore the scroll position) stable instead of jumping to
+  // the top. Initialized from historyPrepended so a remount of an already
+  // paginated tab (cache restore) starts consistent.
+  const initialPrepended =
+    useChatStore.getState().getTab(selectedSessionId ?? '')?.sessionMeta.historyPrepended ?? 0;
+  const [firstItemIndex, setFirstItemIndex] = useState(1_000_000 - initialPrepended);
+  const prevDisplayLenRef = useRef<number | null>(null);
+  const prependInFlightRef = useRef(false);
+  const expectPrependRef = useRef(false);
+  useEffect(() => {
+    const len = displayItems.length;
+    const prev = prevDisplayLenRef.current;
+    prevDisplayLenRef.current = len;
+    if (prev === null || !expectPrependRef.current) return;
+    expectPrependRef.current = false;
+    // Delta in DISPLAY items (tool-group folding can make it differ from the
+    // message count) — exactly what firstItemIndex must shift by.
+    const delta = len - prev;
+    if (delta > 0) setFirstItemIndex((cur) => cur - delta);
+  }, [displayItems]);
+
+  // Reached the list top → fetch the next older page (gated by the store:
+  // hasMore + not already loading; loadOlderHistoryPages re-checks both).
+  const handleStartReached = useCallback(() => {
+    if (!selectedSessionId || prependInFlightRef.current) return;
+    const meta = useChatStore.getState().getTab(selectedSessionId)?.sessionMeta;
+    if (!meta?.historyHasMore || meta.historyLoadingMore) return;
+    prependInFlightRef.current = true;
+    expectPrependRef.current = true;
+    void loadOlderHistoryPages(selectedSessionId)
+      .then((prepended) => {
+        // Empty page (nothing renderable) → no displayItems change → the
+        // effect above won't run; clear the expectation so a later unrelated
+        // length change isn't misread as a prepend.
+        if (prepended === 0) expectPrependRef.current = false;
+      })
+      .finally(() => {
+        prependInFlightRef.current = false;
+      });
+  }, [selectedSessionId]);
 
   // Collect plan review messages from the session (created by ExitPlanMode)
   const planMessages = useMemo(
@@ -1942,6 +2032,11 @@ export function ChatPanel() {
           ref={virtuosoRef}
           className="flex-1 chat-scroll-container"
           data={displayItems}
+          // T03: prepend anchor for paginated history — see firstItemIndex
+          // state above. startReached pulls the next older page when the
+          // session was tail-loaded and hasMore is set.
+          firstItemIndex={firstItemIndex}
+          startReached={handleStartReached}
           // Disabled on purpose — see the displayItems layout effect above.
           // Built-in follow scrolls to the LAST item's bottom (no streaming
           // Footer) and races the rAF true-bottom pin into up/down jitter.
@@ -2179,8 +2274,11 @@ async function startDraftSession(folderPath: string) {
     if (!session.session_id.startsWith('desk_')) {
       bridge.trackSession(session.session_id).catch(() => {});
     }
-  } catch {
-    // Pre-warm failed — InputBar will spawn on first message instead
+  } catch (e) {
+    // G6: 预热是可选优化，失败保持静默 —— InputBar 会在首条消息时重新 spawn；
+    // 届时若后端确实不可用，由 G1 的错误分类（error.dshNotInstalled 等）给出
+    // 友好引导。这里仅留一条 warn 便于诊断预热失败原因。
+    console.warn('[LITTLECLAUDE] pre-warm failed (InputBar will spawn on first message):', e);
   }
 }
 

@@ -19,6 +19,52 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.2.0',
+    date: '2026-08-16',
+    highlights: {
+      zh: ['三 harness 时代成型：跨引擎任务交接、DeepSeek 会话回滚、大会话秒开、DeepSeek 后端 provider 一等公民、热更新签名链'],
+      en: ['Three-harness era: cross-engine task handoff, DeepSeek session rewind, instant large-session loading, first-class DeepSeek providers, signed web updates'],
+    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'Features' },
+        items: {
+          zh: [
+            '跨 harness 任务交接：切换引擎（Claude Code ↔ Codex ↔ DeepSeek）时自动携带历史——近期轮次预算内联 + 交接简报落盘（.tokenicode/handoff/），DeepSeek 会话历史首次可完整带出',
+            'DeepSeek 会话回滚：RewindPanel 支持按轮次 fork 回退（原会话保留、新会话继续）；文件不回滚有明确提示',
+            '大会话分页加载：首屏只解析尾部 300 条，向上滚动按需加载更早历史——50MB 会话打开从数秒冻结变为即开',
+            'DeepSeek 后端 provider 一等公民：provider 系统支持 deepseek 后端（预设/表单/Tab），启动会话时自动注入 API 密钥与模型',
+            '前端热更新签名链：ed25519 签名强制校验，无签名/伪造清单不再被应用',
+            '「运行环境」补 Codex CLI / DeepSeek Harness 一键安装；dsh 支持一键更新',
+          ],
+          en: [
+            'Cross-harness task handoff: switching engines (Claude Code ↔ Codex ↔ DeepSeek) carries your history — recent turns inline within budget + a handoff brief on disk (.tokenicode/handoff/); DeepSeek session history can now be fully carried out',
+            'DeepSeek session rewind: RewindPanel forks back to any completed turn (original session preserved); explicit notice that files are not rolled back',
+            'Paginated session loading: first paint parses only the newest 300 messages, older history loads on scroll-up — a 50MB session opens instantly instead of freezing',
+            'First-class DeepSeek backend providers: the provider system supports the deepseek backend (presets/form/tab) with API key & model auto-injection at session start',
+            'Signed web hot-updates: ed25519 signature mandatory — unsigned or forged manifests are rejected',
+            'Runtime checklist now installs Codex CLI / DeepSeek Harness one-click; dsh one-click update',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            '修复 DeepSeek 后端发送消息弹 cmd 黑窗',
+            '修复 DeepSeek 会话后端接线断裂：追问/审批应答/停止/插话此前全部失效，现已恢复',
+            '新用户默认后端错配闭环：未装 dsh 自动回落 Claude + 友好安装引导；后端切换器重做（安装状态可见）',
+          ],
+          en: [
+            'Fixed the cmd console window popping up when sending messages on the DeepSeek backend',
+            'Fixed DeepSeek session backend wiring: follow-ups, permission answers, Stop and steer were all dead — now restored',
+            'New-user default-backend mismatch fixed: falls back to Claude when dsh is missing, with friendly install guidance; backend switcher redone with install status',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.1.8',
     date: '2026-08-16',
     highlights: {

@@ -73,6 +73,94 @@ async fn check_cli_item() -> PrerequisiteItem {
     }
 }
 
+async fn check_codex_item() -> PrerequisiteItem {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::commands::cli_manage::check_codex_cli(),
+    )
+    .await
+    {
+        Ok(Ok(status)) => PrerequisiteItem {
+            key: "codex-cli".into(),
+            name: "Codex CLI".into(),
+            description: "OpenAI Codex 智能体后端 (可选)".into(),
+            status: if status.installed {
+                "ok".into()
+            } else {
+                "missing".into()
+            },
+            version: status.version,
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+        Ok(Err(e)) => PrerequisiteItem {
+            key: "codex-cli".into(),
+            name: "Codex CLI".into(),
+            description: "OpenAI Codex 智能体后端 (可选)".into(),
+            status: "missing".into(),
+            version: Some(e),
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+        Err(_) => PrerequisiteItem {
+            key: "codex-cli".into(),
+            name: "Codex CLI".into(),
+            description: "OpenAI Codex 智能体后端 (可选)".into(),
+            status: "missing".into(),
+            version: Some("检测超时".into()),
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+    }
+}
+
+async fn check_dsh_item() -> PrerequisiteItem {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::commands::cli_manage::check_dsh_cli(),
+    )
+    .await
+    {
+        Ok(Ok(status)) => PrerequisiteItem {
+            key: "dsh-cli".into(),
+            name: "DeepSeek Harness (dsh)".into(),
+            description: "DeepSeek 官方智能体框架，内置 DeepSeek 模型 (可选)".into(),
+            status: if status.installed {
+                "ok".into()
+            } else {
+                "missing".into()
+            },
+            version: status.version,
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+        Ok(Err(e)) => PrerequisiteItem {
+            key: "dsh-cli".into(),
+            name: "DeepSeek Harness (dsh)".into(),
+            description: "DeepSeek 官方智能体框架，内置 DeepSeek 模型 (可选)".into(),
+            status: "missing".into(),
+            version: Some(e),
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+        Err(_) => PrerequisiteItem {
+            key: "dsh-cli".into(),
+            name: "DeepSeek Harness (dsh)".into(),
+            description: "DeepSeek 官方智能体框架，内置 DeepSeek 模型 (可选)".into(),
+            status: "missing".into(),
+            version: Some("检测超时".into()),
+            installable: true,
+            required: false,
+            manual_url: None,
+        },
+    }
+}
+
 async fn check_git_item() -> Option<PrerequisiteItem> {
     #[cfg(target_os = "windows")]
     {
@@ -307,18 +395,22 @@ pub async fn check_prerequisites() -> Result<Vec<PrerequisiteItem>, String> {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(25),
         async {
-            let (cli, git, node, auth, ollama) = tokio::join!(
+            let (cli, git, node, auth, ollama, codex, dsh) = tokio::join!(
                 check_cli_item(),
                 check_git_item(),
                 check_node_item(),
                 check_auth_item(),
                 check_ollama_item(),
+                check_codex_item(),
+                check_dsh_item(),
             );
 
-            let mut items = vec![cli, node, auth, ollama];
+            // Codex/dsh right after Claude CLI — the three agent harnesses
+            // belong together at the top of the runtime checklist.
+            let mut items = vec![cli, codex, dsh, node, auth, ollama];
             if let Some(g) = git {
-                // Insert Git after CLI, before Node
-                items.insert(1, g);
+                // Insert Git after the harness CLIs, before Node
+                items.insert(3, g);
             }
             items
         },
@@ -417,6 +509,10 @@ pub async fn install_prerequisite(
         "ollama" => {
             Err("Ollama is not auto-installable. Please download from https://ollama.com/download".into())
         }
+        // Agent harness CLIs — reuse the CLI-management installers (npm with
+        // local-Node bootstrap + China mirror fallback).
+        "codex-cli" => crate::commands::cli_manage::install_codex_cli(app.clone()).await,
+        "dsh-cli" => crate::commands::cli_manage::install_dsh_cli(app.clone()).await,
         _ => Err(format!("Unknown prerequisite: {}", key)),
     };
 

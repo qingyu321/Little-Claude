@@ -1,0 +1,44 @@
+{
+  "id": "01-cross-harness-history",
+  "name": "01-cross-harness-history",
+  "title": "跨 harness 会话历史转换层",
+  "description": "统一的跨后端会话迁移系统：结构化历史翻译（thinking/工具/附件/usage）、长度预算与摘要降级、显式迁移状态 UI、Codex/DSH 会话持久化进列表",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P1",
+  "creator": "dsh-harness-agent",
+  "assignee": "dsh-harness-agent",
+  "createdAt": "2026-08-18",
+  "completedAt": "2026-08-16",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": " | v1.2.0 实现完成",
+  "meta": {}
+}

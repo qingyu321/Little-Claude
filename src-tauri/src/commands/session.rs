@@ -115,10 +115,11 @@ pub async fn start_claude_session(
     // ─── CLI Backend routing ────────────────────────────────────────────
     let mut cli_backend = params.cli_backend.as_deref().unwrap_or("claude").to_string();
 
-    // Only route to Codex if the provider explicitly declares cli_backend="codex".
-    // api_format alone does NOT force Codex — some OpenAI-format endpoints also
-    // accept Anthropic-format requests, and users should be able to choose Claude CLI.
-    if cli_backend != "codex" {
+    // Only route to a non-default backend if the provider explicitly declares
+    // it: cli_backend="codex" or (T05) cli_backend="deepseek". api_format alone
+    // does NOT force a backend — some OpenAI-format endpoints also accept
+    // Anthropic-format requests, and users should be able to choose Claude CLI.
+    if cli_backend != "codex" && cli_backend != "deepseek" {
         if let Some(ref provider_id) = params.provider_id {
             if let Ok(providers_file) = crate::commands::provider::load_providers() {
                 if let Some(provider) = providers_file.providers.iter().find(|p| p.id == *provider_id) {
@@ -128,6 +129,15 @@ pub async fn start_claude_session(
                             provider.name
                         );
                         cli_backend = "codex".to_string();
+                    } else if provider.cli_backend.as_deref() == Some("deepseek") {
+                        // T05: same rule for the DSH backend — a provider that
+                        // declares cli_backend="deepseek" rides the dsh service
+                        // even when the header/backend param still says claude.
+                        eprintln!(
+                            "[LITTLECLAUDE:session] Routing to deepseek backend (provider '{}' declares cli_backend='deepseek')",
+                            provider.name
+                        );
+                        cli_backend = "deepseek".to_string();
                     }
                 }
             }
@@ -1729,6 +1739,122 @@ pub async fn kill_session(
     Ok(())
 }
 
+/// T02: fork-style rewind for the DSH (deepseek) backend.
+///
+/// Claude's rewind trio (checkpoint + `rewind_files` + JSONL truncation) is
+/// Claude-CLI private; DSH's only session-level rollback is `session.fork` —
+/// copy events at a completed-turn boundary into a new child session while
+/// the source session stays on the server. This command:
+///   1. resolves the tab's current DSH session id (`get_deepseek_session`),
+///   2. forks at `at_seq` (the seq of the turn's last event — captured by
+///      `DshTranslator.last_seq`, surfaced on the result event as `dsh_seq`,
+///      and handed back here by the frontend via `Turn.dshSeq`),
+///   3. re-points the tab at the child: deepseek_sessions mapping plus the
+///      service's mux route / translator / seq watermark entries are MOVED
+///      from the old sid to the new sid,
+/// and returns the child's DSH session id.
+///
+/// Seq watermark note: the child's event log is a PREFIX of the source's, so
+/// the source's high-water mark sits AHEAD of the child's tail (a rewind
+/// forks below the latest turn by definition). Copying the watermark verbatim
+/// would make route_mux_frames drop the child's first fresh frames as
+/// "stale". Seed it with `at_seq` instead (the fork boundary — the child's
+/// copied tail is >= it): replayed copied frames dedupe, fresh child frames
+/// (seq > boundary) pass.
+#[tauri::command]
+pub async fn dsh_fork_session(
+    app: AppHandle,
+    process_mgr: State<'_, ProcessManager>,
+    session_id: String,
+    at_seq: u64,
+) -> Result<String, String> {
+    use crate::commands::dsh_service::unary;
+
+    // Only DSH service-mode sessions have a remote session to fork.
+    if process_mgr.get_backend(&session_id).await.as_deref() != Some("deepseek") {
+        return Err(format!(
+            "dsh_fork_session: session {} is not a deepseek session",
+            session_id
+        ));
+    }
+    let dsh_sid = process_mgr
+        .get_deepseek_session(&session_id)
+        .await
+        .ok_or_else(|| format!("No DSH session for this tab: {}", session_id))?;
+    // The cwd rides along for R11 orphan-rebuild parity (the fork itself
+    // inherits the source workspace server-side).
+    let cwd = process_mgr.get_deepseek_session_cwd(&session_id).await;
+
+    let dsh_mgr = app.state::<crate::commands::dsh_service::DshServiceManager>();
+    let service = dsh_mgr.ensure().await?;
+
+    // Fork RPC — atSeq anchors the cut at the first completed turn/end with
+    // seq >= at_seq; DSH copies events up to the next turn/start into the
+    // child. An at_seq inside an unfinished turn answers `fork-unavailable`.
+    let forked = unary(
+        &service.base_url,
+        "session.fork",
+        serde_json::json!({ "sessionId": dsh_sid, "atSeq": at_seq }),
+    )
+    .await
+    .map_err(|e| format!("dsh session.fork failed: {}", e))?;
+    let new_sid = forked
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "dsh session.fork returned no sessionId".to_string())?
+        .to_string();
+
+    // Re-point the tab at the child. insert() overwrites the old mapping —
+    // the source session stays alive server-side, this LC tab simply stops
+    // addressing it.
+    process_mgr
+        .insert_deepseek_session(&session_id, new_sid.clone(), cwd)
+        .await;
+    {
+        // MOVE the route: keeping the old sid routed would double-emit any
+        // late source-session frames into the same tab.
+        let mut routes = service.session_routes.lock().await;
+        match routes.remove(&dsh_sid) {
+            Some(route) => {
+                routes.insert(new_sid.clone(), route);
+            }
+            None => {
+                routes.insert(
+                    new_sid.clone(),
+                    crate::commands::dsh_service::DshRoute {
+                        stdin_id: session_id.clone(),
+                        auto_allow: false,
+                    },
+                );
+            }
+        }
+    }
+    {
+        // Translator: per-turn fields clear on the child's first turn/start;
+        // keeping the instance preserves model attribution across the fork.
+        let mut ts = service.translators.lock().await;
+        if let Some(t) = ts.remove(&dsh_sid) {
+            ts.insert(new_sid.clone(), t);
+        }
+    }
+    {
+        // Seq watermark: seed at the fork boundary — see the fn-level note.
+        let mut seqs = service.last_seqs.lock().await;
+        seqs.remove(&dsh_sid);
+        seqs.insert(new_sid.clone(), at_seq);
+    }
+
+    log::info!(
+        "[dsh:fork] {} -> {} (at_seq={}, tab={})",
+        dsh_sid,
+        new_sid,
+        at_seq,
+        session_id
+    );
+    Ok(new_sid)
+}
+
 /// TK-329: List all active stdinIds from ProcessManager.
 /// Frontend uses this after refresh to detect and clean up orphaned backend processes.
 #[tauri::command]
@@ -2514,6 +2640,347 @@ pub async fn load_session(path: String) -> Result<Vec<Value>, String> {
     .map_err(|e| format!("load_session task panicked: {}", e))?
 }
 
+// ---------------------------------------------------------------------------
+// T03: paginated session loading (tail-first) for huge histories.
+//
+// Opening a tens-of-MB JSONL used to be a triple hit: load_session parsed the
+// WHOLE file into Vec<Value>, shipped it all over IPC, and the frontend parsed
+// it again — freezing the UI. load_session_tail instead reads only the last
+// `limit` valid lines, and load_session_more walks backwards page by page via
+// a byte cursor (offset of the earliest loaded line), so a 50 MB session's
+// first screen costs one ~300-line parse regardless of file size.
+//
+// No-dup / no-gap contract: every call only consumes bytes strictly below its
+// `region_end`; the returned cursor is the start offset of the earliest line
+// it loaded, and the next call scans `[0, cursor)` — pages never overlap and
+// never skip valid lines (invalid/oversized lines are skipped exactly like
+// load_session does, but the scan still walks across them).
+// ---------------------------------------------------------------------------
+
+/// T03: max file size the paginated loaders accept. Tail/more parse only the
+/// requested page, so this is a runaway guard against multi-GB foreign files —
+/// deliberately higher than load_session's 50 MiB cap, since opening those
+/// bigger files is the whole point of pagination.
+const MAX_PAGINATED_SESSION_BYTES: u64 = 512 * 1024 * 1024;
+
+/// T03: clamp a page request (the frontend asks for 300).
+fn clamp_page_limit(limit: usize) -> usize {
+    limit.clamp(1, 2000)
+}
+
+/// T03: resolve `<session_id, project_dir>` to the canonical JSONL path inside
+/// ~/.claude/projects. Same validation as truncate_session_history: UUID-like
+/// id check + encode_project_name keep the join inside the projects tree (no
+/// traversal); `project_dir` is the RAW path (the frontend passes the same
+/// value it feeds truncateSessionHistory via workingDirectory).
+fn resolve_claude_session_path(
+    session_id: &str,
+    project_dir: &str,
+) -> Result<std::path::PathBuf, String> {
+    fn is_uuid_like(s: &str) -> bool {
+        s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    }
+    if !is_uuid_like(session_id) {
+        return Err(format!("Invalid session_id format: {}", session_id));
+    }
+    let home = dirs::home_dir().ok_or("Cannot find home dir")?;
+    let encoded = encode_project_name(project_dir);
+    Ok(home
+        .join(".claude")
+        .join("projects")
+        .join(encoded)
+        .join(format!("{}.jsonl", session_id)))
+}
+
+/// T03: response shape for load_session_tail / load_session_more.
+/// `messages` are the parsed JSONL lines in FILE order (oldest → newest),
+/// `total_lines` is the file's physical line count (byte scan incl. invalid
+/// lines — a UI hint only), `cursor` is the byte offset of the earliest loaded
+/// line (feed back into load_session_more), `has_more` is false once the scan
+/// reached the file start (any remaining prefix was checked and holds no
+/// loadable line).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPage {
+    pub messages: Value,
+    pub total_lines: u64,
+    pub cursor: u64,
+    pub has_more: bool,
+}
+
+/// T03: parse one JSONL line; empty / oversized / corrupt lines yield None
+/// (same skip semantics as load_session). Trailing '\r' (Windows line endings)
+/// is legal JSON whitespace and needs no stripping.
+fn parse_jsonl_line(bytes: &[u8], max_bytes: usize) -> Option<Value> {
+    if bytes.len() > max_bytes || bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    serde_json::from_slice::<Value>(bytes).ok()
+}
+
+/// T03: prepend `chunk` to the partial-head-line carry, honouring the
+/// per-line cap — once a line exceeds it we discard its bytes but keep
+/// scanning for its start (the line is invalid, not lost-and-forgotten).
+fn prepend_to_carry(chunk: &[u8], carry: &mut Vec<u8>, overlong: &mut bool, max_bytes: usize) {
+    if *overlong {
+        return;
+    }
+    if carry.len() + chunk.len() > max_bytes {
+        *overlong = true;
+        carry.clear();
+        return;
+    }
+    let mut merged = Vec::with_capacity(chunk.len() + carry.len());
+    merged.extend_from_slice(chunk);
+    merged.extend_from_slice(carry);
+    *carry = merged;
+}
+
+/// T03: count the file's physical lines (streaming byte scan, no JSON parse).
+/// Includes empty/corrupt lines — drives the "N lines" UI hint, not pagination
+/// correctness (that rides cursor/has_more).
+fn count_jsonl_lines(path: &std::path::Path, file_len: u64) -> Result<u64, String> {
+    use std::io::Read;
+    if file_len == 0 {
+        return Ok(0);
+    }
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Failed to open session: {}", e))?;
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut count: u64 = 0;
+    let mut last_byte: u8 = 0;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read session: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        count += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+        last_byte = buf[n - 1];
+    }
+    if last_byte != b'\n' {
+        count += 1; // trailing line without a final newline
+    }
+    Ok(count)
+}
+
+/// T03: shared backward page reader for load_session_tail / load_session_more.
+/// Scans `[0, region_end)` backwards from `region_end`, collecting up to
+/// `limit` valid lines newest-first, then returns them in file order plus the
+/// byte offset of the earliest loaded line and whether the scan consumed the
+/// whole region down to offset 0.
+fn read_jsonl_page_backward(
+    path: &std::path::Path,
+    region_end: u64,
+    limit: usize,
+) -> Result<(Vec<Value>, u64, bool), String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const MAX_LINE_BYTES: usize = 8 * 1024 * 1024; // same per-line cap as load_session
+    const CHUNK: u64 = 512 * 1024; // backward read window per iteration
+    const MAX_SCAN: u64 = 256 * 1024 * 1024; // per-call scan budget (corrupt-file guard)
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open session: {}", e))?;
+
+    // T03: empty region — nothing before the cursor (defensive: the frontend
+    // gates on hasMore, and load_session_more clamps stale cursors).
+    if region_end == 0 {
+        return Ok((Vec::new(), 0, false));
+    }
+
+    // Known tail bytes of the line whose start hasn't been located yet (it
+    // stretches from some offset < `end` to a terminator already identified).
+    // Never contains '\n'; discarded once it exceeds MAX_LINE_BYTES.
+    let mut carry: Vec<u8> = Vec::new();
+    let mut carry_overlong = false;
+
+    let mut end = region_end; // lower frontier of the still-unscanned region
+    let mut scanned: u64 = 0;
+    // True only once EVERY byte down to offset 0 was examined. A limit-hit
+    // break leaves it false even when the breaking chunk touched offset 0 —
+    // the not-yet-parsed head line may still hold history.
+    let mut reached_start = false;
+    // Collected lines, newest-first: (start_offset, json).
+    let mut collected: Vec<(u64, Value)> = Vec::with_capacity(limit.min(2048));
+
+    while collected.len() < limit && end > 0 && scanned < MAX_SCAN {
+        let take = CHUNK.min(end).min(MAX_SCAN - scanned);
+        let start = end - take;
+        let mut buf = vec![0u8; take as usize];
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| format!("Failed to seek session: {}", e))?;
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("Failed to read session: {}", e))?;
+        scanned += take;
+
+        let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+            // No boundary in this chunk — it all extends the carry line.
+            prepend_to_carry(&buf, &mut carry, &mut carry_overlong, MAX_LINE_BYTES);
+            end = start;
+            continue;
+        };
+
+        // Tail line: buf[last_nl+1..] ++ carry (its terminator was already known).
+        if !carry_overlong {
+            let mut content = Vec::with_capacity(buf.len() - last_nl - 1 + carry.len());
+            content.extend_from_slice(&buf[last_nl + 1..]);
+            content.extend_from_slice(&carry);
+            if let Some(v) = parse_jsonl_line(&content, MAX_LINE_BYTES) {
+                collected.push((start + last_nl as u64 + 1, v));
+            }
+        }
+        carry.clear();
+        carry_overlong = false;
+        if collected.len() >= limit {
+            end = start;
+            break;
+        }
+
+        // Complete middle lines between newlines inside buf[..last_nl],
+        // rightmost (newest) first.
+        let nls: Vec<usize> = buf[..last_nl]
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .map(|(i, _)| i)
+            .collect();
+        let mut prev_end = last_nl;
+        let mut hit_limit = false;
+        for &p in nls.iter().rev() {
+            if collected.len() >= limit {
+                hit_limit = true;
+                break;
+            }
+            if let Some(v) = parse_jsonl_line(&buf[p + 1..prev_end], MAX_LINE_BYTES) {
+                collected.push((start + p as u64 + 1, v));
+            }
+            prev_end = p;
+        }
+        if hit_limit {
+            end = start;
+            break;
+        }
+
+        // Head piece buf[..prev_end]: complete only when the chunk touched
+        // offset 0 (then it IS the file's first line).
+        if start == 0 {
+            if collected.len() < limit {
+                if let Some(v) = parse_jsonl_line(&buf[..prev_end], MAX_LINE_BYTES) {
+                    collected.push((0, v));
+                }
+                reached_start = true; // head piece examined → region fully consumed
+            }
+            end = 0;
+            break;
+        }
+        prepend_to_carry(&buf[..prev_end], &mut carry, &mut carry_overlong, MAX_LINE_BYTES);
+        end = start;
+    }
+
+    // T03: the scan can reach offset 0 still carrying a partial head line when
+    // the final chunk held no newline at all (e.g. a single-line file/region)
+    // — that carry IS the first line; finalize it here.
+    if end == 0 && collected.len() < limit && (carry_overlong || !carry.is_empty()) {
+        if !carry_overlong {
+            if let Some(v) = parse_jsonl_line(&carry, MAX_LINE_BYTES) {
+                collected.push((0, v));
+            }
+        }
+        reached_start = true; // every byte of the region was examined
+    }
+
+    // newest-first → file order; earliest loaded offset becomes the cursor.
+    let earliest = collected.last().map(|(off, _)| *off);
+    collected.reverse();
+    let messages: Vec<Value> = collected.into_iter().map(|(_, v)| v).collect();
+    let (cursor, has_more) = match earliest {
+        // Scanned to offset 0 → the prefix was examined: no valid line left.
+        Some(off) => (off, !reached_start && off > 0),
+        // Nothing loaded: either the file/region is exhausted…
+        None if reached_start => (0, false),
+        // …or the scan budget ran out — leave a resumable cursor.
+        None => (end, true),
+    };
+    Ok((messages, cursor, has_more))
+}
+
+/// T03: load only the TAIL of a session history — the first screen of a huge
+/// JSONL without parsing/IPC-ing the whole file (that's load_session's job for
+/// small histories). Returns the last `limit` valid lines plus a byte `cursor`
+/// (offset of the earliest loaded line) for load_session_more.
+#[tauri::command]
+pub async fn load_session_tail(
+    session_id: String,
+    project_dir: String,
+    limit: usize,
+) -> Result<SessionPage, String> {
+    let path = resolve_claude_session_path(&session_id, &project_dir)?;
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to stat session file: {}", e))?;
+    if meta.len() > MAX_PAGINATED_SESSION_BYTES {
+        return Err(format!(
+            "Session file too large to paginate ({} bytes, max {} MiB)",
+            meta.len(),
+            MAX_PAGINATED_SESSION_BYTES / (1024 * 1024)
+        ));
+    }
+    let limit = clamp_page_limit(limit);
+    let file_len = meta.len();
+    // H5 parity: heavy IO/parse runs on the blocking pool, never the worker.
+    tokio::task::spawn_blocking(move || -> Result<SessionPage, String> {
+        let (messages, cursor, has_more) = read_jsonl_page_backward(&path, file_len, limit)?;
+        let total_lines = count_jsonl_lines(&path, file_len)?;
+        Ok(SessionPage {
+            messages: Value::Array(messages),
+            total_lines,
+            cursor,
+            has_more,
+        })
+    })
+    .await
+    .map_err(|e| format!("load_session_tail task panicked: {}", e))?
+}
+
+/// T03: load the page BEFORE `cursor` (byte offset from a previous tail/more
+/// call), walking backwards toward the file start. A stale cursor (e.g. the
+/// file was truncated by a rewind between pages) is clamped to the current
+/// size instead of erroring.
+#[tauri::command]
+pub async fn load_session_more(
+    session_id: String,
+    project_dir: String,
+    cursor: u64,
+    limit: usize,
+) -> Result<SessionPage, String> {
+    let path = resolve_claude_session_path(&session_id, &project_dir)?;
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to stat session file: {}", e))?;
+    if meta.len() > MAX_PAGINATED_SESSION_BYTES {
+        return Err(format!(
+            "Session file too large to paginate ({} bytes, max {} MiB)",
+            meta.len(),
+            MAX_PAGINATED_SESSION_BYTES / (1024 * 1024)
+        ));
+    }
+    let limit = clamp_page_limit(limit);
+    let region_end = cursor.min(meta.len()); // T03: stale-cursor clamp (see doc)
+    let file_len = meta.len();
+    tokio::task::spawn_blocking(move || -> Result<SessionPage, String> {
+        let (messages, cursor, has_more) = read_jsonl_page_backward(&path, region_end, limit)?;
+        let total_lines = count_jsonl_lines(&path, file_len)?;
+        Ok(SessionPage {
+            messages: Value::Array(messages),
+            total_lines,
+            cursor,
+            has_more,
+        })
+    })
+    .await
+    .map_err(|e| format!("load_session_more task panicked: {}", e))?
+}
+
 /// System-injected user lines the frontend's session-loader filters out
 /// (mirror of `isSystemText` in session-loader.ts): continuation summaries,
 /// `<task-notification>` payloads, tool-definition dumps, raw "Human:" leaks.
@@ -2696,5 +3163,136 @@ pub async fn truncate_session_history(
             })?;
             Ok(Some(kept_lines))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T03: unit tests for the backward page reader's no-dup / no-gap contract.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod t03_pagination_tests {
+    use super::read_jsonl_page_backward;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TMP_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_tmp(lines: &[&str]) -> std::path::PathBuf {
+        let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "t03_test_{}_{}.jsonl",
+            std::process::id(),
+            n
+        ));
+        let mut f = std::fs::File::create(&path).expect("create tmp");
+        for l in lines {
+            f.write_all(l.as_bytes()).unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+        path
+    }
+
+    fn collect_all(path: &std::path::Path, page: usize) -> Vec<serde_json::Value> {
+        let file_len = std::fs::metadata(path).unwrap().len();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        // First page = tail of the whole file.
+        let (mut msgs, mut cursor, mut has_more) =
+            read_jsonl_page_backward(path, file_len, page).unwrap();
+        out.append(&mut msgs);
+        // Walk backwards until exhausted.
+        let mut guard = 0;
+        while has_more && guard < 1000 {
+            guard += 1;
+            let (mut m, c, hm) = read_jsonl_page_backward(path, cursor, page).unwrap();
+            // Prepend older page in front of what we already have.
+            m.append(&mut out);
+            out = m;
+            cursor = c;
+            has_more = hm;
+        }
+        assert!(!has_more, "pagination never terminated");
+        out
+    }
+
+    #[test]
+    fn tail_returns_last_n_in_file_order() {
+        let lines: Vec<String> = (0..10).map(|i| format!(r#"{{"i":{}}}"#, i)).collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let path = write_tmp(&refs);
+        let len = std::fs::metadata(&path).unwrap().len();
+
+        let (msgs, cursor, has_more) = read_jsonl_page_backward(&path, len, 3).unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["i"], 7);
+        assert_eq!(msgs[1]["i"], 8);
+        assert_eq!(msgs[2]["i"], 9);
+        assert!(has_more);
+        assert!(cursor > 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn walk_backward_is_complete_ordered_and_deduped() {
+        // 25 valid lines, page size 4 → forces multiple pages + a remainder.
+        let lines: Vec<String> = (0..25).map(|i| format!(r#"{{"i":{}}}"#, i)).collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let path = write_tmp(&refs);
+
+        let all = collect_all(&path, 4);
+        assert_eq!(all.len(), 25, "must recover every line exactly once");
+        for (idx, v) in all.iter().enumerate() {
+            assert_eq!(v["i"], idx as i64, "file order preserved at index {}", idx);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn skips_invalid_and_blank_lines() {
+        // Mix valid, corrupt, and blank lines; only the 4 valid ones survive.
+        let path = write_tmp(&[
+            r#"{"i":0}"#,
+            "not-json-at-all",
+            "",
+            r#"{"i":1}"#,
+            r#"{"broken": "#,
+            r#"{"i":2}"#,
+            "   ",
+            r#"{"i":3}"#,
+        ]);
+        let all = collect_all(&path, 2);
+        let got: Vec<i64> = all.iter().map(|v| v["i"].as_i64().unwrap()).collect();
+        assert_eq!(got, vec![0, 1, 2, 3]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn single_line_no_trailing_newline() {
+        let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("t03_test_{}_{}.jsonl", std::process::id(), n));
+        std::fs::write(&path, r#"{"only":1}"#).unwrap(); // no trailing \n
+        let all = collect_all(&path, 4);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0]["only"], 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_region_returns_nothing() {
+        let path = write_tmp(&[r#"{"i":0}"#]);
+        let (msgs, cursor, has_more) = read_jsonl_page_backward(&path, 0, 4).unwrap();
+        assert!(msgs.is_empty());
+        assert_eq!(cursor, 0);
+        assert!(!has_more);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn small_file_fits_in_one_page_has_more_false() {
+        let path = write_tmp(&[r#"{"i":0}"#, r#"{"i":1}"#]);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let (msgs, _cursor, has_more) = read_jsonl_page_backward(&path, len, 10).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(!has_more, "whole file consumed → no older history");
+        let _ = std::fs::remove_file(&path);
     }
 }

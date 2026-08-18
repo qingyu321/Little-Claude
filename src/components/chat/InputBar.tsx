@@ -10,7 +10,13 @@ import {
   type ThinkingLevel,
 } from '../../stores/settingsStore';
 import { bridge, onClaudeStream, onClaudeStderr, onSessionExit, onPermissionRequest, type UnifiedCommand, type PermissionRequest } from '../../lib/tauri-bridge';
-import { formatJsonlAsText, formatCodexMessagesAsText } from '../../lib/session-exporter';
+import {
+  unifiedTurnsFromClaudeJsonl,
+  unifiedTurnsFromChatMessages,
+  unifiedTurnsFromDsh,
+  formatUnifiedForInjection,
+  buildHandoffBrief,
+} from '../../lib/session-exporter';
 import { encodeProjectName } from '../../lib/platform';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
@@ -916,16 +922,26 @@ export function InputBar() {
       silentRestartRef.current = false;
     } else {
       // Add user message (show original text, not with prefix)
+      // T02: DSH fork anchor — the just-finished turn's final-event seq sits
+      // on sessionMeta.pendingDshSeq (written by useStreamProcessor from the
+      // result's dsh_seq). Stamp it onto THIS user message: "rewind to before
+      // this message" means session.fork at that seq. Consume the slot so a
+      // later message never reuses a stale anchor. Undefined on claude/codex.
+      const pendingDshSeq = getActiveTabState().sessionMeta.pendingDshSeq;
       addMessage(tabId, {
         id: generateMessageId(),
         role: 'user',
         type: 'text',
         content: rawInput.trim(),
         timestamp: Date.now(),
+        dshSeq: pendingDshSeq,
         attachments: files.length > 0
           ? files.map((f) => ({ name: f.name, path: f.path, isImage: f.isImage }))
           : undefined,
       });
+      if (pendingDshSeq !== undefined) {
+        setSessionMeta(tabId, { pendingDshSeq: undefined });
+      }
     }
 
     clearFiles();
@@ -1147,45 +1163,77 @@ export function InputBar() {
         // Cross-backend transition: native resume only works within the same backend.
         // Claude session IDs are not valid Codex thread IDs, and vice versa.
         const sessionOrigin = snapshotSessionOrigin; // fix1: 快照值
-        if (existingSessionId) {
+        // T01: unified handoff pipeline — works for ALL origin backends
+        // (claude from disk JSONL, codex/deepseek from memory/DSH log),
+        // dual-channel: budgeted inline history + on-disk handoff brief.
+        let handoffInfo: { from: string; turnCount: number; briefPath?: string } | undefined;
+        {
           const currentBackend = useSettingsStore.getState().cliBackend;
           if (sessionOrigin && sessionOrigin !== currentBackend) {
-            // Different backend: inject history as text, don't use native resume
-            if (currentBackend === 'codex') {
-              // Claude → Codex: read JSONL, inject as text context
-              try {
-                // Compute projectDir from workingDirectory using the same
-                // encoding as Claude CLI (matches Rust encode_project_name).
+            try {
+              let turns: ReturnType<typeof unifiedTurnsFromChatMessages> = [];
+              let todos: { content: string; status: string }[] = [];
+              let srcModel: string | undefined;
+              if (sessionOrigin === 'claude' && existingSessionId) {
+                // Claude → any: read the session JSONL from disk
                 const projectDir = encodeProjectName(workingDirectory);
                 const jsonlContent = await bridge.exportClaudeToCodex(existingSessionId, projectDir);
-                const historyContext = formatJsonlAsText(jsonlContent, workingDirectory);
-                text = historyContext + text;
-                debugLog('session', 'Injected Claude→Codex history, session=', existingSessionId, 'projectDir=', projectDir);
-              } catch (e) {
-                debugWarn('session', 'Failed to inject Claude→Codex history:', e);
-              }
-              // History injected as text — don't use native resume
-              existingSessionId = undefined;
-            } else {
-              // Codex → Claude: format Codex history as text context, inject into prompt.
-              // Mirrors the Claude→Codex text-injection pattern (formatJsonlAsText above).
-              // This is simpler and more reliable than the --resume + JSONL mechanism.
-              try {
+                turns = unifiedTurnsFromClaudeJsonl(jsonlContent);
+              } else if (sessionOrigin === 'deepseek' && snapshotStdinId) {
+                // DSH → any: decode the DSH session log (zstd) via Rust
+                const payload = await bridge.readDshSessionTurns(snapshotStdinId);
+                const parsed = unifiedTurnsFromDsh(payload);
+                turns = parsed.turns;
+                todos = parsed.todos;
+                srcModel = parsed.model;
+              } else {
+                // Codex → any (or fallback): in-memory messages
                 // fix1: 按捕获的 tabId 读历史（此处之前可能已发生 await）
                 const tabMessages = useChatStore.getState().getTab(tabId)?.messages ?? [];
-                const historyContext = formatCodexMessagesAsText(tabMessages, workingDirectory);
-                if (historyContext) {
-                  text = historyContext + text;
-                  debugLog('session', 'Injected Codex→Claude history, messages=', tabMessages.length);
-                } else {
-                  debugLog('session', 'No completed Codex turns to inject, starting fresh Claude session');
-                }
-              } catch (e) {
-                debugWarn('session', 'Failed to format Codex→Claude history:', e);
+                turns = unifiedTurnsFromChatMessages(tabMessages);
               }
-              // History injected as text — don't use native resume
-              existingSessionId = undefined;
+              if (turns.length > 0) {
+                // Channel B: handoff brief file (best-effort — the inline
+                // history alone still makes the transition usable)
+                let briefPath: string | undefined;
+                try {
+                  const brief = buildHandoffBrief({
+                    sourceBackend: sessionOrigin,
+                    projectDir: workingDirectory,
+                    turns,
+                    todos,
+                    model: srcModel,
+                  });
+                  briefPath = await bridge.writeHandoffFile(workingDirectory, brief);
+                } catch (briefErr) {
+                  debugWarn('session', 'Handoff brief write failed (continuing without it):', briefErr);
+                }
+                // Channel A: budgeted inline history
+                const historyContext = formatUnifiedForInjection(
+                  turns, sessionOrigin, workingDirectory,
+                );
+                const briefRef = briefPath
+                  ? `\n[Handoff brief with full task context: ${briefPath} — read it if you need details beyond the history above.]\n`
+                  : '';
+                text = historyContext + briefRef + text;
+                handoffInfo = { from: sessionOrigin, turnCount: turns.length, briefPath };
+                debugLog('session', `T01 handoff ${sessionOrigin}→${currentBackend}: ${turns.length} turns, brief=${briefPath ?? 'none'}`);
+              }
+            } catch (e) {
+              // T01: handoff failure must be visible — the old paths failed
+              // silently and sent the prompt naked.
+              debugWarn('session', 'Cross-backend handoff failed:', e);
+              addMessage(tabId, {
+                id: generateMessageId(),
+                role: 'system',
+                type: 'text',
+                content: `⚠️ 跨后端历史交接失败（${String(e)}），新会话将以空白上下文开始。`,
+                commandType: 'info',
+                timestamp: Date.now(),
+              });
             }
+            // History injected as text — don't use native resume
+            existingSessionId = undefined;
           }
         }
 
@@ -1410,6 +1458,25 @@ export function InputBar() {
         useSessionStore.getState().fetchSessions();
         // Delayed retry in case JSONL file isn't written yet
         setTimeout(() => useSessionStore.getState().fetchSessions(), 1500);
+
+        // T01: handoff receipt — make the cross-backend transition explicit
+        // (what was carried over, where the brief lives).
+        if (handoffInfo) {
+          // The tab may have been promoted from draft during spawn — resolve
+          // the current tab key through the stdin mapping (M6 pattern).
+          const receiptTabId =
+            useSessionStore.getState().getTabForStdin(preGeneratedId) ?? tabId;
+          addMessage(receiptTabId, {
+            id: generateMessageId(),
+            role: 'system',
+            type: 'text',
+            content: `🔀 已从 ${handoffInfo.from} 后端交接 ${handoffInfo.turnCount} 轮历史`
+              + (handoffInfo.briefPath ? `（完整简报：${handoffInfo.briefPath}）` : '')
+              + '。新引擎将基于交接上下文继续。',
+            commandType: 'info',
+            timestamp: Date.now(),
+          });
+        }
       }
     } catch (err: any) {
       if (sessionStdinId) {

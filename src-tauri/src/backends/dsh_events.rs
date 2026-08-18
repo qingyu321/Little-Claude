@@ -40,6 +40,14 @@ pub struct DshTranslator {
     /// turn's steps — the frontend persists it to usage_log and would
     /// otherwise record only the LAST step (severe undercount on tool loops).
     pub turn_usage: Option<Value>,
+    /// T02: seq of the most recent session event (mux envelope seq, monotonic
+    /// across turns within one service generation). `translate_turn_end`
+    /// stamps it onto the emitted `result` as `dsh_seq` — the frontend stores
+    /// it on the next user message and later passes it to `session.fork`'s
+    /// `atSeq` to rewind the DSH session at an exact completed-turn boundary.
+    /// Deliberately NOT cleared by `reset_for_turn` — the seq space spans
+    /// turns, so a reset here would lose the fork anchor of the next turn.
+    pub last_seq: u64,
 }
 
 impl DshTranslator {
@@ -88,6 +96,17 @@ pub fn translate_session_event(state: &mut DshTranslator, payload: &Value) -> Ve
     };
     let etype = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or_default();
+
+    // T02: capture the mux envelope seq of every accepted event. The seq is
+    // read here (not in the turn/end arm) so `last_seq` is the seq of the
+    // turn's FINAL event by the time translate_turn_end runs — that value is
+    // the session.fork atSeq anchor. route_mux_frames drops stale/replayed
+    // frames before they reach the translator, so this only ever moves
+    // forward (or re-arms after a service-side seq reset, mirroring the
+    // watermark logic there).
+    if let Some(seq) = event.get("seq").and_then(|v| v.as_u64()) {
+        state.last_seq = seq;
+    }
 
     match etype {
         "user/message" => translate_user_message(&data),
@@ -583,6 +602,12 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
         // field and skips empty values — without it DSH usage never reaches
         // the profile stats (DSH sessions have no ~/.claude/projects JSONL).
         "uuid": state.last_message_id.clone().unwrap_or_default(),
+        // T02: seq of this turn's final event — the frontend attaches it to
+        // the NEXT user message as its session.fork rewind anchor ("rewind to
+        // before that message" == fork at the end of the previous turn).
+        // 0 means no seq was ever observed (pre-fork-anchor sessions) — the
+        // frontend treats 0/absent as "fork unavailable".
+        "dsh_seq": state.last_seq,
     });
     if !ok {
         // Carry any human-readable detail DSH attached to the failure —
@@ -1082,5 +1107,85 @@ mod tests {
             "key": "tokenUsage", "value": { "uncachedInputTokens": 1 }, "seq": 23
         }));
         assert!(v3.is_null());
+    }
+
+    // ─── T02: fork-anchor seq capture ──────────────────────────────────────
+
+    #[test]
+    fn t02_turn_end_result_carries_dsh_seq_of_final_event() {
+        // The result emitted on turn/end must carry the seq of the turn's
+        // FINAL event (the turn/end frame itself) — the frontend uses it as
+        // the session.fork atSeq anchor.
+        let mut st = DshTranslator::default();
+        let mut out = Vec::new();
+        out.extend(translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "request/header", "seq": 11, "data": {
+                "header": { "config": { "provider": "deepseek-official", "model": "deepseek-v4-flash" } }
+            } }
+        }))));
+        out.extend(translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "assistant/chunk", "seq": 15, "data": {
+                "turn": 1, "step": 1,
+                "chunk": { "type": "block-start", "index": 0, "blockType": "text" }
+            } }
+        }))));
+        out.extend(translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "turn/end", "seq": 22, "data": { "turn": 1, "reason": { "kind": "completed" } } }
+        }))));
+
+        let result = out.iter().find(|e| e["type"] == "result").expect("result emitted");
+        assert_eq!(result["dsh_seq"], 22, "dsh_seq must be the turn's last seq: {}", result);
+    }
+
+    #[test]
+    fn t02_last_seq_survives_reset_for_turn() {
+        // seq space spans turns — reset_for_turn clears per-turn block state
+        // but must NOT zero the fork-anchor watermark.
+        let mut st = DshTranslator::default();
+        let _ = translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "turn/end", "seq": 42, "data": { "turn": 1, "reason": { "kind": "completed" } } }
+        })));
+        assert_eq!(st.last_seq, 42);
+        st.reset_for_turn();
+        assert_eq!(st.last_seq, 42, "reset_for_turn must not clear last_seq");
+    }
+
+    #[test]
+    fn t02_dsh_seq_advances_across_turns() {
+        // Two consecutive turns: each result carries its OWN turn's final
+        // seq (never the previous turn's), even though reset_for_turn runs
+        // between them (route_mux_frames resets after every turn/end).
+        let mut st = DshTranslator::default();
+        let mut results = Vec::new();
+        for (turn, seq) in [(1u64, 10u64), (2u64, 30u64)] {
+            let evs = translate_session_event(&mut st, &frame(json!({
+                "type": "session/event", "sessionId": "s_x",
+                "event": { "type": "turn/end", "seq": seq, "data": { "turn": turn, "reason": { "kind": "completed" } } }
+            })));
+            results.extend(evs.into_iter().filter(|e| e["type"] == "result"));
+            st.reset_for_turn(); // mirrors route_mux_frames post-turn/end
+        }
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["dsh_seq"], 10);
+        assert_eq!(results[1]["dsh_seq"], 30);
+    }
+
+    #[test]
+    fn t02_no_seq_frames_leave_zero_dsh_seq() {
+        // Events without a seq field (malformed / legacy) must not clobber
+        // the watermark; a session that never reported seq yields dsh_seq 0,
+        // which the frontend treats as "fork unavailable".
+        let mut st = DshTranslator::default();
+        let out = translate_session_event(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "turn/end", "data": { "turn": 1, "reason": { "kind": "completed" } } }
+        })));
+        assert_eq!(st.last_seq, 0);
+        let result = out.iter().find(|e| e["type"] == "result").expect("result emitted");
+        assert_eq!(result["dsh_seq"], 0);
     }
 }

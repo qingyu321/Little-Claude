@@ -57,12 +57,44 @@ fn version_key(v: &str) -> (u64, u64, u64) {
 /// `version`（目标版本，用于版本化目录与指针）。
 ///
 /// 返回应用后的版本号；失败返回可读错误（进度事件同时发 error 相位）。
+/// Task 04: embedded ed25519 PUBLIC key (base64, 32 bytes raw). The private
+/// key lives OUTSIDE the repo (.tokenicode/secrets/webupdate-signing.key) and
+/// signs the canonical string "{version}|{sha256}|{zipUrl}" — see
+/// scripts/sign-web-update.py. SHA256 alone only protects against transport
+/// tampering; this signature protects against a forged latest.json from a
+/// compromised manifest channel (it carries its own matching SHA256).
+const WEB_UPDATE_SIGNING_KEY_B64: &str = "IUFxrpq5yhg//pCcA0m6fqtQGFLTwauzEjpJ4nLPXAk=";
+
+fn verify_update_signature(version: &str, sha256: &str, url: &str, sig_b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk_bytes = base64::engine::general_purpose::STANDARD
+        .decode(WEB_UPDATE_SIGNING_KEY_B64)
+        .map_err(|e| format!("内置公钥解码失败: {}", e))?;
+    let pk_arr: [u8; 32] = pk_bytes
+        .try_into()
+        .map_err(|_| "内置公钥长度错误".to_string())?;
+    let vk = VerifyingKey::from_bytes(&pk_arr)
+        .map_err(|e| format!("公钥无效: {}", e))?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|_| "签名格式错误（应为 base64）".to_string())?;
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|_| "签名长度无效".to_string())?;
+    let payload = format!("{}|{}|{}", version, sha256, url);
+    vk.verify(payload.as_bytes(), &sig)
+        .map_err(|_| "签名验证失败：清单可能伪造或已损坏（拒绝应用）".to_string())
+}
+
 #[tauri::command]
 pub async fn download_web_update(
     app: AppHandle,
     url: String,
     sha256: String,
     version: String,
+    // Task 04: ed25519 signature (base64) over "{version}|{sha256}|{url}"
+    // from latest.json's `sig` field. Required.
+    signature: Option<String>,
 ) -> Result<String, String> {
     let version = version.trim().to_string();
     if !valid_version(&version) {
@@ -70,6 +102,19 @@ pub async fn download_web_update(
     }
     if !url.starts_with("https://") {
         return Err("资源包地址必须是 https://（拒绝非加密传输，防中间人篡改）".to_string());
+    }
+    // Task 04: manifest signature is mandatory — an unsigned latest.json can
+    // no longer replace the frontend, even from a whitelisted host.
+    match signature.as_deref() {
+        Some(sig) if !sig.trim().is_empty() => {
+            verify_update_signature(&version, &sha256, &url, sig)?;
+        }
+        _ => {
+            return Err(
+                "热更清单缺少签名（sig 字段）：请使用带签名的 latest.json（scripts/sign-web-update.py）"
+                    .to_string(),
+            );
+        }
     }
     // H3 (security): version monotonicity — a forged/stale manifest must not
     // be able to DOWNGRADE the frontend to an older (vulnerable) build.

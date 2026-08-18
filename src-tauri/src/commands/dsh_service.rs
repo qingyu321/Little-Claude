@@ -227,8 +227,11 @@ impl DshServiceState {
                     }
                 });
                 if guard_ok.unwrap_or(false) {
+                    // Same CREATE_NO_WINDOW fix — taskkill flashed a console
+                    // on service replacement / app exit.
                     let _ = std::process::Command::new("taskkill")
                         .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .creation_flags(0x08000000)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
@@ -737,6 +740,12 @@ fn spawn_dsh_web(bin: &str, port: u16) -> Result<tokio::process::Child, String> 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    // User report: every first DSH message popped a visible cmd console
+    // window (and re-popped after each service death) — this was the only
+    // console spawn on the send path missing CREATE_NO_WINDOW (claude at
+    // session.rs:690 and codex at lib.rs:1584 both set it).
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.spawn().map_err(|e| format!("Failed to spawn dsh web: {}", e))
 }
 

@@ -304,6 +304,10 @@ export function ConversationSearch({ open, onClose }: ConversationSearchProps) {
     // Load from disk
     // F7: 复用共享的 loadSessionFromDisk（一次 batchAddMessages 入库，
     // 替代此前逐条 addMessage 的 O(N²) 旧实现），错误也由其统一处理
+    // T03: loadSessionFromDisk 现为 tail-first 分页——只加载尾部 HISTORY_PAGE_SIZE
+    // 条。因此按 turn 号的高亮跳转（applyHighlight 按"已加载消息里第 N 条 user"
+    // 计数）仅在目标 turn 落在已加载窗口内时命中；更旧的未加载 turn 本轮明确不
+    // 支持（用户可向上滚动翻页加载后再跳转）。
     useSettingsStore.getState().setWorkingDirectory(session.project);
     await loadSessionFromDisk(sessionId, meta.path, session.origin || 'claude');
     if (useSessionStore.getState().selectedSessionId !== sessionId) return;

@@ -14,8 +14,9 @@ export interface ApiConfigFileV2 {
     apiKey?: string;
     modelMappings: { tier: string; model: string }[];
     extra_env?: Record<string, string>;
-    /** Which CLI backend this provider uses: "claude" (default) or "codex". */
-    cliBackend?: 'claude' | 'codex';
+    /** Which CLI backend this provider uses: "claude" (default), "codex", or
+     *  "deepseek" (T05: DSH service mode). */
+    cliBackend?: 'claude' | 'codex' | 'deepseek';
   };
   /** S8: warning marker on exports that embed a plaintext API key. */
   _warning?: string;
@@ -162,8 +163,9 @@ export function parseAndValidate(
   // proxyUrl (v2 only)
   const proxyUrl = typeof p.proxyUrl === 'string' ? p.proxyUrl.trim() : undefined;
 
-  // cliBackend (v2 export includes it)
-  const cliBackend = (p.cliBackend === 'codex' || p.cliBackend === 'claude')
+  // cliBackend (v2 export includes it) — T05: accept "deepseek" too so a
+  // DSH-backend provider survives an export/import round-trip.
+  const cliBackend = (p.cliBackend === 'codex' || p.cliBackend === 'claude' || p.cliBackend === 'deepseek')
     ? p.cliBackend
     : undefined;
 

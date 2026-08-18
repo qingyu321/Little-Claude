@@ -495,7 +495,8 @@ export function CliTab() {
 // Simpler than CliSection: no update channel, no git-bash, but surfaces the
 // service probe (whether `dsh web` answers on the default port).
 
-type DshStatus = 'idle' | 'checking' | 'found' | 'not_found' | 'installing' | 'installed' | 'install_failed';
+// G5: 新增 updating / updated / update_failed，与 CliSection（Codex 段）状态机对齐
+type DshStatus = 'idle' | 'checking' | 'found' | 'not_found' | 'installing' | 'installed' | 'install_failed' | 'updating' | 'updated' | 'update_failed';
 
 function DshSection() {
   const t = useT();
@@ -554,11 +555,41 @@ function DshSection() {
     }
   }, [bridge, doCheck]);
 
+  // G5: "更新"按钮 —— 写法参照 CliSection（Codex 段）的 handleUpdate；
+  // update_dsh_cli 不接受 CancellationToken，故无取消 scope。成功后沿用本段
+  // install 的约定：doCheck() 刷新版本与服务状态。
+  const handleUpdate = useCallback(async () => {
+    setStatus('updating');
+    setErrorMsg('');
+    setDownloadPercent(0);
+    setPhase('idle');
+
+    const { onDownloadProgress } = await import('../../lib/tauri-bridge');
+    const unlisten = await onDownloadProgress((event) => {
+      setDownloadPercent(event.percent);
+      if (event.phase === 'npm_fallback') setPhase('npm_fallback');
+      if (event.phase === 'complete' || event.percent >= 100) setPhase('configuring');
+    });
+
+    try {
+      const newVersion = await bridge.updateDshCli();
+      if (newVersion) setVersion(newVersion);
+      setStatus('updated');
+      await doCheck();
+    } catch (e) {
+      setErrorMsg(friendlyError(stripAnsi(String(e))));
+      setStatus('update_failed');
+    } finally {
+      unlisten();
+    }
+  }, [doCheck]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <span className="text-[13px] font-medium text-text-primary">
-          DeepSeek Harness CLI <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">首选</span>
+          {/* G5: 硬编码中文"首选"徽章改走 i18n */}
+          DeepSeek Harness CLI <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent">{t('cli.recommended')}</span>
         </span>
         {version && status !== 'not_found' && status !== 'install_failed' && (
           <span className="text-xs text-text-tertiary">v{version}</span>
@@ -587,8 +618,20 @@ function DshSection() {
         <p className="text-[13px] text-amber-500">{t('cli.notFound')}</p>
       )}
 
-      {(status === 'idle' || status === 'found' || status === 'not_found') && (
+      {/* G5: update_failed 也显示按钮行以便重试（同 CliSection） */}
+      {(status === 'idle' || status === 'found' || status === 'not_found' || status === 'update_failed') && (
         <div className="flex gap-3">
+          {/* G5: 更新按钮 —— 仅已安装时显示（参照 Codex 段写法） */}
+          {status !== 'not_found' && (
+            <button
+              onClick={handleUpdate}
+              className="flex-1 py-2 text-[13px] font-medium rounded-lg
+                border border-border-subtle text-text-muted
+                hover:bg-bg-secondary hover:text-text-primary transition-smooth"
+            >
+              {t('cli.update')}
+            </button>
+          )}
           <button
             onClick={doCheck}
             className="flex-1 py-2 text-[13px] font-medium rounded-lg
@@ -649,7 +692,49 @@ function DshSection() {
         </div>
       )}
 
+      {/* G5: 更新进度块 —— 与安装进度块同构（npm_fallback / configuring 阶段提示） */}
+      {status === 'updating' && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] text-text-muted">
+              {phase === 'npm_fallback' ? t('setup.npmFallback')
+                : phase === 'configuring' ? t('cli.configuring')
+                : t('cli.updating')}
+            </span>
+            {downloadPercent > 0 && downloadPercent < 100 && (
+              <span className="text-[13px] text-text-tertiary">{downloadPercent}%</span>
+            )}
+          </div>
+          <div className="w-full h-2 rounded-full bg-bg-tertiary overflow-hidden">
+            {downloadPercent > 0 ? (
+              <div
+                className="h-full bg-accent rounded-full transition-all duration-300"
+                style={{ width: `${downloadPercent}%` }}
+              />
+            ) : (
+              <div className="h-full bg-accent/60 rounded-full animate-pulse w-full" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* G5: 更新成功确认（随后 doCheck() 刷新回 found 态） */}
+      {status === 'updated' && (
+        <div className="py-2 text-center">
+          <span className="text-[13px] text-green-500 font-medium">
+            ✓ {t('cli.updateDone')} {version && `v${version}`}
+          </span>
+        </div>
+      )}
+
       {status === 'install_failed' && errorMsg && (
+        <div className="py-2 px-3 rounded-lg bg-red-500/10">
+          <p className="text-[13px] text-red-500 truncate" title={errorMsg}>{errorMsg}</p>
+        </div>
+      )}
+
+      {/* G5: 更新失败错误提示（按钮行会重新出现，可重试） */}
+      {status === 'update_failed' && errorMsg && (
         <div className="py-2 px-3 rounded-lg bg-red-500/10">
           <p className="text-[13px] text-red-500 truncate" title={errorMsg}>{errorMsg}</p>
         </div>

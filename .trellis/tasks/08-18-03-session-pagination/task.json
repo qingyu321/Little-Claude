@@ -1,0 +1,44 @@
+{
+  "id": "03-session-pagination",
+  "name": "03-session-pagination",
+  "title": "大会话分页加载",
+  "description": "load_session 改为尾部 N 条 + 游标分页（向上滚动按需拉取），消除几十 MB 大会话打开时的三遍全量解析冻结",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P2",
+  "creator": "dsh-harness-agent",
+  "assignee": "dsh-harness-agent",
+  "createdAt": "2026-08-18",
+  "completedAt": "2026-08-16",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": " | v1.2.0 实现完成",
+  "meta": {}
+}

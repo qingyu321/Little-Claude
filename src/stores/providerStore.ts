@@ -25,8 +25,9 @@ export interface ApiProvider {
   preset?: string;
   createdAt: number;
   updatedAt: number;
-  /** Which CLI backend this provider uses: "claude" (default) or "codex". */
-  cliBackend?: 'claude' | 'codex';
+  /** Which CLI backend this provider uses: "claude" (default), "codex", or
+   *  "deepseek" (T05: DSH service mode — provider key/model sync into dsh). */
+  cliBackend?: 'claude' | 'codex' | 'deepseek';
   /** Model IDs returned by the last successful "fetch models" call (UI cache). */
   availableModels?: string[];
   /** When availableModels was last fetched (shown as a tooltip in the model selector). */
@@ -435,13 +436,13 @@ export const useProviderStore = create<ProviderState>()((set, get) => ({
         : {}),
     }));
     // Activating a provider switches the chat-header backend to match it.
-    // Otherwise a user who configures/activates a Claude-backend provider
-    // while the header still says "deepseek" (DSH service mode) sends every
-    // message through dsh web — which uses its OWN provider config and never
-    // touches providers.json — and the provider appears broken ("跑不通").
-    if (id && (backend === 'claude' || backend === 'codex')) {
-      // Only claude/codex providers own the chat-header backend; a future
-      // deepseek-backend provider must NOT flip the header off DSH mode.
+    // Otherwise a user who configures/activates a provider while the header
+    // sits on a different backend sends every message through the wrong
+    // engine and the provider appears broken ("跑不通").
+    // T05: deepseek-backend providers are first-class too — activating one
+    // flips the header INTO DSH mode (it never flips away from claude/codex
+    // unless its own backend is the one being activated).
+    if (id && (backend === 'claude' || backend === 'codex' || backend === 'deepseek')) {
       useSettingsStore.getState().setCliBackend(backend);
     }
     debouncedSave(get());

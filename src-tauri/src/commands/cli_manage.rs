@@ -1080,6 +1080,188 @@ pub async fn check_codex_update() -> Result<CliUpdateCheck, String> {
     })
 }
 
+// ─── DeepSeek Harness (dsh) Update channel ───────────────
+// Mirrors the codex update path — dsh is npm-only (@deepseek-ai/dsh).
+
+/// Update the DeepSeek Harness CLI via npm (registry fallback like codex).
+#[tauri::command]
+pub async fn update_dsh_cli(app: AppHandle) -> Result<String, String> {
+    let china = is_china_network().await;
+
+    let npm_path = if let Some(local_bin) = get_local_node_bin() {
+        #[cfg(target_os = "windows")]
+        let npm = local_bin.join("npm.cmd");
+        #[cfg(not(target_os = "windows"))]
+        let npm = local_bin.join("npm");
+        npm.to_string_lossy().to_string()
+    } else {
+        #[cfg(target_os = "windows")]
+        let npm = "npm.cmd".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let npm = "npm".to_string();
+        npm
+    };
+
+    let enriched_path = build_enriched_path();
+    let prefix_dir = npm_global_dir()?;
+    std::fs::create_dir_all(&prefix_dir)
+        .map_err(|e| format!("Failed to create npm prefix dir: {e}"))?;
+    let cache_dir = npm_cache_dir()?;
+    std::fs::create_dir_all(&cache_dir).ok();
+
+    let registries: Vec<&str> = if china {
+        vec![
+            "https://registry.npmmirror.com",
+            "https://registry.npmjs.org",
+        ]
+    } else {
+        vec!["https://registry.npmjs.org"]
+    };
+
+    let mut last_err = String::new();
+    for registry in &registries {
+        eprintln!("[update_dsh_cli] trying npm registry: {}", registry);
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 30, "phase": "npm_fallback"
+            }),
+        );
+
+        let args: Vec<String> = vec![
+            "install".to_string(),
+            "-g".to_string(),
+            "@deepseek-ai/dsh@latest".to_string(),
+            format!("--registry={}", registry),
+            format!("--prefix={}", prefix_dir.display()),
+            format!("--cache={}", cache_dir.display()),
+        ];
+        let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        #[cfg(target_os = "windows")]
+        let result = {
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/C").arg(&npm_path);
+            cmd.args(&args_str);
+            cmd.env("PATH", &enriched_path)
+                .stdin(Stdio::null())
+                .creation_flags(0x08000000);
+            cmd.kill_on_drop(true);
+            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+        };
+        #[cfg(not(target_os = "windows"))]
+        let result = {
+            let mut cmd = Command::new(&npm_path);
+            cmd.args(&args_str)
+                .env("PATH", &enriched_path)
+                .stdin(Stdio::null());
+            cmd.kill_on_drop(true);
+            tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await
+        };
+
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                let check = check_dsh_cli().await.unwrap_or(CliStatus {
+                    installed: false,
+                    version: None,
+                    path: None,
+                    git_bash_missing: false,
+                    service_running: None,
+                });
+                let version = check.version.unwrap_or_else(|| "unknown".to_string());
+                eprintln!(
+                    "[update_dsh_cli] npm installed v{} from {}",
+                    version, registry
+                );
+                let _ = app.emit(
+                    "setup:download:progress",
+                    serde_json::json!({
+                        "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
+                    }),
+                );
+                return Ok(version);
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last_err = format!(
+                    "npm install failed ({}): {}",
+                    registry,
+                    stderr.chars().take(500).collect::<String>()
+                );
+                eprintln!("[update_dsh_cli] {}", last_err);
+            }
+            Ok(Err(e)) => {
+                last_err = format!("Failed to run npm: {e}");
+                eprintln!("[update_dsh_cli] {}", last_err);
+            }
+            Err(_) => {
+                last_err = format!("npm install timed out ({})", registry);
+                eprintln!("[update_dsh_cli] {}", last_err);
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Check the npm registry for a newer @deepseek-ai/dsh version.
+#[tauri::command]
+pub async fn check_dsh_update() -> Result<CliUpdateCheck, String> {
+    let cli = check_dsh_cli().await.ok();
+    let current = cli.as_ref().and_then(|c| c.version.clone());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    let china = is_china_network().await;
+
+    let registry_urls: Vec<&str> = if china {
+        vec![
+            "https://registry.npmmirror.com/@deepseek-ai/dsh/latest",
+            "https://registry.npmjs.org/@deepseek-ai/dsh/latest",
+        ]
+    } else {
+        vec![
+            "https://registry.npmjs.org/@deepseek-ai/dsh/latest",
+            "https://registry.npmmirror.com/@deepseek-ai/dsh/latest",
+        ]
+    };
+
+    let mut latest: Option<String> = None;
+    for url in &registry_urls {
+        if let Ok(resp) = client
+            .get(*url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                let json: serde_json::Value = resp.json().await.unwrap_or_default();
+                latest = json
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if latest.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let update_available = match (&current, &latest) {
+        (Some(cur), Some(lat)) => version_gt(lat.trim(), cur.trim()),
+        _ => false,
+    };
+
+    Ok(CliUpdateCheck {
+        current,
+        latest,
+        update_available,
+    })
+}
+
 // ─── Cross-backend session conversion ────────────────────
 
 /// Export a Codex session (from chatStore) as a Claude-compatible JSONL file.

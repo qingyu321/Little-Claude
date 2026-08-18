@@ -27,6 +27,12 @@ export interface Turn {
   codeChanges: CodeChange[];
   /** CLI checkpoint UUID for file restoration (from --replay-user-messages) */
   checkpointUuid?: string;
+  /** T02: DSH fork anchor — mux seq of the completed turn BEFORE this turn's
+   *  user message (deepseek backend only). Rewinding to this turn calls
+   *  session.fork with atSeq = dshSeq, so the child session keeps everything
+   *  up to the previous turn boundary. Absent for the first turn, for turns
+   *  whose predecessor never finished cleanly, and for non-DSH backends. */
+  dshSeq?: number;
 }
 
 /**
@@ -66,6 +72,10 @@ export function parseTurns(messages: ChatMessage[]): Turn[] {
       startMsgIdx: i,
       codeChanges: [], // filled in when the next user message (or array end) is found
       checkpointUuid: msg.checkpointUuid,
+      // T02: DSH fork anchor rides the user message (stamped by InputBar from
+      // sessionMeta.pendingDshSeq). Like checkpointUuid it is per-turn state
+      // carried by the turn's opening user message.
+      dshSeq: msg.dshSeq,
     };
   }
 

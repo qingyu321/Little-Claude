@@ -29,6 +29,9 @@ import { showToast } from '../components/shared/Toast';
 // message as primary text with raw error in a collapsible details block.
 // Unmatched errors get a generic fallback + raw details.
 const ERROR_CATEGORIES: ReadonlyArray<{ pattern: RegExp; i18nKey: string }> = [
+  // G1: dsh 缺失友好错误 —— 放在靠前位置，优先于通用的 cliNotInstalled 规则，
+  // 引导新用户去 设置→CLI 管理 安装 dsh 或切换到 Claude/Codex 后端。
+  { pattern: /dsh.*not found|DeepSeek Harness|@deepseek-ai[/\\]dsh/i, i18nKey: 'error.dshNotInstalled' },
   // Expired/stale interaction first: a permission/question card answered after
   // its TTL ("Unknown or expired permission request") must explain itself
   // instead of falling through to the generic fallback.
@@ -1485,6 +1488,14 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (msg.subtype !== 'success' || !bgHasPendingTool) {
           store.setSessionStatus(tabId, msg.subtype === 'success' ? 'completed' : 'error');
         }
+        // T02: DSH fork anchor — the deepseek translator stamps the result
+        // with the mux seq of the turn's FINAL event (dsh_seq). Park it on
+        // the tab's sessionMeta; InputBar copies it onto the next user
+        // message as its session.fork rewind point. Non-DSH results never
+        // carry dsh_seq, so this is deepseek-only by construction.
+        if (typeof msg.dsh_seq === 'number' && msg.dsh_seq > 0) {
+          store.setSessionMeta(tabId, { pendingDshSeq: msg.dsh_seq });
+        }
         // Capture the compact-turn flag BEFORE the pending slot is cleared
         // below (same rule as the foreground path): the compact summary
         // request's usage is compression overhead, not dialogue — excluded
@@ -2792,6 +2803,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
         // Clear any remaining partial text before marking turn complete
         clearPartial();
+
+        // T02: DSH fork anchor — the deepseek translator stamps the result
+        // with the mux seq of the turn's FINAL event (dsh_seq). Park it on
+        // the tab's sessionMeta; InputBar copies it onto the next user
+        // message as its session.fork rewind point. Non-DSH results never
+        // carry dsh_seq, so this is deepseek-only by construction.
+        if (typeof msg.dsh_seq === 'number' && msg.dsh_seq > 0) {
+          setSessionMeta({ pendingDshSeq: msg.dsh_seq });
+        }
 
         // --- TK-303: Auto-retry on thinking signature error after provider/model switch ---
         // When user switches API provider or model mid-conversation, we attempt to resume

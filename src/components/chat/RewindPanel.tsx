@@ -16,6 +16,10 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useRewind, type RewindAction } from '../../hooks/useRewind';
 import { shortFilePath, relativeTime, type Turn } from '../../lib/turns';
 import { useT } from '../../lib/i18n';
+// T02: backend capability detection — deepseek rewinds fork instead of
+// restoring files (DSH has no checkpoint layer).
+import { useActiveTab } from '../../stores/chatStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 interface RewindPanelProps {
   onClose: () => void;
@@ -24,6 +28,16 @@ interface RewindPanelProps {
 export function RewindPanel({ onClose }: RewindPanelProps) {
   const t = useT();
   const { turns, executeRewind } = useRewind();
+  // T02: same resolution order as useRewind's branch — the session's own
+  // origin first (a tab keeps its backend even if the global setting
+  // switches), global cliBackend for fresh tabs.
+  const isDsh = useActiveTab((tab) => {
+    const meta = tab.sessionMeta;
+    const backend = meta.sessionOrigin
+      || meta.snapshotCliBackend
+      || useSettingsStore.getState().cliBackend;
+    return backend === 'deepseek';
+  });
   const [selectedTurn, setSelectedTurn] = useState<Turn | null>(null);
   // Start focused on the newest turn (last item in chronological list)
   const [focusedIndex, setFocusedIndex] = useState(Math.max(turns.length - 1, 0));
@@ -63,7 +77,17 @@ export function RewindPanel({ onClose }: RewindPanelProps) {
 
   // --- Action definitions ---
   const hasCheckpoint = !!selectedTurn?.checkpointUuid;
-  const actions: { label: string; action: RewindAction | 'cancel'; disabled?: boolean; hint?: string }[] = [
+  // T02: capability matrix by backend. DSH has no checkpoint layer — file
+  // restore actions are disabled with an honest hint; "restore conversation"
+  // forks a new session at the turn boundary (see useRewind). Claude/codex
+  // keep the original checkpoint-gated matrix.
+  const actions: { label: string; action: RewindAction | 'cancel'; disabled?: boolean; hint?: string }[] = isDsh ? [
+    { label: t('rewind.restoreAll'), action: 'restore_all', disabled: true, hint: t('rewind.dsh.noFileRollback') },
+    { label: t('rewind.restoreConversation'), action: 'restore_conversation' },
+    { label: t('rewind.restoreCode'), action: 'restore_code', disabled: true, hint: t('rewind.dsh.noFileRollback') },
+    { label: t('rewind.summarize'), action: 'summarize' },
+    { label: t('rewind.cancel'), action: 'cancel' },
+  ] : [
     { label: t('rewind.restoreAll'), action: 'restore_all', disabled: !hasCheckpoint, hint: !hasCheckpoint ? t('rewind.noCheckpoint') : undefined },
     { label: t('rewind.restoreConversation'), action: 'restore_conversation' },
     { label: t('rewind.restoreCode'), action: 'restore_code', disabled: !hasCheckpoint, hint: !hasCheckpoint ? t('rewind.noCheckpoint') : undefined },
@@ -213,6 +237,16 @@ export function RewindPanel({ onClose }: RewindPanelProps) {
               </p>
             </div>
           </div>
+
+          {/* T02: DSH capability note — rewind forks a new session; files are
+              never rolled back and the original session is retained. */}
+          {isDsh && (
+            <div className="mb-3 px-2.5 py-1.5 rounded-md bg-blue-500/10 border border-blue-500/20">
+              <p className="text-[10px] text-blue-400 leading-relaxed">
+                {t('rewind.dsh.hint')}
+              </p>
+            </div>
+          )}
 
           {/* Action options */}
           <div className="space-y-1.5"

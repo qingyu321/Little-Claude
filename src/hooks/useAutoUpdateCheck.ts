@@ -11,7 +11,8 @@ const WEB_VERSION_KEY = 'tokenicode_web_version';
 /**
  * 更新清单（仓库根目录 latest.json，由发布脚本生成）：
  * { "version": "1.1.2", "zipUrl": "...web-dist-v1.1.2.zip", "sha256": "...",
- *   "rustChanged": false, "releaseUrl": "..." }
+ *   "rustChanged": false, "releaseUrl": "...", "sig": "..." }
+ * （G7: sig 为清单签名，缺失时下载侧会收到 undefined 并由后端报明确错误）
  * 放仓库根目录（非 release 资产）的好处：raw/jsdelivr CDN 都能读，
  * 检查源完全摆脱 GitHub API（无 rate limit）。
  */
@@ -36,6 +37,8 @@ export interface UpdateInfo {
   rustChanged: boolean;
   /** release 页面（手动下载路径）。 */
   url: string;
+  /** G7: latest.json 的 sig 字段（清单签名）；manifest 未提供时为 undefined。 */
+  sig?: string;
 }
 
 /** Cached latest update info from the most recent successful check. */
@@ -140,6 +143,8 @@ async function fetchLatestInfo(url: string): Promise<UpdateInfo | null> {
       url: typeof data.releaseUrl === 'string' && data.releaseUrl
         ? data.releaseUrl
         : `${GITHUB_RELEASES_URL}/tag/${version}`,
+      // G7: 读取 sig 透传给下载侧；缺失/非字符串 → undefined（后端报错兜底）
+      sig: typeof data.sig === 'string' && data.sig ? data.sig : undefined,
     };
   } catch {
     return null; // 超时 / 网络错误 → 下一个源

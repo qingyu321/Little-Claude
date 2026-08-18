@@ -213,18 +213,28 @@ function App() {
     // awaits key decryption, so reading activeProviderPerBackend right
     // after calling it sees the empty initial state.
     useProviderStore.getState().load().then(() => {
-      // DSH (deepseek backend) runs its own provider inside dsh web and
-      // ignores providers.json. If a provider is active for claude/codex
-      // but the header still says "deepseek", every message silently
-      // bypasses the provider ("跑不通"). Switch to the provider's
-      // backend so the active provider actually takes effect.
+      // T05: DSH providers are first-class — when the header sits on
+      // "deepseek" and a deepseek-backend provider is ACTIVE, stay on DSH:
+      // that provider now drives the session (key/model sync into dsh), so
+      // the old "header says deepseek but providers.json is ignored" repair
+      // must NOT flip away from it. Only when NO deepseek provider is active
+      // does an active claude/codex provider win the header.
       const { activeProviderPerBackend } = useProviderStore.getState();
       const headerBackend = useSettingsStore.getState().cliBackend;
       if (headerBackend === 'deepseek') {
-        if (activeProviderPerBackend.claude) {
+        if (activeProviderPerBackend.deepseek) {
+          // Active DSH provider — keep the header on the deepseek backend.
+        } else if (activeProviderPerBackend.claude) {
           useSettingsStore.getState().setCliBackend('claude');
         } else if (activeProviderPerBackend.codex) {
           useSettingsStore.getState().setCliBackend('codex');
+        } else {
+          // G2: 新用户默认值纠偏 —— cliBackend 持久化默认是 'deepseek'，但 dsh
+          // 未安装时首条消息会以难懂的 spawn 错误失败。无活动 provider 时探测
+          // dsh：未安装则回落到 claude（装好 dsh 后此分支自然不再触发）。
+          bridge.checkDshCli().then((status) => {
+            if (!status.installed) useSettingsStore.getState().setCliBackend('claude');
+          }).catch(() => {});
         }
       }
     });
