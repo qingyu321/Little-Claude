@@ -2038,22 +2038,29 @@ async fn start_deepseek_session(
             .and_then(|pf| pf.providers.into_iter().find(|p| p.id == *pid))
     });
 
+    // Effective agent preset: an explicit user pick wins; otherwise ALWAYS
+    // "standard". Never fall through to the DSH profile default — on this
+    // deployment that is a bootstrap/router preset whose FIRST turn hides
+    // web_search (and most of the tool catalog) behind a first-durable-tool-
+    // call reveal, so the model emits empty-name tool calls for the locked
+    // tools ("tool call is generating with an empty name"). "standard" is the
+    // full coding agent (shell + web search + files + skills/plan/goal/
+    // subagent/workflow) and the reliable baseline for LC's interactive turns.
+    let effective_preset: String = params
+        .agent_preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("standard")
+        .to_string();
+
     // Reuse the tab's DSH session (real context continuity), else create one.
     let dsh_session_id = match state.get_deepseek_session(&stdin_id).await {
         Some(sid) => sid,
         None => {
-            // Compose the session under the user-chosen agent preset (mirrors
-            // the DeepSeek Harness preset picker). None keeps the profile
-            // default. "standard" = full coding agent (shell + web search +
-            // file editing + skills/plan/goal/subagent/workflow) — the reliable
-            // baseline when the profile default is a bootstrap preset that
-            // hides bash/web-search behind a first-durable-tool-call reveal.
+            // Compose the session under the effective preset (see above).
             let mut create = json!({ "cwd": params.cwd });
-            if let Some(preset) = params.agent_preset.as_deref() {
-                if !preset.trim().is_empty() {
-                    create["agentPreset"] = json!(preset);
-                }
-            }
+            create["agentPreset"] = json!(effective_preset);
             // P-Per: align LC's permission mode with the DSH permission
             // default BEFORE creating — a fresh DSH session pins its initial
             // sandbox+approval from `permission.defaultPreset` at creation, so
@@ -2108,9 +2115,10 @@ async fn start_deepseek_session(
             DshRoute {
                 stdin_id: stdin_id.clone(),
                 auto_allow,
-                // Snapshot the preset so the R11 self-heal can rebuild the
-                // session under the same composition.
-                agent_preset: params.agent_preset.clone(),
+                // Snapshot the EFFECTIVE preset so the R11 self-heal rebuilds
+                // the session under the same composition (never the bootstrap
+                // profile default — see effective_preset above).
+                agent_preset: Some(effective_preset.clone()),
             },
         );
     }
