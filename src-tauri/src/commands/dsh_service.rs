@@ -825,6 +825,70 @@ pub async fn dsh_service_status(
     }))
 }
 
+/// Map a Little-Claude permission mode onto the DSH permission default
+/// (`permission.defaultPreset` — the only knob the DSH RPC surface exposes, a
+/// sandbox-mode preset folded into a fresh session's initial permission).
+///
+/// - bypass  (全自动)  → danger-full-access (sandbox full + approval never)
+/// - plan    (计划)    → read-only (no writes while planning; true DSH plan
+///                      collaboration has no reachable RPC, read-only is the
+///                      safe stand-in)
+/// - code/ask (标准自动/询问) → workspace-write (approval ask)
+pub fn map_permission_mode_to_dsh_preset(permission_mode: &str) -> &'static str {
+    match permission_mode {
+        "bypassPermissions" | "bypass" => "danger-full-access",
+        "plan" => "read-only",
+        _ => "workspace-write",
+    }
+}
+
+/// Set the DSH `permission` settings namespace default preset. Only NEW
+/// sessions inherit it (a session pins its initial permission at creation, so
+/// existing sessions are left untouched). Reads the revision freshly to avoid
+/// stale expectedRevision races.
+pub async fn dsh_set_permission_default(
+    base_url: &str,
+    default_preset: &str,
+) -> Result<Value, String> {
+    let describe = unary(base_url, "settings.describe", json!({})).await?;
+    let namespaces = describe
+        .get("namespaces")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let revision = namespaces
+        .iter()
+        .find(|n| n.get("ns").and_then(|v| v.as_str()) == Some("permission"))
+        .and_then(|n| n.get("revision").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    unary(
+        base_url,
+        "settings.mutate",
+        json!({
+            "ns": "permission",
+            "ops": [{ "op": "set", "path": ["defaultPreset"], "value": default_preset }],
+            "expectedRevision": revision,
+        }),
+    )
+    .await
+}
+
+/// Align the live DSH permission default with a Little-Claude mode string.
+/// Called by the mode selector on DeepSeek so sessions created after the
+/// switch inherit the matching sandbox/approval.
+#[tauri::command]
+pub async fn dsh_set_permission_mode(
+    mgr: tauri::State<'_, DshServiceManager>,
+    permission_mode: String,
+) -> Result<Value, String> {
+    let service = mgr.ensure().await?;
+    dsh_set_permission_default(
+        &service.base_url,
+        map_permission_mode_to_dsh_preset(&permission_mode),
+    )
+    .await
+}
+
 /// Agent preset roster for the DeepSeek backend, straight from the live DSH
 /// service (`agentPreset.list`) — the same catalog the DeepSeek Harness GUI's
 /// preset picker renders. Used by the input-bar preset selector. Lazy: loads
@@ -1035,5 +1099,28 @@ mod live_tests {
         assert!(saw_result, "result received");
         assert!(!saw_tool_or_thinking, "no tool/thinking expected for this task");
         println!("[live] full turn OK (message + result)");
+    }
+}
+
+#[cfg(test)]
+mod permission_mapping_tests {
+    use super::map_permission_mode_to_dsh_preset;
+
+    #[test]
+    fn bypass_maps_to_full_access() {
+        assert_eq!(map_permission_mode_to_dsh_preset("bypassPermissions"), "danger-full-access");
+        assert_eq!(map_permission_mode_to_dsh_preset("bypass"), "danger-full-access");
+    }
+
+    #[test]
+    fn plan_maps_to_read_only() {
+        assert_eq!(map_permission_mode_to_dsh_preset("plan"), "read-only");
+    }
+
+    #[test]
+    fn code_and_ask_map_to_workspace_write() {
+        assert_eq!(map_permission_mode_to_dsh_preset("code"), "workspace-write");
+        assert_eq!(map_permission_mode_to_dsh_preset("ask"), "workspace-write");
+        assert_eq!(map_permission_mode_to_dsh_preset(""), "workspace-write");
     }
 }

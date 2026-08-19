@@ -948,6 +948,13 @@ export const bridge = {
   listDshAgentPresets: () =>
     invoke<{ presets: DshAgentPreset[] }>('dsh_agent_presets'),
 
+  /** Align the live DSH permission default with an LC permission mode
+   *  ('code' | 'ask' | 'plan' | 'bypass') — new DeepSeek sessions inherit the
+   *  matching sandbox/approval (bypass→danger-full-access, plan→read-only,
+   *  else→workspace-write). */
+  setDshPermissionMode: (permissionMode: string) =>
+    invoke<void>('dsh_set_permission_mode', { permissionMode }),
+
   /** Install DeepSeek Harness CLI via npm (@deepseek-ai/dsh) */
   installDshCli: () =>
     invokeWithTimeout<void>('install_dsh_cli', undefined, INSTALL_INVOKE_TIMEOUT_MS),

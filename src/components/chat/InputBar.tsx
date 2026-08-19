@@ -2115,7 +2115,8 @@ export function InputBar() {
             2. Streaming with tokens → live speed + turn average.
             3. Finished → pinned final average until the next turn. */}
         {(tokenSpeedTab && (tokenSpeedTab.isStreaming
-          || (tokenSpeedTab.endedAt && (tokenSpeedTab.turnTokens > 0 || tokenSpeedTab.apiAvg > 0))))
+          || (tokenSpeedTab.endedAt && (tokenSpeedTab.turnTokens > 0 || tokenSpeedTab.apiAvg > 0
+            || tokenSpeedTab.firstTokenAvgMs != null || tokenSpeedTab.decodeTps != null))))
           || (streamIsStreaming && (tokenSpeedTab?.turnTokens ?? 0) === 0) ? (
           <div className="mb-1 px-1 flex items-center">
             {streamIsStreaming && (tokenSpeedTab?.turnTokens ?? 0) === 0 ? (

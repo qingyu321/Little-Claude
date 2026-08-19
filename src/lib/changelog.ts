@@ -40,6 +40,8 @@ export const CHANGELOG: ChangelogEntry[] = [
             'DeepSeek 首 token 计速（底层真值）：⚡ 徽章按 DSH `sessionStats` 投射显示每步平均首 token 延迟与解码 tok/s——DSH 自身计时的真实数据，非前端文本估算',
             'GoalBar 1:1 对齐 DSH 官方实现：灰靶心图标 + 相位标签（进行中的/已暂停的目标）+ 36px 圆角条 + 28px 圆形操作钮 + 同条内联编辑，去掉自创蓝环',
             '全局圆角软化：rounded 体系对齐 DSH 空间尺度（base 8→12、xl 12→16、2xl 16→20px），聊天气泡 22px——盒子不再死板',
+            'DeepSeek 权限模式对齐（P-Per）：设置里的 全自动/计划/询问/标准 现在映射到 DSH `permission.defaultPreset`——全自动→danger-full-access（不询问+全权）、计划→read-only（只读防误写；真 plan 协作无 RPC 可及）、标准/询问→workspace-write（询问）；模式切换即时同步、新会话继承、重活服务实测验证（settings.mutate 实测生效）',
+            '⚡ 徽章容错：DSH 回合即使没有流式文本 token 到达（快速回合/通道抖动），回合末仍会用底层真值 pin 出 首token 延迟 与 解码 tok/s；可见门补齐 firstToken/decode 字段',
           ],
           en: [
             'Cross-harness task handoff: switching engines (Claude Code ↔ Codex ↔ DeepSeek) carries your history — recent turns inline within budget + a handoff brief on disk (.tokenicode/handoff/); DeepSeek session history can now be fully carried out',
@@ -52,6 +54,8 @@ export const CHANGELOG: ChangelogEntry[] = [
             'DeepSeek first-token speed from bottom-layer truth: the ⚡ badge shows the average first-token latency and decode tok/s from DSH\'s `sessionStats` projection — DSH\'s own timing, not a frontend text estimate',
             'GoalBar aligned 1:1 with the official DSH implementation: grey glyph + phase label (ongoing/paused goal), 36px rounded-12px strip, 28px circular icon actions, inline edit in the same strip — the custom blue ring is gone',
             'Softer corners globally: the rounded scale is aligned to DSH\'s spatial system (base 8→12, xl 12→16, 2xl 16→20px) and chat bubbles use 22px — no more boxy stiffness',
+            'DeepSeek permission-mode alignment: auto / plan / ask / standard now map onto DSH `permission.defaultPreset` — auto→danger-full-access (no approvals + full access), plan→read-only (write-safe stand-in; true plan collaboration has no reachable RPC), standard/ask→workspace-write (ask); applied on session create + mode switch, verified live via settings.mutate',
+            '⚡ badge resilience: DeepSeek turns now pin the bottom-layer first-token latency and decode tok/s even when no streamed text token reached pushTokens (fast turns / channel blips); the visibility gate covers firstToken/decode fields',
           ],
         },
       },

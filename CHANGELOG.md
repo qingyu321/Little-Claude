@@ -20,6 +20,8 @@ All notable changes to Little Claude will be documented in this file.
 - **DeepSeek 首 token 计速（底层真值）** — ⚡ 徽章读取 DSH `sessionStats` 投射（官方 `dsh-session-stats`）：回合末显示平均首 token 延迟（`ttftMs÷ttftSteps` 增量）与解码 tok/s（`decodeTokens÷decodeMs`）——DSH 自身计时的真实数据，非前端文本估算；Claude/Codex 不受影响
 - **GoalBar 1:1 对齐 DSH 官方实现** — 输入框上方任务目标栏改为 DSH 原版形态：灰色靶心图标（去蓝环）+ 相位标签（进行中的/已暂停的目标）+ 36px 高 12px 圆角灰底条 + 28px 圆形操作钮（暂停/继续/编辑/清除）+ 同条内联编辑（保存/取消）——图标与几何全部照抄 `@deepseek-ai/dsh-client-ui-goal`
 - **全局圆角软化** — rounded 体系对齐 DSH 空间尺度（rounded-lg 8→12、xl 12→16、2xl 16→20、气泡 22px），大小盒子、气泡、输入框边角更圆润，不再死板
+- **DeepSeek 权限模式对齐（P-Per）** — 设置里的 全自动/计划/询问/标准 映射到 DSH `permission.defaultPreset`：全自动→`danger-full-access`（从不询问 + 全权沙箱）、计划→`read-only`（只读防误写；DSH 真 plan 协作无 RPC 可及，取最安全的只读近似）、标准自动/询问→`workspace-write`（逐工具询问）。模式切换即时 `settings.mutate` 同步（实测验证），**后续新建的 DSH 会话继承**；已在跑的会话保留其钉死的权限不打扰
+- **⚡ 徽章容错** — DSH 回合即使没有任何流式文本 token 到达计速器（快速回合/通道抖动），回合末仍用底层真值 pin 出「首token xx · 吐字 xx tok/s」；徽章可见门补齐 firstToken/decode 两个字段
 
 ### Fixed
 

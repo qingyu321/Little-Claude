@@ -2054,6 +2054,30 @@ async fn start_deepseek_session(
                     create["agentPreset"] = json!(preset);
                 }
             }
+            // P-Per: align LC's permission mode with the DSH permission
+            // default BEFORE creating — a fresh DSH session pins its initial
+            // sandbox+approval from `permission.defaultPreset` at creation, so
+            // mutating it here makes the new session inherit the mode that
+            // matches the selector (全自动→danger-full-access, 计划→read-only,
+            // 标准/询问→workspace-write). Existing sessions keep their pinned
+            // state. Non-fatal on failure (defaults still apply).
+            if let Some(pm) = params.permission_mode.as_deref() {
+                let preset = crate::commands::dsh_service::map_permission_mode_to_dsh_preset(pm);
+                match crate::commands::dsh_service::dsh_set_permission_default(
+                    &service.base_url,
+                    preset,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        eprintln!("[LITTLECLAUDE:deepseek] permission default -> {}", preset)
+                    }
+                    Err(e) => eprintln!(
+                        "[LITTLECLAUDE:deepseek] permission align skipped (non-fatal): {}",
+                        e
+                    ),
+                }
+            }
             let created = unary(&service.base_url, "session.create", create)
                 .await
                 .map_err(|e| format!("dsh session.create failed: {}", e))?;
@@ -2878,6 +2902,9 @@ pub fn run() {
             commands::dsh_service::dsh_service_status,
             // Agent preset roster for the DeepSeek backend (agentPreset.list)
             commands::dsh_service::dsh_agent_presets,
+            // DSH permission default align (settings.mutate permission ns) —
+            // 模式选择器切换时对齐 DeepSeek 沙箱/审批
+            commands::dsh_service::dsh_set_permission_mode,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

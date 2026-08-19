@@ -183,8 +183,16 @@ export const useTokenSpeedStore = create<TokenSpeedState>((set, get) => ({
 
   end: (tabId, api) => {
     if (!tabId) return;
-    const tab = get().tabs[tabId];
-    if (!tab) return;
+    let tab = get().tabs[tabId];
+    // DSH bottom-layer truth (first-token / decode deltas on the result) can
+    // arrive for turns that never streamed a text delta into pushTokens (e.g.
+    // very fast turns, or a channel blip) — create a record so the badge can
+    // still pin the real numbers instead of vanishing.
+    if (!tab) {
+      const hasTruth = api?.firstTokenAvgMs != null || api?.decodeTps != null || (api?.outputTokens ?? 0) > 0;
+      if (!hasTruth) return;
+      tab = emptyTab();
+    }
     // Prefer the API's own accounting — output tokens over pure API time
     // (duration_api_ms, excludes local tool execution / permission waits)
     // from the result event. Falls back to the client estimate when the

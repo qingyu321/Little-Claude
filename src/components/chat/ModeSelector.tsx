@@ -2,6 +2,7 @@ import { type ReactNode, useState, useRef, useEffect } from 'react';
 import { useSettingsStore, type SessionMode } from '../../stores/settingsStore';
 import { useChatStore, generateMessageId } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { bridge } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 
 const MODES: { id: SessionMode; labelKey: string; icon: ReactNode }[] = [
@@ -78,6 +79,15 @@ export function ModeSelector({ disabled = false }: { disabled?: boolean }) {
   const switchMode = (mode: SessionMode) => {
     if (mode === sessionMode) return;
     setSessionMode(mode);
+    // P-Per: on the DeepSeek backend, align DSH's permission default with the
+    // selected mode so sessions created afterwards inherit the sandbox/approval
+    // that matches (全自动→danger-full-access, 计划→read-only, 标准/询问→
+    // workspace-write). Best-effort; failures are non-fatal (defaults apply).
+    if (useSettingsStore.getState().cliBackend === 'deepseek') {
+      bridge.setDshPermissionMode(mode).catch((err) => {
+        console.warn('[deepseek] permission align failed:', err);
+      });
+    }
     const fb = MODE_FEEDBACK[mode];
     const modeTabId = useSessionStore.getState().selectedSessionId;
     if (modeTabId) {
