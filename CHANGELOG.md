@@ -28,6 +28,7 @@ All notable changes to Little Claude will be documented in this file.
 - **排队消息窗误导修复** — 已显示且正在运行的消息不再回填队列；排队中的气泡带「排队中」标识，队列只显示真正未发送的消息
 - **任务清单（TodoDock）对齐 DSH 原版形态** — 标题不含计数、完成项不划线、pending 虚线圆环、默认折叠
 - **token 统计模块修复** — 纯 DeepSeek 机器统计全 0（usage_log 合并被提前丢弃）、DSH 回合时长/均速恒 0（sessionStats 增量）、Ctx 缓存 miss 红点误亮、DSH 多步回合统计双计、会话总数不计 DSH
+- **统计弹窗主指标漏计缓存修复** — 「累计 Token 数/峰值日/每日/热力图」改用语义 total（含缓存命中、DeepSeek 输入已含缓存不重复加，与模型行/Ctx 条同口径），缓存重日不再从"亿"掉到"百万"
 
 ---
 

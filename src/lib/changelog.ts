@@ -60,6 +60,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             '修复排队消息窗误导 — 已显示且正在运行的消息不再回填队列；排队中的气泡带「排队中」标识，队列只显示真正未发送的消息',
             '任务清单（TodoDock）形态对齐 DSH harness — 标题不含计数、完成项不划线、pending 虚线圆环、默认折叠',
             '修复 token 统计模块 — 纯 DeepSeek 机器统计全 0（usage_log 合并被提前丢弃）、DSH 回合时长/均速恒 0（sessionStats 增量）、Ctx 缓存 miss 红点误亮、DSH 多步回合在统计中双计、会话总数不计 DSH 会话',
+            '修复统计弹窗「累计/峰值日/每日」主指标漏计缓存 — 之前用「输入+输出」（Anthropic 风格 input 不含缓存），缓存重日从"亿"掉到"百万"；现统一为语义 total（含缓存、DeepSeek 输入已含缓存不重复加），与模型行/Ctx 条同口径',
           ],
           en: [
             'Fixed the cmd console window popping up when sending messages on the DeepSeek backend',

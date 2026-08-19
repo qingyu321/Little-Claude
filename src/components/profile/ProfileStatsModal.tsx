@@ -82,13 +82,15 @@ export function ProfileStatsModal({ open, onClose }: Props) {
     if (open) loadStats();
   }, [open]);
 
-  // 主口径 = 新输入 + 输出（不含缓存命中），与 DSH 界面/实际消耗口径一致；
-  // 缓存命中量仍可在"累计"视图单独查看（缓存 Token 行）。
+  // 主口径 = 语义 total（新输入 + 缓存 + 输出，DeepSeek 输入已含缓存则不重复加，
+  // 与后端 scan_profile_stats 的 total_tokens / 模型行 / Ctx 条同口径）。
+  // 之前用「输入+输出」会漏掉 Anthropic 风格记录的缓存命中（input 不含缓存），
+  // 缓存重的日子直接从"亿"级掉到"百万"级。缓存明细仍在「累计」视图单独展示。
   const dailyMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const day of stats?.daily ?? []) {
       if (day.date !== 'unknown') {
-        map.set(day.date, (day.input_tokens || 0) + (day.output_tokens || 0));
+        map.set(day.date, day.total_tokens || 0);
       }
     }
     return map;
@@ -196,7 +198,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
             <>
               <div className="mt-9 grid grid-cols-5 rounded-[20px] border border-border-subtle bg-bg-primary/70 overflow-hidden">
                 {[
-                  ['累计 Token 数', formatTokens((stats.totalInputTokens || 0) + (stats.totalOutputTokens || 0))],
+                  ['累计 Token 数', formatTokens(stats.totalTokens || 0)],
                   ['峰值日 Token 数', formatTokens(maxDay)],
                   ['会话总数', stats.sessionCount.toLocaleString()],
                   ['活跃天数', `${stats.activeDays} 天`],
@@ -275,7 +277,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                             />
                           </div>
                           <span className="w-20 text-right text-text-primary">
-                            {formatTokens((day.input_tokens || 0) + (day.output_tokens || 0))}
+                            {formatTokens(day.total_tokens || 0)}
                           </span>
                         </div>
                       )) : (
