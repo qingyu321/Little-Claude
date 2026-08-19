@@ -13,6 +13,8 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **斜杠命令与命令面板** — 内置命令 + 自定义命令 + Skills 技能面板，一键唤起
 - **MCP 服务器管理** — 自动扫描并管理 `~/.claude.json` 等位置的 MCP 服务器配置
 - **多 Provider API 配置** — Anthropic / OpenAI 兼容格式，内置预设（DeepSeek、智谱 GLM、通义千问 Coder、Kimi、MiniMax、Kimi Code、MiMo Token Plan、OpenRouter），支持自定义 Base URL、模型映射、环境变量注入与代理；连接可用性一键测试
+- **三引擎后端 + 跨 harness 交接** — Claude Code / Codex / DeepSeek Harness 三后端并行，会话跨引擎交接自动携带历史；DeepSeek 会话支持按轮次 fork 回退、agent 预设与思考级别透传
+- **个人统计看板** — 本机全部会话（含终端 CLI 与 DSH）token 汇总：累计/峰值日/热力图/周报，支持按 总量 / 输入 / 输出 / 缓存 切换每日口径，按模型排行；语义口径自动区分 Anthropic 与 DeepSeek 两种 usage 语义，缓存不重算不漏算
 - **运行时切换权限模式与模型** — 四种权限模式（标准自动 / 全自动 / 询问 / 计划）+ 会话中直接换模型，无需重启进程
 - **CLI 全生命周期管理** — 扫描发现所有已安装 CLI、分层显示（官方 / 系统 / 自部署 / 版本管理器）、一键切换与 Pin、注入 PATH、一键安装 / 更新 / 诊断
 - **多模态工具扩展** — 视频分析（自动下载 → ASR 转写 → 多模态识图 → 交叉验证）、语音输入（自动选择核显 / 独显 / CPU 压缩）、动态壁纸；另有面试助手模块
@@ -45,7 +47,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 版本历程
 
-### v1.2.0 (2026-08-16) — 三 harness 时代：交接 / 回滚 / 分页 / provider / 签名
+### v1.2.0 (2026-08-16) — 三 harness 时代：交接 / 回滚 / 分页 / provider / 签名 + DSH 可用性收尾
 
 - **跨 harness 任务交接** — 切换引擎（Claude Code ↔ Codex ↔ DeepSeek）自动携带历史：近期轮次预算内联 + 交接简报落盘（`.tokenicode/handoff/`）；DeepSeek 会话历史首次可完整带出（zstd 日志解码）；交接回执与失败显式提示
 - **DeepSeek 会话回滚** — RewindPanel 按轮次 fork 回退（`session.fork`，turn 边界 seq 锚点；原会话保留、文件不回滚有明确提示）
@@ -53,6 +55,11 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **DeepSeek 后端 provider 一等公民** — provider 类型/预设/表单/Tab 三后端齐全；会话启动时经 `credentials.set` 注入密钥、`session.selectModel` 透传模型
 - **热更新签名链** — ed25519 强制验签（公钥内置），无签名/伪造清单直接拒绝；签名工具与发布流程接线
 - **DeepSeek 可用性大修** — 发送消息不再弹 cmd 黑窗；DSH 会话后端接线修复（追问/审批/停止/插话恢复）；默认后端错配闭环（未装 dsh 自动回落 + 安装引导）；「运行环境」补 Codex/dsh 一键安装、dsh 一键更新
+- **DSH 实时链路修复** — mux 下行误连根路径漏 `/api/events.mux`，实时事件从未到前端（回复只在重开会话后可见、Ctx 条恒 0）；现直连正确路径，逐字流式回复与上下文条实时更新恢复
+- **Agent 预设选择器（仿 DSH harness）** — 输入栏思考级别右侧新增预设选择（带启用开关）；选 `standard` 完整工具预设（Shell + 联网搜索 + 文件编辑 + Skills/计划/目标/子代理），bash(pwsh)/联网搜索恢复可用；思考级别真正传到 DSH（reasoningEffort），思考链实时显示
+- **token 统计大修 + 口径统一** — 纯 DeepSeek 机器统计全 0、DSH 多步回合双计、会话总数不计 DSH 一并修复；统计弹窗主指标统一为语义 total（含缓存命中、DeepSeek 输入已含缓存不重复加）——缓存重日不再从"亿"掉到"百万"
+- **统计弹窗每日口径切换** — 「Token 活动」（热力图 / 每日 / 每周 / 峰值日）可按 总量 / 输入 / 输出 / 缓存 查看；总量保持语义口径，明细为原始值并独立配色
+- **体验对齐批** — 排队消息窗不再误导（排队气泡带「排队中」标识，队列只显示真正未发送的消息）；TodoDock 任务清单 1:1 对齐 DSH 原版形态；「运行环境」一键更新 Harness 真正生效（tombstone 启动器修复 + 解析缓存失效）
 
 ### v1.1.8 (2026-08-16) — 第三轮全面修复：交互兜底 + 性能快赢
 
@@ -198,9 +205,10 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 下载
 
-请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包：
+请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包（当前 v1.2.0）：
 
-- Windows：便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`Little Claude v1.1.4.exe`
+- Windows 便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`LittleClaude-v1.2.0-Portable.exe`
+- Windows 安装包（NSIS）：`Little Claude_1.2.0_x64-setup.exe`
 
 ## 快速开始
 
