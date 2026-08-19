@@ -8,6 +8,17 @@
    - neutral-bluish stack for surfaces, shiki tokens for code
    ================================================================ */
 @theme {
+  /* Radii — DSH-aligned spatial scale (softer corners; DSH's workhorse card
+     radius is 12px, larger surfaces 16-22px). Overrides the Tailwind default
+     (lg=8px/xl=12px/2xl=16px) so every rounded-* box picks up the rounder
+     geometry; rounded-full stays 9999px. */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.5rem;
+
   /* DSH static palette — brand & neutral-bluish */
   --color-deepseek-50:  #EDF3FE;
   --color-deepseek-100: #E4EDFD;

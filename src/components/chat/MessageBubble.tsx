@@ -235,7 +235,7 @@ function UserMsg({ message, isHighlighted = false }: Props) {
           {copied ? t('msg.copied') : t('msg.copyText')}
         </button>
       </div>
-      <div className={`message-content max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
+      <div className={`message-content max-w-[75%] px-3.5 py-2.5 rounded-[22px] rounded-br-[8px]
         bg-bg-user-msg text-text-primary
         text-sm leading-relaxed shadow-sm whitespace-pre-wrap
         ${isHighlighted ? 'search-highlight-blink' : ''}`}>

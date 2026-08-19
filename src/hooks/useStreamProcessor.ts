@@ -664,8 +664,17 @@ export interface StreamProcessorConfig {
  * back to result.usage.output_tokens (equal when num_turns === 1).
  * Denominator: duration_api_ms — pure API time, excludes local tool
  * execution and permission waits; falls back to wall-clock duration_ms.
+ * DeepSeek turns additionally carry bottom-layer truth from DSH's
+ * sessionStats projection (first-token latency + decode throughput) — passed
+ * through so tokenSpeedStore.end() can pin them on the badge.
  */
-function resolveApiSpeed(msg: any): { outputTokens: number; durationMs: number } {
+function resolveApiSpeed(msg: any): {
+  outputTokens: number;
+  durationMs: number;
+  firstTokenAvgMs?: number;
+  firstTokenSteps?: number;
+  decodeTps?: number;
+} {
   let modelOut = 0;
   const modelUsage = msg?.modelUsage;
   if (modelUsage && typeof modelUsage === 'object') {
@@ -677,7 +686,13 @@ function resolveApiSpeed(msg: any): { outputTokens: number; durationMs: number }
   const durationMs = (typeof msg?.duration_api_ms === 'number' && msg.duration_api_ms > 0)
     ? msg.duration_api_ms
     : (msg?.duration_ms || 0);
-  return { outputTokens, durationMs };
+  return {
+    outputTokens,
+    durationMs,
+    firstTokenAvgMs: msg?.first_token_avg_ms,
+    firstTokenSteps: msg?.first_token_steps,
+    decodeTps: msg?.decode_tps,
+  };
 }
 
 /**

@@ -107,6 +107,9 @@ export const zhDict: Record<string, string> = {
     'goal.edit': '编辑目标',
     'goal.clear': '清除目标',
     'goal.save': '保存',
+    'goal.cancel': '取消编辑',
+    'goal.phaseActive': '进行中的目标',
+    'goal.phasePaused': '已暂停的目标',
     'todo.title': '步骤',
     'todo.completed': '完成',
     'todo.inProgress': '进行中',
@@ -447,6 +450,8 @@ export const zhDict: Record<string, string> = {
     'chat.tokenSpeedLive': '⚡ {speed} tok/s · 均 {avg} tok/s',
     'chat.tokenSpeedAvg': '⚡ 平均 {avg} tok/s',
     'chat.tokenSpeedApiAvg': '⚡ API 平均 {avg} tok/s',
+    'chat.tokenSpeedDshFirstToken': '首token {firstToken}',
+    'chat.tokenSpeedDshDecode': '吐字 {tps} tok/s',
     // Cycling thinking words (typewriter animation)
     'chat.thinkingCycle.0': '思考中',
     'chat.thinkingCycle.1': '计算中',

@@ -17,6 +17,26 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+/// Per-turn performance deltas derived from the cumulative `sessionStats`
+/// projection (same delta math as `pending_turn_duration`). Bottom-layer
+/// truth straight from DSH — first-token latency and decode throughput are
+/// DSH's own numbers, NOT a client-side text-length estimate.
+#[derive(Default, Clone, Copy)]
+pub struct TurnPerfDelta {
+    /// ΔttftMs / ΔttftSteps — average first-token latency over this turn's
+    /// steps, in ms. `None` until a frame records a first-token step.
+    pub first_token_avg_ms: Option<u64>,
+    /// Steps in this turn that carried a recorded first token.
+    pub first_token_steps: u64,
+    /// ΔdecodeTokens / (ΔdecodeMs in seconds) — decode throughput, tok/s.
+    /// `None` unless the turn has both decode wall time and output tokens.
+    pub decode_tps: Option<f64>,
+    /// Decode wall time of this turn's steps, ms.
+    pub decode_ms: u64,
+    /// Output tokens over the decode-timed steps.
+    pub decode_tokens: u64,
+}
+
 /// Translator state kept across frames of one session (per session, one
 /// instance per mux connection).
 #[derive(Default)]
@@ -55,9 +75,18 @@ pub struct DshTranslator {
     /// tok/s badge (`duration_api_ms`) and /cost duration would stay broken.
     last_stats_llm_ms: u64,
     last_stats_tool_ms: u64,
+    /// sessionStats first-token / decode CUMULATIVE counters — the same
+    /// cumsum→delta derivation as llmMs/toolMs above, feeding the ⚡ badge's
+    /// avg first-token latency and decode throughput (bottom-layer truth).
+    last_stats_ttft_ms: u64,
+    last_stats_ttft_steps: u64,
+    last_stats_decode_ms: u64,
+    last_stats_decode_tokens: u64,
     /// Derived per-turn API duration (llm + tool delta), consumed by the next
     /// `turn/end`.
     pub pending_turn_duration: Option<u64>,
+    /// Derived per-turn first-token / decode deltas, consumed by `turn/end`.
+    pub pending_turn_perf: Option<TurnPerfDelta>,
 }
 
 impl DshTranslator {
@@ -167,7 +196,9 @@ pub fn translate_projection_frame(payload: &Value) -> Value {
 /// Capture a `session/projection` frame into the translator. Only
 /// `sessionStats` is consumed: its llmMs/toolMs counters are CUMULATIVE across
 /// steps and turns, so the per-turn API duration is derived as a delta between
-/// consecutive snapshots and stashed for the next `turn/end`.
+/// consecutive snapshots and stashed for the next `turn/end`. The same delta
+/// math extracts the bottom-layer first-token latency (ttftMs/ttftSteps) and
+/// decode throughput (decodeMs/decodeTokens) for the ⚡ speed badge.
 pub fn translate_stats_projection(state: &mut DshTranslator, payload: &Value) {
     if payload.get("key").and_then(|v| v.as_str()) != Some("sessionStats") {
         return;
@@ -184,6 +215,51 @@ pub fn translate_stats_projection(state: &mut DshTranslator, payload: &Value) {
     // pending value — a fresh service generation should not zero the duration.
     if dur > 0 {
         state.pending_turn_duration = Some(dur);
+    }
+
+    // Bottom-layer timing truth: first-token latency + decode throughput.
+    // Same cumulative→delta approach; zero deltas keep the previous pending.
+    let ttft = value.get("ttftMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let ttft_steps = value.get("ttftSteps").and_then(|v| v.as_u64()).unwrap_or(0);
+    let decode_ms = value.get("decodeMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let decode_tokens = value
+        .get("decodeTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let ttft_ms_delta = ttft.saturating_sub(state.last_stats_ttft_ms);
+    let ttft_steps_delta = ttft_steps.saturating_sub(state.last_stats_ttft_steps);
+    let decode_ms_delta = decode_ms.saturating_sub(state.last_stats_decode_ms);
+    let decode_tokens_delta = decode_tokens.saturating_sub(state.last_stats_decode_tokens);
+    state.last_stats_ttft_ms = ttft;
+    state.last_stats_ttft_steps = ttft_steps;
+    state.last_stats_decode_ms = decode_ms;
+    state.last_stats_decode_tokens = decode_tokens;
+
+    // Average first-token latency over the turn's steps. Skip when the step
+    // count delta is 0 (nothing to average) or the summed latency is 0 (the
+    // DSH frame timestamped no first token — a 0ms "average" would mislead).
+    let first_token_avg_ms = if ttft_steps_delta > 0 && ttft_ms_delta > 0 {
+        Some(ttft_ms_delta / ttft_steps_delta)
+    } else {
+        None
+    };
+    // Decode throughput = output tokens ÷ decode wall time. Require both a
+    // decode window and non-zero tokens so a thinking-only step never shows
+    // a bogus "0.0 tok/s".
+    let decode_tps = if decode_ms_delta > 0 && decode_tokens_delta > 0 {
+        Some(decode_tokens_delta as f64 / (decode_ms_delta as f64 / 1000.0))
+    } else {
+        None
+    };
+    if first_token_avg_ms.is_some() || decode_tps.is_some() {
+        state.pending_turn_perf = Some(TurnPerfDelta {
+            first_token_avg_ms,
+            first_token_steps: ttft_steps_delta,
+            decode_tps,
+            decode_ms: decode_ms_delta,
+            decode_tokens: decode_tokens_delta,
+        });
     }
 }
 
@@ -650,6 +726,21 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
         // prefers duration_api_ms over wall-clock duration_ms).
         result["duration_api_ms"] = json!(turn_duration);
     }
+    // Bottom-layer DSH timing truth (sessionStats deltas): average first-token
+    // latency over the turn's steps + decode throughput. Consumed by the
+    // ⚡ badge (tokenSpeedStore.end) — real DSH numbers from the sessionStats
+    // projection, NOT a client-side text-length estimate.
+    if let Some(perf) = state.pending_turn_perf.take() {
+        if let Some(ft) = perf.first_token_avg_ms {
+            result["first_token_avg_ms"] = json!(ft);
+            result["first_token_steps"] = json!(perf.first_token_steps);
+        }
+        if let Some(tps) = perf.decode_tps {
+            result["decode_tps"] = json!((tps * 10.0).round() / 10.0);
+            result["decode_ms"] = json!(perf.decode_ms);
+            result["decode_tokens"] = json!(perf.decode_tokens);
+        }
+    }
     if !ok {
         // Carry any human-readable detail DSH attached to the failure —
         // without it the frontend had nothing but the bare reason kind and
@@ -825,6 +916,39 @@ mod tests {
         // result usage = turn-accumulated (single step here → same value)
         assert_eq!(ev(&out, 8)["usage"]["input_tokens"], 12460);
         assert_eq!(ev(&out, 8)["uuid"], "m_1");
+    }
+
+    #[test]
+    fn stats_projection_delta_pins_first_token_and_decode_on_turn_end() {
+        // Two cumulative sessionStats snapshots → the delta becomes the turn's
+        // bottom-layer perf: avg first-token latency + decode throughput.
+        let mut st = DshTranslator::default();
+        let stats = |llm: u64, tool: u64, ttft: u64, ttft_steps: u64, dms: u64, dtok: u64| {
+            frame(json!({
+                "type": "session/projection", "key": "sessionStats",
+                "value": { "llmMs": llm, "toolMs": tool, "ttftMs": ttft,
+                           "ttftSteps": ttft_steps, "decodeMs": dms, "decodeTokens": dtok }
+            }))
+        };
+        // Baseline snapshot, then the accumulated counters at the end of the turn.
+        translate_stats_projection(&mut st, &stats(2000, 600, 150, 3, 900, 350));
+        translate_stats_projection(&mut st, &stats(5000, 900, 350, 8, 2100, 1050));
+
+        let end = translate_turn_end(&mut st, &frame(json!({
+            "type": "session/event", "sessionId": "s_x",
+            "event": { "type": "turn/end", "seq": 5, "data": { "turn": 2, "reason": { "kind": "completed" } } }
+        })));
+        let result = end.last().unwrap();
+        assert_eq!(result["type"], "result");
+        // Δttft = 350-150 = 200 over Δsteps = 8-3 = 5 → 40ms average first token
+        assert_eq!(result["first_token_avg_ms"], 40);
+        assert_eq!(result["first_token_steps"], 5);
+        // ΔdecodeTokens = 1050-350 = 700 over ΔdecodeMs = 2100-900 = 1200ms → 583.3 tok/s
+        assert_eq!((result["decode_tps"].as_f64().unwrap() - 583.3).abs() < 0.2, true);
+        assert_eq!(result["decode_ms"], 1200);
+        assert_eq!(result["decode_tokens"], 700);
+        // The existing llm+tool delta derivation still works alongside it.
+        assert_eq!(result["duration_api_ms"], 3300);
     }
 
     #[test]

@@ -107,6 +107,9 @@ export const enDict: Record<string, string> = {
     'goal.edit': 'Edit goal',
     'goal.clear': 'Clear goal',
     'goal.save': 'Save',
+    'goal.cancel': 'Cancel edit',
+    'goal.phaseActive': 'Ongoing Goal',
+    'goal.phasePaused': 'Paused Goal',
     'todo.title': 'Steps',
     'todo.completed': 'completed',
     'todo.inProgress': 'in progress',
@@ -447,6 +450,8 @@ export const enDict: Record<string, string> = {
     'chat.tokenSpeedLive': '⚡ {speed} tok/s · avg {avg} tok/s',
     'chat.tokenSpeedAvg': '⚡ avg {avg} tok/s',
     'chat.tokenSpeedApiAvg': '⚡ API avg {avg} tok/s',
+    'chat.tokenSpeedDshFirstToken': 'first token {firstToken}',
+    'chat.tokenSpeedDshDecode': '{tps} tok/s',
     // Cycling thinking words (typewriter animation)
     'chat.thinkingCycle.0': 'Thinking',
     'chat.thinkingCycle.1': 'Computing',

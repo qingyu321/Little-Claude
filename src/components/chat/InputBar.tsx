@@ -55,6 +55,12 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { useSpeechRecognition } from '../../hooks/useSpeechRecognition';
 // drag-state import removed — tree drag handled by ChatPanel
 
+/** Format a first-token latency: ≥1s → "1.2s", otherwise "850ms". */
+function formatFirstToken(ms: number): string {
+  if (!ms || ms < 0) return '—';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
 /** Thinking effort level configuration data */
 const THINK_LEVELS: { id: ThinkingLevel; labelKey: string }[] = [
   { id: 'off', labelKey: 'think.off' },
@@ -2131,9 +2137,22 @@ export function InputBar() {
               </span>
             ) : (
               <span className="text-[10px] text-text-tertiary tabular-nums">
-                {tokenSpeedTab.apiAvg > 0
-                  ? t('chat.tokenSpeedApiAvg', { avg: String(tokenSpeedTab.apiAvg) })
-                  : t('chat.tokenSpeedAvg', { avg: String(Math.round(tokenSpeedTab.avg)) })}
+                {tokenSpeedTab.firstTokenAvgMs != null || tokenSpeedTab.decodeTps != null ? (
+                  // DeepSeek bottom-layer truth (sessionStats deltas from DSH's
+                  // own timing module — not a client-side estimate).
+                  <span className="inline-flex items-center gap-1.5">
+                    {tokenSpeedTab.firstTokenAvgMs != null && (
+                      <span>{t('chat.tokenSpeedDshFirstToken', { firstToken: formatFirstToken(tokenSpeedTab.firstTokenAvgMs) })}</span>
+                    )}
+                    {tokenSpeedTab.decodeTps != null && tokenSpeedTab.decodeTps > 0 && (
+                      <span>{t('chat.tokenSpeedDshDecode', { tps: tokenSpeedTab.decodeTps.toFixed(1) })}</span>
+                    )}
+                  </span>
+                ) : tokenSpeedTab.apiAvg > 0 ? (
+                  t('chat.tokenSpeedApiAvg', { avg: String(tokenSpeedTab.apiAvg) })
+                ) : (
+                  t('chat.tokenSpeedAvg', { avg: String(Math.round(tokenSpeedTab.avg)) })
+                )}
               </span>
             )}
           </div>

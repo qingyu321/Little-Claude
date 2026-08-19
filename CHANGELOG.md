@@ -17,6 +17,9 @@ All notable changes to Little Claude will be documented in this file.
 - **DSH provider 一等公民（任务 05）** — 调研确认 session.selectModel/credentials.set 可用；provider 类型/预设（DeepSeek Harness）/表单/Tab 三后端；session.rs 路由识别 cli_backend:"deepseek"；start_deepseek_session 注入凭证与模型（尽力而为 + 日志）
 - 「运行环境」补 Codex CLI / DeepSeek Harness 检测与一键安装；`update_dsh_cli`/`check_dsh_update` 更新通道
 - **统计弹窗每日口径切换** — 「Token 活动」（热力图/每日/每周/峰值日）支持按 总量/输入/输出/缓存 查看；总量保持语义口径（含缓存、DeepSeek 输入已含缓存不重复加），明细为原始值，明细条独立配色（输入 accent-light / 输出 success / 缓存 warning）
+- **DeepSeek 首 token 计速（底层真值）** — ⚡ 徽章读取 DSH `sessionStats` 投射（官方 `dsh-session-stats`）：回合末显示平均首 token 延迟（`ttftMs÷ttftSteps` 增量）与解码 tok/s（`decodeTokens÷decodeMs`）——DSH 自身计时的真实数据，非前端文本估算；Claude/Codex 不受影响
+- **GoalBar 1:1 对齐 DSH 官方实现** — 输入框上方任务目标栏改为 DSH 原版形态：灰色靶心图标（去蓝环）+ 相位标签（进行中的/已暂停的目标）+ 36px 高 12px 圆角灰底条 + 28px 圆形操作钮（暂停/继续/编辑/清除）+ 同条内联编辑（保存/取消）——图标与几何全部照抄 `@deepseek-ai/dsh-client-ui-goal`
+- **全局圆角软化** — rounded 体系对齐 DSH 空间尺度（rounded-lg 8→12、xl 12→16、2xl 16→20、气泡 22px），大小盒子、气泡、输入框边角更圆润，不再死板
 
 ### Fixed
 

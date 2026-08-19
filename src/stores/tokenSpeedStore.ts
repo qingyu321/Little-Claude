@@ -34,6 +34,16 @@ interface TabSpeedData {
    * Pinned by end(); 0 until/unless the API reports usable data.
    */
   apiAvg: number;
+  /**
+   * Bottom-layer DSH truth (sessionStats deltas carried on the DSH `result`):
+   * average first-token latency over the turn's steps, in ms. Present only
+   * for DeepSeek turns — DSH's own number, not a client-side estimate.
+   */
+  firstTokenAvgMs?: number;
+  /** Steps in the turn that carried a recorded first token (DSH truth). */
+  firstTokenSteps: number;
+  /** Decode throughput in tok/s (DSH truth: Δ output tokens ÷ Δ decode time). */
+  decodeTps?: number;
   isStreaming: boolean;
   /** Timestamp when streaming ended — badge lingers to show the final average */
   endedAt?: number;
@@ -46,8 +56,15 @@ interface TokenSpeedState {
   /** Recompute smoothed speed from the sliding window (badge UI drives this) */
   tick: (tabId: string, now?: number) => void;
   /** Streaming finished — pin the final average on the badge. Pass the result
-   *  event's usage to pin the API-authoritative average instead of the estimate. */
-  end: (tabId: string, api?: { outputTokens: number; durationMs: number }) => void;
+   *  event's usage to pin the API-authoritative average instead of the estimate.
+   *  For DeepSeek turns also pass the bottom-layer first-token / decode truth. */
+  end: (tabId: string, api?: {
+    outputTokens: number;
+    durationMs: number;
+    firstTokenAvgMs?: number;
+    firstTokenSteps?: number;
+    decodeTps?: number;
+  }) => void;
   /** New turn begins (message_start) — clear the pinned average, start fresh */
   reset: (tabId: string) => void;
 }
@@ -73,6 +90,9 @@ function emptyTab(): TabSpeedData {
     turnStartAt: 0,
     avg: 0,
     apiAvg: 0,
+    firstTokenAvgMs: undefined,
+    firstTokenSteps: 0,
+    decodeTps: undefined,
     isStreaming: false,
   };
 }
@@ -187,7 +207,16 @@ export const useTokenSpeedStore = create<TokenSpeedState>((set, get) => ({
         // Date.now() epoch (~1.7e12) with performance.now() (~1e6) made the
         // ordering meaningless (ended records sorted after live ones, so the
         // wrong tabs got evicted and live streaming tabs could be dropped).
-        [tabId]: { ...tab, isStreaming: false, endedAt: performance.now(), apiAvg },
+        [tabId]: {
+          ...tab,
+          isStreaming: false,
+          endedAt: performance.now(),
+          apiAvg,
+          // Bottom-layer DSH truth (undefined for claude/codex turns).
+          firstTokenAvgMs: api?.firstTokenAvgMs,
+          firstTokenSteps: api?.firstTokenSteps ?? 0,
+          decodeTps: api?.decodeTps,
+        },
       };
       // Lazy GC: prune only when over the bound. Eviction pool = draft_ tabs
       // (ephemeral tabs that are discarded wholesale) + already-ended records;
