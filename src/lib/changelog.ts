@@ -54,11 +54,13 @@ export const CHANGELOG: ChangelogEntry[] = [
             '修复 DeepSeek 后端发送消息弹 cmd 黑窗',
             '修复 DeepSeek 会话后端接线断裂：追问/审批应答/停止/插话此前全部失效，现已恢复',
             '新用户默认后端错配闭环：未装 dsh 自动回落 Claude + 友好安装引导；后端切换器重做（安装状态可见）',
+            '修复 DSH 实时回复不显示且 DeepSeek 上下文恒为 0 — mux 下行连接漏了 /api/events.mux 路径（连根路径被拒 upgrade 无限重试），实时事件从未到前端；现直连 mux 流，逐字回复与 Ctx 条实时更新恢复',
           ],
           en: [
             'Fixed the cmd console window popping up when sending messages on the DeepSeek backend',
             'Fixed DeepSeek session backend wiring: follow-ups, permission answers, Stop and steer were all dead — now restored',
             'New-user default-backend mismatch fixed: falls back to Claude when dsh is missing, with friendly install guidance; backend switcher redone with install status',
+            'Fixed DSH realtime replies not appearing and the DeepSeek context bar stuck at 0 — the mux downlink connected to the wrong path (root instead of /api/events.mux; upgrade rejected and retried forever), so live events never reached the UI; now streams directly from the mux, restoring token-by-token replies and live context updates',
           ],
         },
       },

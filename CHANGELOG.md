@@ -22,6 +22,7 @@ All notable changes to Little Claude will be documented in this file.
 - **DeepSeek 后端发送消息弹 cmd 黑窗** — spawn_dsh_web/taskkill 补 CREATE_NO_WINDOW
 - **DSH 会话后端接线断裂（严重）** — get_backend() 以 deepseek_sessions 映射为事实来源回退识别，send_stdin/respond_permission/send_control_request/kill_session 的 DSH 分支恢复可达
 - **新用户默认后端错配** — 未装 dsh 自动回落 Claude；dsh 缺失友好错误分类；后端切换器重做（字号/tooltip/安装状态预检）；DshSection「首选」徽章 i18n
+- **DSH 实时回复不显示 / 上下文一直为 0（严重）** — mux 下行连接漏了 `/api/events.mux` 路径（连到根路径被服务端拒绝 upgrade，close 1006 无限重试），实时事件从未到达前端，回复只在重开会话后从磁盘可见、DeepSeek 上下文条恒为 0；现直连正确 mux 路径，逐字流式回复与 Ctx 上下文条实时更新恢复
 
 ---
 

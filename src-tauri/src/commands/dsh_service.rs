@@ -254,9 +254,17 @@ impl DshServiceState {
 
 /// Reads `server-request` frames from the mux WebSocket and broadcasts them.
 async fn read_mux_loop(ws_url: String, tx: broadcast::Sender<Value>) {
+    // The mux downlink lives at /api/events.mux — `ws_url` is the bare
+    // ws://host:port root. Opening the ROOT path made the server reject the
+    // upgrade (close 1006) and the reader reconnect with backoff forever, so
+    // DSH realtime events (assistant chunks, `contextPressure` projections,
+    // tool results, turn/end) never reached the frontend: live replies only
+    // appeared after reopening from disk, and the DeepSeek Ctx bar stayed 0.
+    // Same trim+append pattern as the host loop below.
+    let mux_ws = format!("{}/api/events.mux", ws_url.trim_end_matches("/api/events.mux"));
     let mut attempt: u32 = 0;
     loop {
-        match open_ws(&ws_url).await {
+        match open_ws(&mux_ws).await {
             Ok(mut ws) => {
                 attempt = 0; // connected — reset backoff
                 log::info!("[dsh:service] mux connected ({})", ws_url);
