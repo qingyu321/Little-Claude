@@ -2312,7 +2312,7 @@ export function InputBar() {
                 // 中断成功时进程保留，输入框可继续对话；排队消息回退到草稿（H6 语义）。
                 if (stopTabId) void stopSessionGracefully(stopTabId);
               }}
-              className="flex-shrink-0 self-end w-8 h-8 rounded-[10px]
+              className="flex-shrink-0 self-end w-8 h-8 rounded-[12px]
                 bg-red-500/15 text-red-500
                 flex items-center justify-center
                 hover:bg-red-500/25 transition-smooth"
@@ -2327,7 +2327,7 @@ export function InputBar() {
           <button
             onClick={() => void handleSubmit()}
             disabled={isAwaiting || (!input.trim() && !activePrefix)}
-            className={`flex-shrink-0 self-end w-8 h-8 rounded-[10px]
+            className={`flex-shrink-0 self-end w-8 h-8 rounded-[12px]
               flex items-center justify-center transition-smooth
               disabled:opacity-30 disabled:cursor-not-allowed
               ${isAwaiting

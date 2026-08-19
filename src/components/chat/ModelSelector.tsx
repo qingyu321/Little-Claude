@@ -80,6 +80,24 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   // Build display options: official Claude models + extra models from provider.
   // Deduplicate: if multiple Claude models map to the same provider model, keep only the first.
+  // Catalog id set (null until the live DSH catalog has loaded) — the authority
+  // on which direct-mapping models really exist on THIS backend. Ghost ids
+  // (persisted from another/older catalog) must not surface: the label would
+  // claim a model that apply_deepseek_model silently rejects (falls back to
+  // the default flash) — the "shows qwen3.7-max but backend has no such model"
+  // symptom.
+  const catalogIds = useMemo((): Set<string> | null => {
+    if (!isDeepseek || !dshGroups) return null;
+    const s = new Set<string>();
+    for (const group of dshGroups) {
+      for (const m of group.models || []) {
+        const id = normalizeProviderModelName(m.id);
+        if (id) s.add(id);
+      }
+    }
+    return s;
+  }, [isDeepseek, dshGroups]);
+
   const displayOptions = useMemo((): DisplayOption[] => {
     if (!activeProvider || activeProvider.modelMappings.length === 0) {
       return MODEL_OPTIONS.map((m) => ({ id: m.id, label: m.label, short: m.short, mapped: false, isExtra: false }));
@@ -104,6 +122,14 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
     // Extra models (non-tier mappings added by user)
     const extras: DisplayOption[] = activeProvider.modelMappings
       .filter((m) => !FIXED_TIERS.has(m.tier) && m.tier && m.providerModel)
+      // Ghost guard: once the live DSH catalog has loaded, hide direct-mapping
+      // models this backend does not list. Before the catalog arrives
+      // (catalogIds === null) everything stays visible so nothing flickers.
+      .filter(
+        (m) =>
+          catalogIds === null ||
+          catalogIds.has(normalizeProviderModelName(m.providerModel)),
+      )
       .map((m) => {
         const providerModel = normalizeProviderModelName(m.providerModel);
         const providerLabel = displayProviderModelName(providerModel);
@@ -114,7 +140,31 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       });
 
     return [...official, ...extras];
-  }, [activeProvider]);
+  }, [activeProvider, catalogIds]);
+
+  // Ghost pruning: once the live catalog has authoritatively loaded, remove
+  // persisted direct mappings this backend does not know — otherwise they keep
+  // re-appearing in the selector (and in Settings) on every launch. Tier rows
+  // (opus/sonnet/haiku) are never pruned; they resolve through the official
+  // entries. Never runs when the catalog fetch failed (catalogIds === null).
+  useEffect(() => {
+    if (!isDeepseek || !catalogIds || !activeProvider) return;
+    const ghostTiers = new Set(
+      activeProvider.modelMappings
+        .filter(
+          (m) =>
+            !FIXED_TIERS.has(m.tier) &&
+            m.tier &&
+            m.providerModel &&
+            !catalogIds.has(normalizeProviderModelName(m.providerModel)),
+        )
+        .map((m) => m.tier),
+    );
+    if (ghostTiers.size === 0) return;
+    useProviderStore.getState().updateProvider(activeProvider.id, {
+      modelMappings: activeProvider.modelMappings.filter((m) => !ghostTiers.has(m.tier)),
+    });
+  }, [isDeepseek, catalogIds, activeProvider]);
 
   // Fetched provider models not covered by any mapping yet — a direct-pick
   // group. Selecting one writes a direct mapping (tier === model ID).

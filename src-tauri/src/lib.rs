@@ -2138,21 +2138,56 @@ async fn start_deepseek_session(
             .cloned()
             .or_else(|| provider.api_key.clone().filter(|k| !k.trim().is_empty()));
         if let Some(key) = key {
-            match unary(
+            // T05-GUARD: never blind-overwrite. dsh resolves credentials in
+            // layers where the LAUNCHING ENVIRONMENT shadows the file store —
+            // when the env carries the ref, credentials.describe reports
+            // `writable:false` (dsh's own Models page cannot write either) and
+            // the env key is authoritative. LC stays quiet in that case: the
+            // set would be rejected anyway, and writing the file layer would
+            // silently plant a divergent key that surfaces the moment the env
+            // shadow disappears. Only when the file layer governs (writable)
+            // does the provider key sync through.
+            let writable = match unary(
                 &service.base_url,
-                "credentials.set",
-                json!({ "ref": "DEEPSEEK_API_KEY", "value": key }),
+                "credentials.describe",
+                json!({ "refs": ["DEEPSEEK_API_KEY"] }),
             )
             .await
             {
-                Ok(_) => eprintln!(
-                    "[LITTLECLAUDE:deepseek] T05: synced provider '{}' API key into dsh credentials (DEEPSEEK_API_KEY)",
+                Ok(desc) => desc
+                    .pointer("/credentials/DEEPSEEK_API_KEY/writable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true), // unknown shape → keep legacy try-set behavior
+                Err(e) => {
+                    eprintln!(
+                        "[LITTLECLAUDE:deepseek] T05: credentials.describe failed ({}); attempting set anyway",
+                        e
+                    );
+                    true
+                }
+            };
+            if !writable {
+                eprintln!(
+                    "[LITTLECLAUDE:deepseek] T05: DEEPSEEK_API_KEY is env-managed by dsh (source=env, read-only) — keeping dsh's key, provider '{}' does not overwrite",
                     provider.name
-                ),
-                Err(e) => eprintln!(
-                    "[LITTLECLAUDE:deepseek] T05: credentials.set rejected ({}); dsh keeps its own DEEPSEEK_API_KEY (env / .credentials.yaml)",
-                    e
-                ),
+                );
+            } else {
+                match unary(
+                    &service.base_url,
+                    "credentials.set",
+                    json!({ "ref": "DEEPSEEK_API_KEY", "value": key }),
+                )
+                .await
+                {
+                    Ok(_) => eprintln!(
+                        "[LITTLECLAUDE:deepseek] T05: synced provider '{}' API key into dsh credentials (DEEPSEEK_API_KEY)",
+                        provider.name
+                    ),
+                    Err(e) => eprintln!(
+                        "[LITTLECLAUDE:deepseek] T05: credentials.set rejected ({}); dsh keeps its own DEEPSEEK_API_KEY (env / .credentials.yaml)",
+                        e
+                    ),
+                }
             }
         } else {
             eprintln!(

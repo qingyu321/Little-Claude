@@ -51,6 +51,9 @@ export default defineConfig(async () => ({
   // Code splitting: split heavy vendor libraries into separate chunks so the
   // main thread isn't blocked parsing a single 2.6 MB bundle at startup.
   build: {
+    // No JS minification/obfuscation (user preference — keeps the shipped
+    // JS readable/inspectable). Vite's esbuild/terser minify pass is off.
+    minify: false,
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),

@@ -1023,7 +1023,7 @@ const StreamingIndicator = memo(function StreamingIndicator({
       {partialText && !hasPendingQuestion && (
         <div className="flex gap-3 mt-2">
           {showStreamAvatar ? (
-            <div className="w-8 h-8 rounded-[10px] bg-accent
+            <div className="w-8 h-8 rounded-[12px] bg-accent
               flex items-center justify-center flex-shrink-0 text-text-inverse
               text-xs font-bold shadow-md mt-0.5">C</div>
           ) : (
@@ -2330,7 +2330,7 @@ function WelcomeScreen() {
       {/* Primary action: new chat with folder picker */}
       <button
         onClick={handlePickFolder}
-        className="px-6 py-3 rounded-[20px] text-sm font-medium
+        className="px-6 py-3 rounded-[22px] text-sm font-medium
           bg-accent hover:bg-accent-hover text-text-inverse
           hover:shadow-glow transition-smooth
           flex items-center gap-2 mb-8"

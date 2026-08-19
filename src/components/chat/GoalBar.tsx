@@ -104,7 +104,7 @@ export function GoalBar() {
     <div className="mb-1.5">
       <div
         className="flex items-center gap-[10px] h-9 box-border border border-border-l1
-          bg-bg-secondary rounded-[12px] pl-3 pr-[5px] animate-fade-in"
+          bg-bg-secondary rounded-[14px] pl-3 pr-[5px] animate-fade-in"
         title={goal.objective}
         data-goal-bar
       >

@@ -7,7 +7,7 @@ interface UserAvatarProps {
   className?: string;
 }
 
-export function UserAvatar({ size, rounded = 'rounded-[10px]', className = '' }: UserAvatarProps) {
+export function UserAvatar({ size, rounded = 'rounded-[12px]', className = '' }: UserAvatarProps) {
   const avatarUrl = useSettingsStore((s) => s.userAvatarUrl);
   const displayName = useSettingsStore((s) => s.userDisplayName);
 

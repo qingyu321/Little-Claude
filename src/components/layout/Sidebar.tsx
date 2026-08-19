@@ -171,7 +171,7 @@ export function Sidebar() {
         }
         startProjectDraft(workingDirectory);
       }}
-        className="w-full py-2.5 px-4 rounded-[20px] text-sm font-medium
+        className="w-full py-2.5 px-4 rounded-[22px] text-sm font-medium
           bg-accent hover:bg-accent-hover text-text-inverse
           hover:shadow-glow transition-smooth mb-2
           flex items-center justify-center gap-2">
@@ -183,7 +183,7 @@ export function Sidebar() {
       </button>
       <button
         onClick={addExistingProject}
-        className="w-full py-2.5 px-4 rounded-[16px] text-sm font-medium
+        className="w-full py-2.5 px-4 rounded-[18px] text-sm font-medium
           border border-border-subtle bg-bg-secondary text-text-primary
           hover:bg-bg-tertiary hover:border-border-default
           transition-smooth mb-4 flex items-center justify-center gap-2"
