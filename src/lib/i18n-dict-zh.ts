@@ -839,6 +839,7 @@ export const zhDict: Record<string, string> = {
     'provider.fetchedModels': '已获取 {count} 个模型',
     'provider.fetchNeedCreds': '先填写 Base URL 和 API Key',
     'modelSelector.providerModels': '提供者模型',
+    'modelSelector.dshModels': 'DeepSeek 模型（catalog）',
     'modelSelector.refreshModels': '刷新模型列表',
     'provider.modelIdPlaceholder': 'Model ID',
     'provider.providerModelPlaceholder': '供应商模型名',

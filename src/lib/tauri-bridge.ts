@@ -77,6 +77,23 @@ export interface DshAgentPreset {
   isDefault?: boolean;
 }
 
+/** DSH model catalog shapes (llm.models) — the same groups/models DSH's own
+ *  model picker renders. A catalog id is exactly what session.selectModel
+ *  accepts (non-catalog ids are rejected and the session keeps its default). */
+export interface DshCatalogModel {
+  id: string;
+  name?: string;
+  reasoning?: {
+    efforts?: { id: string; name?: string }[];
+    defaultEffort?: string;
+  };
+}
+export interface DshModelGroup {
+  id: string;
+  name?: string;
+  models: DshCatalogModel[];
+}
+
 /** T03: paginated session load result (load_session_tail / load_session_more).
  *  `messages` are the raw JSONL rows in FILE order (oldest → newest) of the
  *  loaded page; `cursor` is the byte offset of the earliest loaded line —
@@ -954,6 +971,12 @@ export const bridge = {
    *  else→workspace-write). */
   setDshPermissionMode: (permissionMode: string) =>
     invoke<void>('dsh_set_permission_mode', { permissionMode }),
+
+  /** Live DSH model catalog (llm.models, no session needed) — fills the
+   *  input-bar model dropdown on the DeepSeek backend so a pick is a REAL
+   *  catalog id. */
+  listDshLlModels: () =>
+    invoke<{ groups: DshModelGroup[] }>('dsh_llm_models'),
 
   /** Install DeepSeek Harness CLI via npm (@deepseek-ai/dsh) */
   installDshCli: () =>

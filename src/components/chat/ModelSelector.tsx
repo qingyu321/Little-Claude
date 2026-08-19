@@ -4,6 +4,7 @@ import { useChatStore, generateMessageId } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useProviderStore } from '../../stores/providerStore';
 import { displayProviderModelName, normalizeProviderModelName } from '../../lib/model-utils';
+import { bridge, type DshModelGroup } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { showToast } from '../shared/Toast';
 import { friendlyError } from '../../lib/error-format';
@@ -40,6 +41,30 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // DeepSeek backend: model list comes from the live DSH catalog (llm.models),
+  // NOT the provider REST /models fetch — the DSH catalog ids are the ones
+  // session.selectModel accepts (anything else falls back to the default flash).
+  const isDeepseek = cliBackend === 'deepseek';
+  const [dshGroups, setDshGroups] = useState<DshModelGroup[] | null>(null);
+  const dshFetchedRef = useRef(false);
+
+  const fetchDshModels = useCallback(async () => {
+    if (dshFetchedRef.current) return;
+    dshFetchedRef.current = true;
+    try {
+      const res = await bridge.listDshLlModels();
+      setDshGroups(res.groups || []);
+    } catch (e) {
+      console.warn('[deepseek] llm.models failed:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isDeepseek && !dshFetchedRef.current) void fetchDshModels();
+  }, [isDeepseek, fetchDshModels]);
+  useEffect(() => {
+    if (open && !dshFetchedRef.current) void fetchDshModels();
+  }, [open, fetchDshModels]);
 
   // Close on outside click
   useEffect(() => {
@@ -118,18 +143,58 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
       }));
   }, [activeProvider]);
 
+  // DeepSeek backend: the live DSH catalog (llm.models). Flattened, deduped
+  // (the same id can appear under opencode-go / deepseek-official / qwen),
+  // and filtered against existing mappings + official tiers. Selecting one
+  // writes a direct mapping (tier === id → providerModel === id) so
+  // resolveModelForProvider keeps passing the real catalog id and
+  // apply_deepseek_model's selectModel sticks.
+  const dshOptions = useMemo((): DisplayOption[] => {
+    if (!isDeepseek || !dshGroups?.length) return [];
+    const covered = new Set(
+      (activeProvider?.modelMappings ?? [])
+        .map((m) => normalizeProviderModelName(m.providerModel))
+        .filter(Boolean),
+    );
+    const officialIds = new Set<string>(MODEL_OPTIONS.map((m) => m.id));
+    const seen = new Set<string>();
+    const out: DisplayOption[] = [];
+    for (const group of dshGroups) {
+      for (const m of group.models || []) {
+        const id = normalizeProviderModelName(m.id);
+        if (!id || seen.has(id) || covered.has(id) || officialIds.has(id)) continue;
+        seen.add(id);
+        out.push({
+          id,
+          label: m.name || id,
+          short: id.includes('/') ? id.split('/').pop()! : id,
+          mapped: true,
+          isExtra: true,
+          isProvider: true,
+        });
+      }
+    }
+    return out;
+  }, [isDeepseek, dshGroups, activeProvider]);
+
   const handleRefreshModels = useCallback(async () => {
     if (!activeProvider || refreshing) return;
     setRefreshing(true);
     try {
-      await useProviderStore.getState().fetchModels(activeProvider.id);
+      if (isDeepseek) {
+        // DeepSeek: refetch the DSH catalog (dedupe-proofed).
+        dshFetchedRef.current = false;
+        await fetchDshModels();
+      } else {
+        await useProviderStore.getState().fetchModels(activeProvider.id);
+      }
     } catch (e) {
       // A6: 刷新模型失败不能无声无息 —— toast 提示（原始错误经分类器转友好文案）
       showToast(friendlyError(String(e)), 'error');
     } finally {
       setRefreshing(false);
     }
-  }, [activeProvider, refreshing]);
+  }, [activeProvider, refreshing, isDeepseek, fetchDshModels]);
 
   const fallbackOption = displayOptions.find((option) => option.mapped) || displayOptions[0];
 
@@ -232,12 +297,12 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
               {renderOption(option)}
             </Fragment>
           ))}
-          {providerOptions.length > 0 && (
+          {(isDeepseek ? dshOptions.length > 0 : providerOptions.length > 0) && (
             <>
               <div className="border-t border-border-subtle my-1" />
               <div className="flex items-center justify-between px-3 py-1">
                 <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
-                  {t('modelSelector.providerModels')}
+                  {isDeepseek ? t('modelSelector.dshModels') : t('modelSelector.providerModels')}
                 </span>
                 <button
                   onClick={handleRefreshModels}
@@ -259,7 +324,7 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
                 </button>
               </div>
               <div className="max-h-48 overflow-y-auto">
-                {providerOptions.map(renderOption)}
+                {(isDeepseek ? dshOptions : providerOptions).map(renderOption)}
               </div>
             </>
           )}

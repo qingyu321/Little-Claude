@@ -63,6 +63,7 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 - **GoalBar 1:1 对齐 DSH 官方实现** — 任务目标栏：灰靶心图标 + 相位标签（进行中的/已暂停的目标）+ 36px 圆角条 + 28px 圆形操作钮 + 同条内联编辑（去掉了自创蓝环）
 - **全局圆角软化** — rounded 体系对齐 DSH 空间尺度（8→12/12→16/16→20px，气泡 22px），界面更圆润
 - **体验对齐批** — 排队消息窗不再误导（排队气泡带「排队中」标识，队列只显示真正未发送的消息）；TodoDock 任务清单 1:1 对齐 DSH 原版形态；「运行环境」一键更新 Harness 真正生效（tombstone 启动器修复 + 解析缓存失效）
+- **DeepSeek 模型选择修复** — 模型选择器在 DeepSeek 后端读取 DSH 真实 catalog（`llm.models`），可直接选 qwen3.7-max / glm-5.2 / kimi-k3 等全部模型并 `session.selectModel` 钉住，不再因为只有 Claude 档位映射而落到默认 v4-flash
 
 ### v1.1.8 (2026-08-16) — 第三轮全面修复：交互兜底 + 性能快赢
 

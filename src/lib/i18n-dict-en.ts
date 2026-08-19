@@ -839,6 +839,7 @@ export const enDict: Record<string, string> = {
     'provider.fetchedModels': 'Fetched {count} models',
     'provider.fetchNeedCreds': 'Base URL and API Key required',
     'modelSelector.providerModels': 'Provider models',
+    'modelSelector.dshModels': 'DeepSeek models (catalog)',
     'modelSelector.refreshModels': 'Refresh model list',
     'provider.modelIdPlaceholder': 'Model ID',
     'provider.providerModelPlaceholder': 'Provider model name',

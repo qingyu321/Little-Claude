@@ -825,6 +825,22 @@ pub async fn dsh_service_status(
     }))
 }
 
+/// Live DSH model catalog (`llm.models` — requires no session) for the
+/// DeepSeek backend: the same provider groups/models DSH's own model picker
+/// renders. The input-bar model dropdown fills its DeepSeek list from this so
+/// a pick is a REAL catalog id — `apply_deepseek_model` then finds it in
+/// `session.models` and `session.selectModel` sticks. (Non-catalog ids — e.g.
+/// DeepSeek REST API names like `deepseek-chat` — are rejected by the host and
+/// the session keeps the default `deepseek-v4-flash`, which is exactly the
+/// "other model ran as flash" symptom this fixes.)
+#[tauri::command]
+pub async fn dsh_llm_models(
+    mgr: tauri::State<'_, DshServiceManager>,
+) -> Result<Value, String> {
+    let service = mgr.ensure().await?;
+    unary(&service.base_url, "llm.models", json!({})).await
+}
+
 /// Map a Little-Claude permission mode onto the DSH permission default
 /// (`permission.defaultPreset` — the only knob the DSH RPC surface exposes, a
 /// sandbox-mode preset folded into a fresh session's initial permission).

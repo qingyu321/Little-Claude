@@ -2905,6 +2905,9 @@ pub fn run() {
             // DSH permission default align (settings.mutate permission ns) —
             // 模式选择器切换时对齐 DeepSeek 沙箱/审批
             commands::dsh_service::dsh_set_permission_mode,
+            // DSH 模型目录（llm.models，免 session）— 输入栏模型选择器从这里
+            // 取真实 catalog id，选其他模型不再落到默认 flash
+            commands::dsh_service::dsh_llm_models,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

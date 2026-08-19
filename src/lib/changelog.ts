@@ -42,6 +42,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             '全局圆角软化：rounded 体系对齐 DSH 空间尺度（base 8→12、xl 12→16、2xl 16→20px），聊天气泡 22px——盒子不再死板',
             'DeepSeek 权限模式对齐（P-Per）：设置里的 全自动/计划/询问/标准 现在映射到 DSH `permission.defaultPreset`——全自动→danger-full-access（不询问+全权）、计划→read-only（只读防误写；真 plan 协作无 RPC 可及）、标准/询问→workspace-write（询问）；模式切换即时同步、新会话继承、重活服务实测验证（settings.mutate 实测生效）',
             '⚡ 徽章容错：DSH 回合即使没有流式文本 token 到达（快速回合/通道抖动），回合末仍会用底层真值 pin 出 首token 延迟 与 解码 tok/s；可见门补齐 firstToken/decode 字段',
+            'DeepSeek 模型选择修复：选其它模型不再落到 v4-flash——模型选择器在 DeepSeek 后端改为读取 DSH 真实 catalog（`llm.models`，免 session），可直接选 qwen3.7-max/glm-5.2/kimi-k3 等十几款（带 reasoning 档位）；选定即写直接映射并 `session.selectModel` 钉住（活服务实测：catalog id 必生效、非 catalog id 被拒落回默认）',
           ],
           en: [
             'Cross-harness task handoff: switching engines (Claude Code ↔ Codex ↔ DeepSeek) carries your history — recent turns inline within budget + a handoff brief on disk (.tokenicode/handoff/); DeepSeek session history can now be fully carried out',
@@ -56,6 +57,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             'Softer corners globally: the rounded scale is aligned to DSH\'s spatial system (base 8→12, xl 12→16, 2xl 16→20px) and chat bubbles use 22px — no more boxy stiffness',
             'DeepSeek permission-mode alignment: auto / plan / ask / standard now map onto DSH `permission.defaultPreset` — auto→danger-full-access (no approvals + full access), plan→read-only (write-safe stand-in; true plan collaboration has no reachable RPC), standard/ask→workspace-write (ask); applied on session create + mode switch, verified live via settings.mutate',
             '⚡ badge resilience: DeepSeek turns now pin the bottom-layer first-token latency and decode tok/s even when no streamed text token reached pushTokens (fast turns / channel blips); the visibility gate covers firstToken/decode fields',
+            'DeepSeek model selection fixed: picking another model no longer falls back to v4-flash — the model selector now reads the live DSH catalog (`llm.models`, no session needed) on the DeepSeek backend, exposing all ~15 models (qwen3.7-max, glm-5.2, kimi-k3, …) with reasoning efforts; selecting one writes a direct mapping and `session.selectModel` sticks (verified live: catalog ids apply, non-catalog ids are rejected and fall back to the default)',
           ],
         },
       },
