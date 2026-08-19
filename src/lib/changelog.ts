@@ -36,6 +36,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             'DeepSeek 后端 provider 一等公民：provider 系统支持 deepseek 后端（预设/表单/Tab），启动会话时自动注入 API 密钥与模型',
             '前端热更新签名链：ed25519 签名强制校验，无签名/伪造清单不再被应用',
             '「运行环境」补 Codex CLI / DeepSeek Harness 一键安装；dsh 支持一键更新',
+            '统计弹窗每日口径切换：「Token 活动」（热力图/每日/每周/峰值日）可按 总量/输入/输出/缓存 查看——总量保持语义口径，明细为原始值并独立配色',
           ],
           en: [
             'Cross-harness task handoff: switching engines (Claude Code ↔ Codex ↔ DeepSeek) carries your history — recent turns inline within budget + a handoff brief on disk (.tokenicode/handoff/); DeepSeek session history can now be fully carried out',
@@ -44,6 +45,7 @@ export const CHANGELOG: ChangelogEntry[] = [
             'First-class DeepSeek backend providers: the provider system supports the deepseek backend (presets/form/tab) with API key & model auto-injection at session start',
             'Signed web hot-updates: ed25519 signature mandatory — unsigned or forged manifests are rejected',
             'Runtime checklist now installs Codex CLI / DeepSeek Harness one-click; dsh one-click update',
+            'Daily metric switcher in the stats modal: "Token Activity" (heatmap / daily / weekly / peak day) can now be viewed as total / input / output / cache — total keeps the semantic accounting, breakdowns show raw values with distinct colors',
           ],
         },
       },

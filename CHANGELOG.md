@@ -16,6 +16,7 @@ All notable changes to Little Claude will be documented in this file.
 - **热更新签名链（任务 04）** — ed25519-dalek 验签内置公钥，`download_web_update` 强制 `signature` 参数（payload=`version|sha256|zipUrl`）；scripts/sign-web-update.py + make-web-update.ps1 自动接线；私钥 .tokenicode/secrets/（gitignored）
 - **DSH provider 一等公民（任务 05）** — 调研确认 session.selectModel/credentials.set 可用；provider 类型/预设（DeepSeek Harness）/表单/Tab 三后端；session.rs 路由识别 cli_backend:"deepseek"；start_deepseek_session 注入凭证与模型（尽力而为 + 日志）
 - 「运行环境」补 Codex CLI / DeepSeek Harness 检测与一键安装；`update_dsh_cli`/`check_dsh_update` 更新通道
+- **统计弹窗每日口径切换** — 「Token 活动」（热力图/每日/每周/峰值日）支持按 总量/输入/输出/缓存 查看；总量保持语义口径（含缓存、DeepSeek 输入已含缓存不重复加），明细为原始值，明细条独立配色（输入 accent-light / 输出 success / 缓存 warning）
 
 ### Fixed
 

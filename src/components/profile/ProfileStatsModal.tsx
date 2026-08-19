@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { bridge, ProfileStats } from '../../lib/tauri-bridge';
+import type { ProfileDailyStats } from '../../lib/tauri-bridge';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { displayDeepSeekModelName } from '../../lib/model-utils';
 import { dataUrlToBlobUrl } from '../../lib/blob-url';
@@ -12,6 +13,27 @@ interface Props {
 }
 
 type ActivityView = 'daily' | 'weekly' | 'total';
+type TokenMetric = 'total' | 'input' | 'output' | 'cache';
+
+// 每日口径对应的明细字段（后端 daily[] 本就带 input/output/cache 拆分，
+// 此前只渲染了语义 total）。「总量」= 语义 total（含缓存、DeepSeek 输入
+// 已含缓存不重复加），与热力图/模型行/Ctx 条同口径。
+function metricValue(day: ProfileDailyStats, metric: TokenMetric): number {
+  switch (metric) {
+    case 'input': return day.input_tokens || 0;
+    case 'output': return day.output_tokens || 0;
+    case 'cache': return day.cache_tokens || 0;
+    default: return day.total_tokens || 0;
+  }
+}
+
+// 指标条配色：输入/输出/缓存用独立语义色，总量保持主色
+const METRIC_BAR_CLASS: Record<TokenMetric, string> = {
+  total: 'bg-accent',
+  input: 'bg-accent-light',
+  output: 'bg-success',
+  cache: 'bg-warning',
+};
 
 function formatTokens(value: number): string {
   if (!value) return '0';
@@ -62,6 +84,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [view, setView] = useState<ActivityView>('daily');
+  const [metric, setMetric] = useState<TokenMetric>('total');
   const userAvatarUrl = useSettingsStore((s) => s.userAvatarUrl);
   const userDisplayName = useSettingsStore((s) => s.userDisplayName);
 
@@ -82,19 +105,20 @@ export function ProfileStatsModal({ open, onClose }: Props) {
     if (open) loadStats();
   }, [open]);
 
-  // 主口径 = 语义 total（新输入 + 缓存 + 输出，DeepSeek 输入已含缓存则不重复加，
+  // 默认口径 = 语义 total（新输入 + 缓存 + 输出，DeepSeek 输入已含缓存则不重复加，
   // 与后端 scan_profile_stats 的 total_tokens / 模型行 / Ctx 条同口径）。
   // 之前用「输入+输出」会漏掉 Anthropic 风格记录的缓存命中（input 不含缓存），
-  // 缓存重的日子直接从"亿"级掉到"百万"级。缓存明细仍在「累计」视图单独展示。
+  // 缓存重的日子直接从"亿"级掉到"百万"级。
+  // metric 切换（总量/输入/输出/缓存）作用于热力图、每日条、每周条与峰值日。
   const dailyMap = useMemo(() => {
     const map = new Map<string, number>();
     for (const day of stats?.daily ?? []) {
       if (day.date !== 'unknown') {
-        map.set(day.date, day.total_tokens || 0);
+        map.set(day.date, metricValue(day, metric));
       }
     }
     return map;
-  }, [stats]);
+  }, [stats, metric]);
 
   const heatmap = useMemo(() => {
     const today = new Date();
@@ -146,6 +170,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
 
   const maxWeek = Math.max(...weekly.map((w) => w.tokens), 1);
   const displayName = userDisplayName.trim() || 'Little Claude 用户';
+  const barClass = METRIC_BAR_CLASS[metric];
 
   if (!open) return null;
 
@@ -214,21 +239,40 @@ export function ProfileStatsModal({ open, onClose }: Props) {
               <section className="mt-9">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-base font-semibold text-text-primary">Token 活动</h3>
-                  <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary/70 p-1">
-                    {[
-                      ['daily', '每日'],
-                      ['weekly', '每周'],
-                      ['total', '累计'],
-                    ].map(([id, label]) => (
-                      <button
-                        key={id}
-                        onClick={() => setView(id as ActivityView)}
-                        className={`px-3 py-1 rounded-full text-xs transition-smooth
-                          ${view === id ? 'bg-accent text-text-inverse' : 'text-text-muted hover:text-text-primary'}`}
-                      >
-                        {label}
-                      </button>
-                    ))}
+                  <div className="flex items-center gap-2">
+                    <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary/70 p-1">
+                      {[
+                        ['total', '总量'],
+                        ['input', '输入'],
+                        ['output', '输出'],
+                        ['cache', '缓存'],
+                      ].map(([id, label]) => (
+                        <button
+                          key={id}
+                          onClick={() => setMetric(id as TokenMetric)}
+                          className={`px-3 py-1 rounded-full text-xs transition-smooth
+                            ${metric === id ? 'bg-accent text-text-inverse' : 'text-text-muted hover:text-text-primary'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary/70 p-1">
+                      {[
+                        ['daily', '每日'],
+                        ['weekly', '每周'],
+                        ['total', '累计'],
+                      ].map(([id, label]) => (
+                        <button
+                          key={id}
+                          onClick={() => setView(id as ActivityView)}
+                          className={`px-3 py-1 rounded-full text-xs transition-smooth
+                            ${view === id ? 'bg-accent text-text-inverse' : 'text-text-muted hover:text-text-primary'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -272,12 +316,12 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                           <span className="w-24 text-text-muted">{day.date.slice(5)}</span>
                           <div className="h-2 flex-1 rounded-full bg-bg-secondary overflow-hidden">
                             <div
-                              className="h-full rounded-full bg-accent"
-                              style={{ width: `${Math.max(3, day.total_tokens / Math.max(maxDay, 1) * 100)}%` }}
+                              className={`h-full rounded-full ${barClass}`}
+                              style={{ width: `${Math.max(3, metricValue(day, metric) / Math.max(maxDay, 1) * 100)}%` }}
                             />
                           </div>
                           <span className="w-20 text-right text-text-primary">
-                            {formatTokens(day.total_tokens || 0)}
+                            {formatTokens(metricValue(day, metric))}
                           </span>
                         </div>
                       )) : (
@@ -292,7 +336,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                           <span className="w-24 text-text-muted">{week.label}</span>
                           <div className="h-2 flex-1 rounded-full bg-bg-secondary overflow-hidden">
                             <div
-                              className="h-full rounded-full bg-accent"
+                              className={`h-full rounded-full ${barClass}`}
                               style={{ width: `${Math.max(3, week.tokens / maxWeek * 100)}%` }}
                             />
                           </div>
