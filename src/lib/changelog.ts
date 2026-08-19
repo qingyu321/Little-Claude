@@ -19,6 +19,31 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.2.1',
+    date: '2026-08-16',
+    highlights: {
+      zh: ['DeepSeek 收尾最终批：权限模式对齐 DSH 沙箱、模型选择器直通 DSH catalog（不再落到 v4-flash）、⚡ 徽章底层真值容错'],
+      en: ['DeepSeek final batch: permission modes aligned with the DSH sandbox, model picker wired to the live DSH catalog, and bottom-layer ⚡ badge resilience'],
+    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'Features' },
+        items: {
+          zh: [
+            'DeepSeek 模型选择修复：选其它模型不再落到默认 v4-flash——模型选择器在 DeepSeek 后端读取 DSH 真实 catalog（`llm.models` 免 session），直接选 qwen3.7-max / glm-5.2 / kimi-k3 等全部模型并经 `session.selectModel` 钉住（活服务实测：catalog id 生效、非 catalog id 被拒落回默认）',
+            'DeepSeek 权限模式对齐（P-Per）：全自动→`danger-full-access`（不询问+全权沙箱）、计划→`read-only`（只读防误写；真 plan 协作无 RPC 可及取安全近似）、标准/询问→`workspace-write`；模式切换即时 `settings.mutate` 同步，新建 DSH 会话继承（已建会话保留钉死状态）',
+            '⚡ 徽章容错：DSH 回合即使无流式文本 token 到达计速器（快速回合/通道抖动），回合末仍用底层真值 pin 出「首token xx · 吐字 xx tok/s」；可见门补齐 firstToken/decode 字段',
+          ],
+          en: [
+            'DeepSeek model selection fixed: picking another model no longer falls back to default v4-flash — the model selector now reads the live DSH catalog (`llm.models`, no session needed) on the DeepSeek backend, exposing all models (qwen3.7-max, glm-5.2, kimi-k3, …) and `session.selectModel` sticks (verified live: catalog ids apply, non-catalog ids are rejected and fall back to the default)',
+            'DeepSeek permission-mode alignment: auto→`danger-full-access` (no approvals + full sandbox), plan→`read-only` (write-safe stand-in), standard/ask→`workspace-write`; mode switches sync via `settings.mutate` immediately and new DeepSeek sessions inherit it (existing sessions keep their pinned state)',
+            '⚡ badge resilience: DeepSeek turns pin the bottom-layer first-token latency and decode tok/s even when no streamed text token reached pushTokens (fast turns / channel blips); the visibility gate covers firstToken/decode fields',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.2.0',
     date: '2026-08-16',
     highlights: {

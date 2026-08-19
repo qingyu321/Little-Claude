@@ -47,6 +47,12 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 版本历程
 
+### v1.2.1 (2026-08-16) — DeepSeek 收尾最终批
+
+- **DeepSeek 模型选择修复** — 模型选择器在 DeepSeek 后端直读 DSH 真实 catalog（`llm.models` 免 session），可直接选 qwen3.7-max / glm-5.2 / kimi-k3 等全部模型并经 `session.selectModel` 钉住——不再因为只有 Claude 档位映射而落到默认 v4-flash
+- **DeepSeek 权限模式对齐** — 全自动→`danger-full-access`（不询问+全权）、计划→`read-only`（只读防误写）、标准/询问→`workspace-write`；模式切换即时 `settings.mutate` 同步，新建 DSH 会话继承
+- **⚡ 徽章容错** — DSH 回合无流式 token 也能在回合末用底层真值显示「首token · 吐字 tok/s」
+
 ### v1.2.0 (2026-08-16) — 三 harness 时代：交接 / 回滚 / 分页 / provider / 签名 + DSH 可用性收尾
 
 - **跨 harness 任务交接** — 切换引擎（Claude Code ↔ Codex ↔ DeepSeek）自动携带历史：近期轮次预算内联 + 交接简报落盘（`.tokenicode/handoff/`）；DeepSeek 会话历史首次可完整带出（zstd 日志解码）；交接回执与失败显式提示
@@ -209,10 +215,10 @@ Little Claude 是 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-co
 
 ## 下载
 
-请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包（当前 v1.2.0）：
+请到 [GitHub Releases](https://github.com/qingyu321/Little-Claude/releases) 下载安装包（当前 v1.2.1）：
 
-- Windows 便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`LittleClaude-v1.2.0-Portable.exe`
-- Windows 安装包（NSIS）：`Little Claude_1.2.0_x64-setup.exe`
+- Windows 便携版（x64，单文件免安装免管理员，JS 混淆闭源打包）：`LittleClaude-v1.2.1-Portable.exe`
+- Windows 安装包（NSIS）：`Little Claude_1.2.1_x64-setup.exe`
 
 ## 快速开始
 

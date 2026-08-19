@@ -1,8 +1,22 @@
+---
+
 # Changelog / 更新日志
 
 All notable changes to Little Claude will be documented in this file.
 
 本文件记录 Little Claude 的所有重要更新。
+
+---
+
+## [1.2.1] - 2026-08-16
+
+### DeepSeek 收尾最终批
+
+- **DeepSeek 模型选择修复** — 选其它模型不再落到默认 v4-flash：模型选择器在 DeepSeek 后端直读 DSH 真实 catalog（`llm.models` 免 session，分组 + reasoning 档位），可直接选 qwen3.7-max / glm-5.2 / kimi-k3 / grok-4.5 等全部模型并经 `session.selectModel` 钉住（活服务实测：catalog id 生效、非 catalog id 被拒落回默认）
+- **DeepSeek 权限模式对齐（P-Per）** — 全自动→`danger-full-access`（从不询问 + 全权沙箱）、计划→`read-only`（只读防误写；DSH 真 plan 协作无 RPC 可及取安全近似）、标准自动/询问→`workspace-write`（逐工具询问）；模式切换即时 `settings.mutate` 同步，新建 DSH 会话继承，已在跑的会话保留其钉死权限
+- **⚡ 徽章容错** — DSH 回合即使无流式文本 token 到达计速器（快速回合/通道抖动），回合末仍用底层真值 pin 出「首token xx · 吐字 xx tok/s」；徽章可见门补齐 firstToken/decode 字段
+
+> 含此前 v1.2.0 覆盖发布已落地的 DSH 收尾修复（实时链路、agent 预设、思考链透传、首 token 计速底层真值、GoalBar 照抄 DSH、全局圆角软化、排队窗、TodoDock、token 统计/口径）。
 
 ---
 
