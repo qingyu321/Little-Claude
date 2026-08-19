@@ -69,6 +69,12 @@ export interface ChatMessage {
   todoItems?: TodoItem[];          // todo list items
   // File attachments (user-sent images/files)
   attachments?: MessageAttachment[];
+  // Busy-Enter queue marker: TRUE while this user message sits in the pending
+  // queue (added to chat as a record, but NOT yet sent to the backend). The
+  // bubble renders a "排队中" chip; cleared when the message is actually
+  // drained to the backend. Prevents "already sent" looking messages that are
+  // still queued.
+  queued?: boolean;
   // Command feedback fields (for system messages from slash commands)
   commandType?: 'mode' | 'model-switch' | 'info' | 'help' | 'action' | 'error' | 'processing';
   commandData?: Record<string, any>;
@@ -339,6 +345,9 @@ interface ChatState {
   clearPendingMessages: (tabId: string) => void;
   /** Remove one queued message by index (QueueDock delete) */
   removePendingMessage: (tabId: string, index: number) => void;
+  /** Clear the `queued` chip from the first user text message matching text
+   *  (called when a pending message is actually drained to the backend). */
+  clearQueuedFlag: (tabId: string, text: string) => void;
   rewindToTurn: (tabId: string, startMsgIdx: number) => void;
   setInteractionState: (tabId: string, msgId: string, state: InteractionState, error?: string) => void;
   getActiveInteraction: (tabId: string) => ChatMessage | undefined;
@@ -857,6 +866,21 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ...tab,
         pendingUserMessages: tab.pendingUserMessages.filter((_, i) => i !== index),
       }));
+      return result ?? {};
+    }),
+
+  clearQueuedFlag: (tabId, text) =>
+    set((state) => {
+      const tab = state.tabs.get(tabId);
+      if (!tab) return {};
+      const idx = tab.messages.findIndex(
+        (m) => m.queued === true && m.role === 'user' && m.content === text,
+      );
+      if (idx < 0) return {};
+      const next = { ...tab.messages[idx], queued: false };
+      const messages = [...tab.messages];
+      messages[idx] = next;
+      const result = updateTab(state.tabs, tabId, (t) => ({ ...t, messages }));
       return result ?? {};
     }),
 

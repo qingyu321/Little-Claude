@@ -504,6 +504,14 @@ function applyDshContextUpdate(tabId: string, msg: any) {
   const store = useChatStore.getState();
   const updates: Parameters<typeof store.setSessionMeta>[1] = {
     contextTokens: projected,
+    // The projection is the authoritative occupancy — clear the per-step
+    // breakdown fields that DSH message_delta events wrote, otherwise the Ctx
+    // bar mixes a stale last-step cache share with the projected total and the
+    // cache-miss red dot misfires (cachedShare computed from a different
+    // snapshot than `used`).
+    contextInputTokens: undefined,
+    contextCacheReadTokens: undefined,
+    contextCacheCreationTokens: undefined,
   };
   if (typeof msg.context_window === 'number') {
     updates.dshContextWindow = msg.context_window;
@@ -1813,12 +1821,19 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           // get_profile_stats reads correct values even when the Claude CLI writes
           // zero/missing usage to its JSONL. msg.uuid matches the JSONL value.uuid
           // dedup key used by get_profile_stats.
-          persistTurnUsage(
-            prevMeta?.sessionId || '',
-            msg.uuid || '',
-            msg.usage,
-            prevMeta?.model || '',
-          );
+          // DSH: same double-count guard as the foreground path — the Rust DSH
+          // sync owns DSH usage_log records.
+          const isBgDshTurn =
+            prevMeta?.snapshotCliBackend === 'deepseek' ||
+            useSettingsStore.getState().cliBackend === 'deepseek';
+          if (!isBgDshTurn) {
+            persistTurnUsage(
+              prevMeta?.sessionId || '',
+              msg.uuid || '',
+              msg.usage,
+              prevMeta?.model || '',
+            );
+          }
         } else {
           // Same reset as the foreground path — a background /compact must
           // also drop the Ctx bar to 0 instead of keeping the pre-compact
@@ -1890,6 +1905,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const bgFlushStdinId = bgDrainTab?.sessionMeta.stdinId;
           const bgNextMsg = bgFlushStdinId ? store.shiftPendingMessage(tabId) : undefined;
           if (bgNextMsg && bgFlushStdinId) {
+            // Message leaves the queue and is being sent — drop its 排队中 chip.
+            store.clearQueuedFlag(tabId, bgNextMsg);
             store.setSessionStatus(tabId, 'running');
             store.setSessionMeta(tabId, { turnStartTime: Date.now(), turnStartSource: 'auto', lastProgressAt: Date.now(), inputTokens: 0, outputTokens: 0, compactTurnPending: undefined });
             store.setActivityStatus(tabId, { phase: 'thinking' });
@@ -3482,12 +3499,23 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           // TK-FIX: persist authoritative token counts to Little Claude's usage log
           // so get_profile_stats reads correct values even when the Claude CLI
           // writes zero/missing usage to its JSONL.
-          persistTurnUsage(
-            meta.sessionId || '',
-            msg.uuid || '',
-            msg.usage,
-            meta.model || '',
-          );
+          // DSH backend: usage-log persistence is OWNED by the Rust DSH sync
+          // (sync_dsh_usage_impl scans ~/.dsh/sessions per-step on every stats
+          // open). Persisting here too would DOUBLE-COUNT multi-step turns —
+          // the frontend writes the turn SUM under the LAST step's message id,
+          // and the sync then appends the EARLIER steps' ids (invisible to the
+          // message_id dedup) on top of the sum.
+          const isDshTurn =
+            meta.snapshotCliBackend === 'deepseek' ||
+            useSettingsStore.getState().cliBackend === 'deepseek';
+          if (!isDshTurn) {
+            persistTurnUsage(
+              meta.sessionId || '',
+              msg.uuid || '',
+              msg.usage,
+              meta.model || '',
+            );
+          }
         } else {
           // /compact rewrote the context — the Ctx bar must drop now, not
           // keep the pre-compact ≈100% until the next normal turn refreshes
@@ -3613,6 +3641,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const flushStdinId = drainTab?.sessionMeta.stdinId;
           const nextMsg = flushStdinId ? useChatStore.getState().shiftPendingMessage(tabId) : undefined;
           if (nextMsg && flushStdinId) {
+            // The message is leaving the queue and being sent now — drop its
+            // "排队中" chip so the chat doesn't show a queued bubble forever.
+            useChatStore.getState().clearQueuedFlag(tabId, nextMsg);
             const nextTurnStartedAt = Date.now();
             setSessionStatus('running');
             setSessionMeta({

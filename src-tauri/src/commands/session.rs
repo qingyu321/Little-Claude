@@ -1357,10 +1357,21 @@ pub async fn send_stdin(
             process_mgr.remove_deepseek_session(&session_id).await;
             service.session_routes.lock().await.remove(&dsh_sid);
             if let Some(cwd) = old_cwd {
+                // Rebuild under the SAME agent preset the dead session used —
+                // otherwise a bootstrap-only default preset would hide the
+                // shell/web-search tools the user configured.
+                let mut create = serde_json::json!({ "cwd": cwd });
+                if let Some(preset) = old_route
+                    .as_ref()
+                    .and_then(|r| r.agent_preset.as_deref())
+                    .filter(|p| !p.trim().is_empty())
+                {
+                    create["agentPreset"] = serde_json::json!(preset);
+                }
                 if let Ok(created) = crate::commands::dsh_service::unary(
                     &service.base_url,
                     "session.create",
-                    serde_json::json!({ "cwd": cwd }),
+                    create,
                 )
                 .await
                 {
@@ -1383,6 +1394,7 @@ pub async fn send_stdin(
                                 old_route.unwrap_or(crate::commands::dsh_service::DshRoute {
                                     stdin_id: session_id.clone(),
                                     auto_allow: false,
+                                    agent_preset: None,
                                 }),
                             );
                         }
@@ -1825,6 +1837,7 @@ pub async fn dsh_fork_session(
                     crate::commands::dsh_service::DshRoute {
                         stdin_id: session_id.clone(),
                         auto_allow: false,
+                        agent_preset: None,
                     },
                 );
             }

@@ -478,4 +478,10 @@ pub struct StartSessionParams {
     /// low-CPU / integrated-GPU machines. Default (None) = include (backward compat).
     #[serde(default)]
     pub include_partial_messages: Option<bool>,
+    /// DSH backend only: the agent preset id to compose the DeepSeek session
+    /// with (e.g. "standard" for the full coding agent: shell + web search +
+    /// file editing + skills/plan/goal/subagent/workflow). None = the DSH
+    /// profile's default preset. Mirrors the DeepSeek Harness preset picker.
+    #[serde(default)]
+    pub agent_preset: Option<String>,
 }

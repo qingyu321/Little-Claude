@@ -11,7 +11,8 @@ import { useT } from '../../lib/i18n';
  */
 export function TodoDock() {
   const t = useT();
-  const [open, setOpen] = useState(true);
+  // DSH ui-conversation TodoDock is collapsed by default; tap to expand.
+  const [open, setOpen] = useState(false);
   const sessionId = useSessionStore((s) => s.selectedSessionId) ?? '';
   const items = useTodoStore((s) => (sessionId ? s.todos[sessionId] : undefined));
 
@@ -20,6 +21,7 @@ export function TodoDock() {
   const counts: Record<TodoStatus, number> = { pending: 0, in_progress: 0, completed: 0 };
   for (const it of items) counts[it.status] = (counts[it.status] ?? 0) + 1;
 
+  // DSH order: done → active → pending; zero segments omitted; " · " separators.
   const countSegments = [
     counts.completed > 0 ? `${counts.completed} ${t('todo.completed')}` : null,
     counts.in_progress > 0 ? `${counts.in_progress} ${t('todo.inProgress')}` : null,
@@ -28,7 +30,8 @@ export function TodoDock() {
 
   return (
     <div className="mb-1.5 rounded-lg bg-bg-layer-1 border border-border-subtle animate-fade-in overflow-hidden">
-      {/* Header — collapsed by default in DSH; counts always visible */}
+      {/* Header — title WITHOUT count (the counts live in the .progress segment,
+          exactly like the DSH TodoDock) */}
       <div
         className="flex items-center gap-2 px-3 py-1.5 cursor-pointer select-none"
         onClick={() => setOpen(!open)}
@@ -40,7 +43,7 @@ export function TodoDock() {
           <path d="M5.5 8l2 2 3.5-4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <span className="flex-1 text-[11px] text-text-secondary truncate">
-          {t('todo.title')} {items.length}
+          {t('todo.title')}
         </span>
         <span className="text-[10px] text-text-tertiary tabular-nums shrink-0">
           {countSegments}
@@ -52,7 +55,9 @@ export function TodoDock() {
         </svg>
       </div>
 
-      {/* Rows — pending ○ / in_progress ◐ spinning / completed ✓ */}
+      {/* Rows — pending ⟡ dashed / in_progress ◐ spinning / completed ✓.
+          DSH does NOT strike through completed items (only the green check
+          differentiates them). */}
       {open && (
         <ul className="px-3 pb-1.5 max-h-44 overflow-y-auto">
           {items.map((it, i) => (
@@ -60,7 +65,7 @@ export function TodoDock() {
               <StatusGlyph status={it.status} />
               <span className={`flex-1 truncate text-[11px] ${
                 it.status === 'completed'
-                  ? 'text-text-tertiary line-through'
+                  ? 'text-text-tertiary'
                   : it.status === 'in_progress'
                     ? 'text-text-primary'
                     : 'text-text-secondary'
@@ -77,15 +82,17 @@ export function TodoDock() {
 
 function StatusGlyph({ status }: { status: TodoStatus }) {
   if (status === 'completed') {
+    // DSH: solid filled circle + white check.
     return (
-      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
-        <circle cx="8" cy="8" r="7" className="fill-ongoing/15 stroke-ongoing" strokeWidth="1.2" />
-        <path d="M5 8.2l2 2 4-4.4" stroke="currentColor" strokeWidth="1.6"
-          strokeLinecap="round" strokeLinejoin="round" className="text-ongoing" />
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="flex-shrink-0 text-ongoing">
+        <circle cx="8" cy="8" r="7" fill="currentColor" />
+        <path d="M4.8 8.2l2.2 2.2 4.2-4.6" stroke="white" strokeWidth="1.7"
+          strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     );
   }
   if (status === 'in_progress') {
+    // DSH: spinning ring (accent arc) — LC renders the spinner with an arc.
     return (
       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
         <circle cx="8" cy="8" r="6.5" className="stroke-text-tertiary/40" strokeWidth="1.5" />
@@ -95,9 +102,11 @@ function StatusGlyph({ status }: { status: TodoStatus }) {
       </svg>
     );
   }
+  // DSH: pending = dashed ring (grey).
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
-      <circle cx="8" cy="8" r="6.5" className="stroke-text-tertiary/50" strokeWidth="1.2" />
+      <circle cx="8" cy="8" r="6.5" className="stroke-text-tertiary/50"
+        strokeWidth="1.2" strokeDasharray="2.4 2.4" />
     </svg>
   );
 }

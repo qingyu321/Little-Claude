@@ -527,29 +527,60 @@ pub async fn get_profile_stats() -> Result<Value, String> {
     tokio::task::spawn_blocking(sync_dsh_usage_impl)
         .await
         .map_err(|e| format!("DSH usage sync task failed: {}", e))?;
-    if !claude_dir.exists() {
-        return Ok(serde_json::json!({
-            "totalInputTokens": 0u64,
-            "totalOutputTokens": 0u64,
-            "totalCacheTokens": 0u64,
-            "totalTokens": 0u64,
-            "sessionCount": 0u64,
-            "messageCount": 0u64,
-            "activeDays": 0u64,
-            "peakDayTokens": 0u64,
-            "daily": [],
-            "models": [],
-        }));
-    }
+
+    // NOTE: no early return when ~/.claude/projects is missing — pure-DeepSeek
+    // machines have no Claude CLI data, but the usage log (frontend-persisted
+    // + the DSH sync just performed) is still authoritative. scan_profile_stats
+    // already tolerates a missing dir (read_dir error → empty scan) and then
+    // merges the usage log, so all-zero stats only occur when there is truly
+    // nothing to count.
 
     // The full scan now covers EVERY session jsonl under ~/.claude/projects
     // (cc-switch style: all machine-wide Claude Code usage, including CLI
     // sessions started in a terminal), so it can be thousands of files and
     // hundreds of MB — never run that on the async executor. spawn_blocking
     // keeps the Tauri main thread responsive while the scan runs.
-    tokio::task::spawn_blocking(move || scan_profile_stats(&claude_dir))
-        .await
-        .map_err(|e| format!("Profile stats task failed: {}", e))?
+    let mut stats: Value =
+        tokio::task::spawn_blocking(move || scan_profile_stats(&claude_dir))
+            .await
+            .map_err(|e| format!("Profile stats task failed: {}", e))?
+            .map_err(|e| format!("Profile stats scan failed: {}", e))?;
+
+    // DSH sessions have no ~/.claude/projects JSONL, so the scan's
+    // `counted_sessions` never sees them. Add the DSH session count so the
+    // "会话总数" line reflects DeepSeek-only users too.
+    let dsh_count = count_dsh_sessions(&home.join(".dsh"));
+    if dsh_count > 0 {
+        if let Some(obj) = stats.as_object_mut() {
+            let cur = obj.get("sessionCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            obj["sessionCount"] = serde_json::json!(cur + dsh_count);
+        }
+    }
+    Ok(stats)
+}
+
+/// Count DeepSeek Harness sessions (`~/.dsh/sessions/<cwd>/<id>/session.jsonl.zstd`).
+/// Depth-capped walk — a pathological tree must not stall profile stats.
+fn count_dsh_sessions(root: &std::path::Path) -> u64 {
+    fn walk(dir: &std::path::Path, depth: u32) -> u64 {
+        if depth > 4 {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut n = 0u64;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                n += walk(&p, depth + 1);
+            } else if p.file_name().map_or(false, |f| f == "session.jsonl.zstd") {
+                n += 1;
+            }
+        }
+        n
+    }
+    walk(root, 0)
 }
 
 /// One representative assistant message (deduped by message.id across all

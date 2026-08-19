@@ -84,6 +84,11 @@ pub struct DshRoute {
     /// Bypass mode: approval frames are auto-allowed instead of surfacing
     /// PermissionCards (mirrors Claude's `--dangerously-skip-permissions`).
     pub auto_allow: bool,
+    /// DSH agent preset the tab's session was composed with. Carried so the
+    /// R11 self-heal (service restart → session rebuild) recreates the session
+    /// under the SAME preset (bash/web-search/file tools stay available) instead
+    /// of falling back to the profile default.
+    pub agent_preset: Option<String>,
 }
 
 /// Per-service state (one per running `dsh web`).
@@ -534,6 +539,13 @@ async fn route_mux_frames(
                         let Some(route) = route else {
                             continue;
                         };
+                        // Capture cumulative sessionStats into the translator so
+                        // turn/end can derive the per-turn API duration.
+                        {
+                            let mut ts = translators.lock().await;
+                            let t = ts.entry(sid.clone()).or_default();
+                            dsh_events::translate_stats_projection(t, &payload);
+                        }
                         let ev = dsh_events::translate_projection_frame(&payload);
                         if !ev.is_null() {
                             let _ = crate::emit_stream_event(&route.stdin_id, ev);
@@ -811,6 +823,24 @@ pub async fn dsh_service_status(
         "spawned": false,
         "external": false,
     }))
+}
+
+/// Agent preset roster for the DeepSeek backend, straight from the live DSH
+/// service (`agentPreset.list`) — the same catalog the DeepSeek Harness GUI's
+/// preset picker renders. Used by the input-bar preset selector. Lazy: loads
+/// on open; once the service answers, the list is what the session composer
+/// validates against.
+#[tauri::command]
+pub async fn dsh_agent_presets(
+    mgr: tauri::State<'_, DshServiceManager>,
+) -> Result<Value, String> {
+    let service = mgr.ensure().await?;
+    unary(
+        &service.base_url,
+        "agentPreset.list",
+        json!({}),
+    )
+    .await
 }
 
 /// Unary RPC: `POST /api/<method>` with the client-request envelope.

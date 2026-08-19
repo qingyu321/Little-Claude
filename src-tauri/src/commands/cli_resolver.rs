@@ -1004,6 +1004,53 @@ pub fn find_binary_named(names: &[&str]) -> Option<String> {
                 return Some(path);
             }
         }
+        // npm bin-links fallback: when the target shim was locked, npm writes
+        // the launcher as a dot-prefixed tombstone (`.dsh.cmd-<rand>` /
+        // `.dsh.ps1-<rand>`) instead of plain `dsh.cmd` — exact-name matching
+        // above misses it, and the CLI silently falls back to an OLD install.
+        // Accept the tombstone .cmd/.ps1 shim (same content as the real one).
+        for name in names {
+            let stem = Path::new(name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if stem.is_empty() {
+                continue;
+            }
+            if let Ok(rd) = std::fs::read_dir(&td.path) {
+                for entry in rd.flatten() {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    let lower = fname.to_lowercase();
+                    let bare = lower.strip_prefix('.').unwrap_or(&lower);
+                    let rest = match bare.strip_prefix(&stem) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let is_tomb = if let Some(r) = rest.strip_prefix('.') {
+                        // `dsh.cmd-<rand>` / `dsh.ps1-<rand>`
+                        let (ext, rand) = r.split_once('-').unwrap_or(("", ""));
+                        matches!(ext, "cmd" | "ps1") && !rand.is_empty()
+                    } else if let Some(r) = rest.strip_prefix('-') {
+                        // extensionless `dsh-<rand>` — only if executable
+                        !r.is_empty() && is_valid_executable(&entry.path())
+                    } else {
+                        false
+                    };
+                    if !is_tomb {
+                        continue;
+                    }
+                    let p = entry.path();
+                    if is_valid_executable(&p) {
+                        let path = p.to_string_lossy().to_string();
+                        eprintln!(
+                            "[cli_resolver] resolved {} tombstone shim: {} (source: {})",
+                            name, path, td.source
+                        );
+                        return Some(path);
+                    }
+                }
+            }
+        }
     }
     eprintln!("[cli_resolver] no binary found for {:?}", names);
     None

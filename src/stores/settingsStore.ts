@@ -204,6 +204,15 @@ interface SettingsState {
   onboardingOpen: boolean;
   /** Thinking effort level: off disables, low/medium/high/max set effort */
   thinkingLevel: ThinkingLevel;
+  /** DeepSeek backend: agent preset override (mirrors the DeepSeek Harness
+   *  preset picker). When enabled, every DSH session is composed under
+   *  `dshAgentPreset` instead of the DSH profile default — the default is
+   *  often a bootstrap preset that hides bash/web-search behind a
+   *  first-durable-tool-call reveal. */
+  dshAgentPresetEnabled: boolean;
+  /** The chosen DSH agent preset id. "standard" = the full coding agent
+   *  (shell + web search + file editing + skills/plan/goal/subagent/workflow). */
+  dshAgentPreset: string;
   /** Declares that the selected/provider model supports a 1M context window. */
   contextWindowMode: ContextWindowMode;
   /** User-adjustable auto compact threshold in tokens (used when mode is 'custom'). */
@@ -353,6 +362,8 @@ interface SettingsState {
   setOnboardingCompleted: (completed: boolean) => void;
   setOnboardingOpen: (open: boolean) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
+  setDshAgentPresetEnabled: (v: boolean) => void;
+  setDshAgentPreset: (preset: string) => void;
   setContextWindowMode: (mode: ContextWindowMode) => void;
   setCliBackend: (backend: 'claude' | 'codex' | 'deepseek') => void;
   setModelWindows: (modelWindows: Record<string, number>) => void;
@@ -444,6 +455,10 @@ export const useSettingsStore = create<SettingsState>()(
       onboardingCompleted: false,
       onboardingOpen: false,
       thinkingLevel: 'medium' as ThinkingLevel,
+      // Full-tool preset by default: a bootstrap-only DSH default preset
+      // hides bash/web-search, which the user reported as broken.
+      dshAgentPresetEnabled: true,
+      dshAgentPreset: 'standard',
       contextWindowMode: 'default',
       autoCompactThresholdTokens: 160_000,
       autoCompactMode: 'auto',
@@ -604,6 +619,12 @@ export const useSettingsStore = create<SettingsState>()(
 
       setThinkingLevel: (level) =>
         set(() => ({ thinkingLevel: level })),
+
+      setDshAgentPresetEnabled: (v) =>
+        set(() => ({ dshAgentPresetEnabled: v })),
+
+      setDshAgentPreset: (preset) =>
+        set(() => ({ dshAgentPreset: preset, dshAgentPresetEnabled: true })),
 
       setContextWindowMode: (contextWindowMode) =>
         set((state) => {
@@ -1024,6 +1045,8 @@ export const useSettingsStore = create<SettingsState>()(
         setupSkipped: state.setupSkipped, // F22
         onboardingCompleted: state.onboardingCompleted,
         thinkingLevel: state.thinkingLevel,
+        dshAgentPresetEnabled: state.dshAgentPresetEnabled,
+        dshAgentPreset: state.dshAgentPreset,
         contextWindowMode: state.contextWindowMode,
         autoCompactThresholdTokens: state.autoCompactThresholdTokens,
         autoCompactMode: state.autoCompactMode,

@@ -48,6 +48,16 @@ pub struct DshTranslator {
     /// Deliberately NOT cleared by `reset_for_turn` — the seq space spans
     /// turns, so a reset here would lose the fork anchor of the next turn.
     pub last_seq: u64,
+    /// `session/projection` `sessionStats` carries CUMULATIVE counters
+    /// (llmMs/toolMs grow across every step and turn). The last snapshot is
+    /// kept so `translate_turn_end` can derive THIS turn's API duration as a
+    /// delta — without it the DSH `result` would keep `duration_ms: 0` and the
+    /// tok/s badge (`duration_api_ms`) and /cost duration would stay broken.
+    last_stats_llm_ms: u64,
+    last_stats_tool_ms: u64,
+    /// Derived per-turn API duration (llm + tool delta), consumed by the next
+    /// `turn/end`.
+    pub pending_turn_duration: Option<u64>,
 }
 
 impl DshTranslator {
@@ -152,6 +162,29 @@ pub fn translate_projection_frame(payload: &Value) -> Value {
         out["projected_tokens"] = v.clone();
     }
     out
+}
+
+/// Capture a `session/projection` frame into the translator. Only
+/// `sessionStats` is consumed: its llmMs/toolMs counters are CUMULATIVE across
+/// steps and turns, so the per-turn API duration is derived as a delta between
+/// consecutive snapshots and stashed for the next `turn/end`.
+pub fn translate_stats_projection(state: &mut DshTranslator, payload: &Value) {
+    if payload.get("key").and_then(|v| v.as_str()) != Some("sessionStats") {
+        return;
+    }
+    let value = payload.get("value").cloned().unwrap_or_default();
+    let llm = value.get("llmMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tool = value.get("toolMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let llm_delta = llm.saturating_sub(state.last_stats_llm_ms);
+    let tool_delta = tool.saturating_sub(state.last_stats_tool_ms);
+    state.last_stats_llm_ms = llm;
+    state.last_stats_tool_ms = tool;
+    let dur = llm_delta.saturating_add(tool_delta);
+    // A zero delta (repeated snapshot, counters reset) keeps the previous
+    // pending value — a fresh service generation should not zero the duration.
+    if dur > 0 {
+        state.pending_turn_duration = Some(dur);
+    }
 }
 
 /// Translate `approval/requested` / `question/requested` mux frames into
@@ -589,6 +622,9 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
         "completed" | "interrupted" | "cancelled" | "cancelled-turn" | "killed" | "steer" | "user-steer"
     );
     let subtype = if ok { "success" } else { "error" };
+    // Per-turn API duration derived from the sessionStats projection deltas
+    // (llmMs + toolMs) — feeds the tok/s badge (duration_api_ms) and /cost.
+    let turn_duration = state.pending_turn_duration.take().unwrap_or(0);
     let mut result = json!({
         "type": "result",
         "subtype": subtype,
@@ -596,7 +632,7 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
         // DSH reports per-step usage and each step is an independent request;
         // persisting only the last step would undercount tool-heavy turns.
         "usage": state.turn_usage.clone().or_else(|| state.usage.clone()).unwrap_or_else(|| json!({})),
-        "duration_ms": 0,
+        "duration_ms": turn_duration,
         "num_turns": data.get("turn").and_then(|v| v.as_u64()).unwrap_or(1),
         // The frontend's persistTurnUsage keys usage_log records on this
         // field and skips empty values — without it DSH usage never reaches
@@ -609,6 +645,11 @@ fn translate_turn_end(state: &mut DshTranslator, data: &Value) -> Vec<Value> {
         // frontend treats 0/absent as "fork unavailable".
         "dsh_seq": state.last_seq,
     });
+    if turn_duration > 0 {
+        // API-authoritative duration for the tok/s badge (resolveApiSpeed
+        // prefers duration_api_ms over wall-clock duration_ms).
+        result["duration_api_ms"] = json!(turn_duration);
+    }
     if !ok {
         // Carry any human-readable detail DSH attached to the failure —
         // without it the frontend had nothing but the bare reason kind and

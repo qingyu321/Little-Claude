@@ -1161,14 +1161,33 @@ pub async fn update_dsh_cli(app: AppHandle) -> Result<String, String> {
 
         match result {
             Ok(Ok(output)) if output.status.success() => {
-                let check = check_dsh_cli().await.unwrap_or(CliStatus {
-                    installed: false,
-                    version: None,
-                    path: None,
-                    git_bash_missing: false,
-                    service_running: None,
-                });
-                let version = check.version.unwrap_or_else(|| "unknown".to_string());
+                // The npm install succeeded. Three things must happen for the
+                // update to actually take effect:
+                //  1. resolver caches invalidated (the tier scan may still hold
+                //     the OLD resolved path),
+                //  2. a plain `dsh.cmd` shim ensured in our own npm-global —
+                //     npm sometimes writes dot-prefixed bin tombstones
+                //     (`.dsh.cmd-<rand>`) when the target shim is locked by a
+                //     running `dsh web`; LC resolves exact names only, so
+                //     without this the OLD binary keeps winning,
+                //  3. the RETURNED version is the freshly installed one (read
+                //     from the package manifest) — resolving the binary could
+                //     report the OLD version and show "更新到旧版本".
+                crate::invalidate_resolver_caches();
+                ensure_dsh_shim(&prefix_dir);
+                let version = match read_installed_dsh_version(&prefix_dir) {
+                    Some(v) => v,
+                    None => {
+                        let check = check_dsh_cli().await.unwrap_or(CliStatus {
+                            installed: false,
+                            version: None,
+                            path: None,
+                            git_bash_missing: false,
+                            service_running: None,
+                        });
+                        check.version.unwrap_or_else(|| "unknown".to_string())
+                    }
+                };
                 eprintln!(
                     "[update_dsh_cli] npm installed v{} from {}",
                     version, registry
@@ -1202,6 +1221,58 @@ pub async fn update_dsh_cli(app: AppHandle) -> Result<String, String> {
     }
 
     Err(last_err)
+}
+
+/// npm sometimes writes bin-links as dot-prefixed tombstone files
+/// (`.dsh.cmd-<random>` / `.dsh-<random>`) instead of plain `dsh.cmd` when the
+/// target shim is locked by a running `dsh web` process (EPERM/EBUSY). LC's
+/// resolver matches exact names only, so the freshly-installed CLI would be
+/// invisible and the OLD binary kept — "更新成功但还在用旧版". Ensure a plain
+/// `dsh.cmd` wrapper exists in our own npm-global prefix so the update takes
+/// effect (temp + rename; a locked target keeps the existing shim intact).
+fn ensure_dsh_shim(prefix_dir: &std::path::Path) {
+    let bin_js = prefix_dir
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    if !bin_js.exists() {
+        eprintln!(
+            "[update_dsh_cli] package bin.js missing ({}) — shim skipped",
+            bin_js.display()
+        );
+        return;
+    }
+    // The standard npm cmd shim shape (runs bin.js through node from PATH).
+    let content = format!(
+        "@ECHO off\r\nSETLOCAL\r\nnode \"{}\" %*\r\nENDLOCAL\r\n",
+        bin_js.display()
+    );
+    let shim = prefix_dir.join("dsh.cmd");
+    let tmp = prefix_dir.join(format!("dsh.cmd.tmp{}", std::process::id()));
+    if std::fs::write(&tmp, content).is_ok() {
+        if std::fs::rename(&tmp, &shim).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!("[update_dsh_cli] shim replace failed (locked?) — keeping existing");
+        } else {
+            eprintln!("[update_dsh_cli] ensured dsh.cmd shim -> {}", shim.display());
+        }
+    }
+}
+
+/// Read the ACTUALLY installed dsh version from the package manifest inside
+/// our npm-global prefix (truthful post-update version — resolving the binary
+/// can return the old version when the shim was missing/stale).
+fn read_installed_dsh_version(prefix_dir: &std::path::Path) -> Option<String> {
+    let pkg = prefix_dir
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("package.json");
+    let text = std::fs::read_to_string(&pkg).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(str::to_string)
 }
 
 /// Check the npm registry for a newer @deepseek-ai/dsh version.

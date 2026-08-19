@@ -23,6 +23,11 @@ All notable changes to Little Claude will be documented in this file.
 - **DSH 会话后端接线断裂（严重）** — get_backend() 以 deepseek_sessions 映射为事实来源回退识别，send_stdin/respond_permission/send_control_request/kill_session 的 DSH 分支恢复可达
 - **新用户默认后端错配** — 未装 dsh 自动回落 Claude；dsh 缺失友好错误分类；后端切换器重做（字号/tooltip/安装状态预检）；DshSection「首选」徽章 i18n
 - **DSH 实时回复不显示 / 上下文一直为 0（严重）** — mux 下行连接漏了 `/api/events.mux` 路径（连到根路径被服务端拒绝 upgrade，close 1006 无限重试），实时事件从未到达前端，回复只在重开会话后从磁盘可见、DeepSeek 上下文条恒为 0；现直连正确 mux 路径，逐字流式回复与 Ctx 上下文条实时更新恢复
+- **DeepSeek 后端 agent 预设选择（新增）** — 仿 DSH harness 预设选择器，放思考级别右侧、带启用开关；选完整工具预设（standard = Shell + 联网搜索 + 文件编辑 + Skills/计划/目标/子代理），bash(pwsh)/联网搜索恢复可用；思考级别真正传到 DSH（reasoningEffort）——思考链可实时显示（默认 high）
+- **「运行环境」一键更新 Harness 失效修复** — npm 装完但启动器被写成隐藏 tombstone、LC 仍解析旧版；现确保 dsh.cmd 启动器 + 解析缓存失效 + 返回真实新版本
+- **排队消息窗误导修复** — 已显示且正在运行的消息不再回填队列；排队中的气泡带「排队中」标识，队列只显示真正未发送的消息
+- **任务清单（TodoDock）对齐 DSH 原版形态** — 标题不含计数、完成项不划线、pending 虚线圆环、默认折叠
+- **token 统计模块修复** — 纯 DeepSeek 机器统计全 0（usage_log 合并被提前丢弃）、DSH 回合时长/均速恒 0（sessionStats 增量）、Ctx 缓存 miss 红点误亮、DSH 多步回合统计双计、会话总数不计 DSH
 
 ---
 

@@ -2042,7 +2042,19 @@ async fn start_deepseek_session(
     let dsh_session_id = match state.get_deepseek_session(&stdin_id).await {
         Some(sid) => sid,
         None => {
-            let created = unary(&service.base_url, "session.create", json!({ "cwd": params.cwd }))
+            // Compose the session under the user-chosen agent preset (mirrors
+            // the DeepSeek Harness preset picker). None keeps the profile
+            // default. "standard" = full coding agent (shell + web search +
+            // file editing + skills/plan/goal/subagent/workflow) — the reliable
+            // baseline when the profile default is a bootstrap preset that
+            // hides bash/web-search behind a first-durable-tool-call reveal.
+            let mut create = json!({ "cwd": params.cwd });
+            if let Some(preset) = params.agent_preset.as_deref() {
+                if !preset.trim().is_empty() {
+                    create["agentPreset"] = json!(preset);
+                }
+            }
+            let created = unary(&service.base_url, "session.create", create)
                 .await
                 .map_err(|e| format!("dsh session.create failed: {}", e))?;
             let sid = created
@@ -2072,6 +2084,9 @@ async fn start_deepseek_session(
             DshRoute {
                 stdin_id: stdin_id.clone(),
                 auto_allow,
+                // Snapshot the preset so the R11 self-heal can rebuild the
+                // session under the same composition.
+                agent_preset: params.agent_preset.clone(),
             },
         );
     }
@@ -2201,7 +2216,13 @@ async fn start_deepseek_session(
 
     // T05 model passthrough (see apply_deepseek_model below).
     if let Some(ref model) = params.model {
-        apply_deepseek_model(&service.base_url, &dsh_session_id, model).await;
+        apply_deepseek_model(
+            &service.base_url,
+            &dsh_session_id,
+            model,
+            params.thinking_level.as_deref(),
+        )
+        .await;
     }
 
     // Prompt (queue mode — steer/interrupts go through send_stdin/kill).
@@ -2247,7 +2268,12 @@ async fn start_deepseek_session(
 ///
 /// Best-effort by design: any failure only logs and the session keeps dsh's
 /// current/default model — a model mismatch must never sink the message.
-async fn apply_deepseek_model(base_url: &str, dsh_session_id: &str, requested: &str) {
+async fn apply_deepseek_model(
+    base_url: &str,
+    dsh_session_id: &str,
+    requested: &str,
+    thinking_level: Option<&str>,
+) {
     use crate::commands::dsh_service::unary;
     use serde_json::json;
 
@@ -2273,23 +2299,26 @@ async fn apply_deepseek_model(base_url: &str, dsh_session_id: &str, requested: &
         }
     };
 
-    // Already the requested model — skip the selectModel churn (selectModel
-    // also rewrites dsh's saved default, so no-op calls are worth avoiding).
-    let current = catalog
-        .get("current")
-        .and_then(|c| c.get("model"))
-        .and_then(|m| m.as_str())
-        .unwrap_or_default();
-    if current.eq_ignore_ascii_case(requested) {
-        eprintln!(
-            "[LITTLECLAUDE:deepseek] T05: model '{}' already selected in dsh session",
-            requested
-        );
-        return;
-    }
+    // Map the Little-Claude thinking level to a DSH reasoning effort. DSH only
+    // streams `reasoning-delta` (the thinking chain) when the selection carries
+    // a `reasoningEffort`; several models (opencode-go's deepseek-v4-flash)
+    // declare NO default, so without this the model never reasons and the LC
+    // frontend shows no thinking even though the whole reasoning pipeline
+    // (model → pi-ai reasoning_content → DSH reasoning-delta → thinking_delta)
+    // works end to end.
+    let desired_effort_raw: Option<&str> = thinking_level.and_then(|l| match l {
+        "off" => Some("off"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("max"),
+        "max" => Some("max"),
+        _ => None,
+    });
 
-    // Find the provider group whose catalog lists the requested model id.
-    let mut chosen: Option<(String, String)> = None;
+    // Find the provider group whose catalog lists the requested model id,
+    // capturing the model's declared reasoning efforts for clamping.
+    let mut chosen: Option<(String, String, Option<String>)> = None;
     if let Some(groups) = catalog.get("groups").and_then(|g| g.as_array()) {
         for group in groups {
             let provider_id = group.get("id").and_then(|v| v.as_str()).unwrap_or_default();
@@ -2300,7 +2329,40 @@ async fn apply_deepseek_model(base_url: &str, dsh_session_id: &str, requested: &
                 for m in models {
                     let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                     if id.eq_ignore_ascii_case(requested) {
-                        chosen = Some((provider_id.to_string(), id.to_string()));
+                        // Clamp the mapped effort to what THIS model supports:
+                        // exact match wins; otherwise the model's declared
+                        // default; otherwise the first non-off effort (so a
+                        // "medium" ask on an off/high/max model lands on high
+                        // — thinking stays visible). "off" is only honored when
+                        // the model actually supports it.
+                        let efforts: Vec<String> = m
+                            .pointer("/reasoning/efforts")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|e| {
+                                        e.get("id").and_then(|v| v.as_str()).map(str::to_string)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let default_effort = m
+                            .pointer("/reasoning/defaultEffort")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let effort = desired_effort_raw.and_then(|raw| {
+                            if efforts.iter().any(|e| e == raw) {
+                                return Some(raw.to_string());
+                            }
+                            if raw == "off" {
+                                return None; // can't disable on this model — leave DSH default
+                            }
+                            default_effort
+                                .clone()
+                                .filter(|d| d != "off" && efforts.iter().any(|e| e == d))
+                                .or_else(|| efforts.iter().find(|e| *e != "off").cloned())
+                        });
+                        chosen = Some((provider_id.to_string(), id.to_string(), effort));
                         break;
                     }
                 }
@@ -2311,22 +2373,49 @@ async fn apply_deepseek_model(base_url: &str, dsh_session_id: &str, requested: &
         }
     }
 
+    // Already the requested model AND (no effort change requested OR the
+    // current selection already carries it) — skip the selectModel churn
+    // (selectModel also rewrites dsh's saved default).
+    let current = catalog
+        .get("current")
+        .and_then(|c| c.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    let current_effort = catalog
+        .get("current")
+        .and_then(|c| c.get("reasoningEffort"))
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if current.eq_ignore_ascii_case(requested) {
+        let same_effort = match &chosen {
+            Some((_, _, Some(ef))) => ef == &current_effort,
+            _ => current_effort.is_empty(), // no effort desired & none set
+        };
+        if same_effort {
+            eprintln!(
+                "[LITTLECLAUDE:deepseek] T05: model '{}' already selected in dsh session (effort={})",
+                requested,
+                if current_effort.is_empty() { "default".to_string() } else { current_effort }
+            );
+            return;
+        }
+    }
+
     match chosen {
-        Some((provider_id, model_id)) => {
-            match unary(
-                base_url,
-                "session.selectModel",
-                json!({
-                    "sessionId": dsh_session_id,
-                    "provider": provider_id,
-                    "model": model_id,
-                }),
-            )
-            .await
-            {
+        Some((provider_id, model_id, effort)) => {
+            let mut sel = json!({
+                "sessionId": dsh_session_id,
+                "provider": provider_id,
+                "model": model_id,
+            });
+            if let Some(ef) = &effort {
+                sel["reasoningEffort"] = json!(ef);
+            }
+            match unary(base_url, "session.selectModel", sel).await {
                 Ok(selected) => eprintln!(
-                    "[LITTLECLAUDE:deepseek] T05: model passthrough '{}' -> {}/{} (selected: {})",
-                    requested, provider_id, model_id, selected
+                    "[LITTLECLAUDE:deepseek] T05: model passthrough '{}' -> {}/{} effort={:?} (selected: {})",
+                    requested, provider_id, model_id, effort, selected
                 ),
                 Err(e) => eprintln!(
                     "[LITTLECLAUDE:deepseek] T05: session.selectModel rejected '{}' ({}/{}): {}; keeping the dsh default model",
@@ -2787,6 +2876,8 @@ pub fn run() {
             commands::session::delete_dsh_session,
             // D3: DSH 服务状态灯（自管服务优先，其次外部 3080，不 spawn）
             commands::dsh_service::dsh_service_status,
+            // Agent preset roster for the DeepSeek backend (agentPreset.list)
+            commands::dsh_service::dsh_agent_presets,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

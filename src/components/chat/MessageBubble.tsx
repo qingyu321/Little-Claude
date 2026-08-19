@@ -240,6 +240,17 @@ function UserMsg({ message, isHighlighted = false }: Props) {
         text-sm leading-relaxed shadow-sm whitespace-pre-wrap
         ${isHighlighted ? 'search-highlight-blink' : ''}`}>
         {renderUserContent(displayContent)}
+        {message.queued === true && (
+          <span className="inline-flex items-center gap-1 mt-1.5 text-[10px] text-amber-500
+            border border-amber-500/25 bg-amber-500/10 rounded px-1.5 py-0.5">
+            <svg width="9" height="9" viewBox="0 0 12 12" fill="none"
+              stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M6 2v4l2.5 1.5" />
+              <circle cx="6" cy="6" r="4.5" />
+            </svg>
+            {t('msg.queued')}
+          </span>
+        )}
         {!expanded && isLong && (
           <span className="text-text-tertiary">…</span>
         )}

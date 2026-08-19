@@ -154,6 +154,167 @@ function ThinkLevelSelector({ disabled = false }: { disabled?: boolean }) {
   );
 }
 
+/**
+ * DeepSeek agent preset selector — sits right of the thinking-level toggle.
+ * Mirrors the DeepSeek Harness preset picker: a master on/off switch plus the
+ * live agentPreset.list roster (name + description + default badge + check).
+ * When enabled, every DSH session is composed under the chosen preset — the
+ * profile default is often a bootstrap preset that hides bash/web-search
+ * behind a first-durable-tool-call reveal, so `standard` (full coding agent)
+ * is the reliable baseline.
+ */
+interface DshPresetEntry {
+  id: string;
+  name: string;
+  description?: string;
+  trust?: string;
+  isDefault?: boolean;
+}
+
+function AgentPresetSelector({ disabled = false }: { disabled?: boolean }) {
+  const t = useT();
+  const enabled = useSettingsStore((s) => s.dshAgentPresetEnabled);
+  const presetId = useSettingsStore((s) => s.dshAgentPreset);
+  const cliBackend = useSettingsStore((s) => s.cliBackend);
+  const setEnabled = useSettingsStore((s) => s.setDshAgentPresetEnabled);
+  const setPreset = useSettingsStore((s) => s.setDshAgentPreset);
+  const [open, setOpen] = useState(false);
+  const [presets, setPresets] = useState<DshPresetEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadErr, setLoadErr] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const loadPresets = useCallback(async () => {
+    setLoading(true);
+    setLoadErr(false);
+    try {
+      const r = await bridge.listDshAgentPresets();
+      setPresets(r?.presets ?? []);
+    } catch {
+      setLoadErr(true);
+    }
+    setLoading(false);
+  }, []);
+
+  // Presets are DSH-only — hide the control on claude/codex backends.
+  if (cliBackend !== 'deepseek') return null;
+
+  const currentName = presets?.find((p) => p.id === presetId)?.name || presetId;
+
+  return (
+    <div ref={ref} className={`relative ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
+      <button
+        onClick={() => { if (!open) void loadPresets(); setOpen(!open); }}
+        title={t('agentPreset.tooltip')}
+        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs
+          border transition-smooth cursor-pointer
+          ${!enabled
+            ? 'border-border-subtle bg-bg-secondary/50 text-text-muted hover:text-text-primary hover:bg-bg-secondary'
+            : 'border-sky-500/30 bg-sky-500/10 text-sky-500'
+          }`}
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="2" width="5" height="5" rx="1" />
+          <rect x="9" y="2" width="5" height="5" rx="1" />
+          <rect x="2" y="9" width="5" height="5" rx="1" />
+          <rect x="9" y="9" width="5" height="5" rx="1" />
+        </svg>
+        <span className="font-medium max-w-[120px] truncate">
+          {enabled ? currentName : t('agentPreset.off')}
+        </span>
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+          className={`transition-transform duration-150 ${open ? 'rotate-180' : ''}`}>
+          <path d="M1.5 3L4 5.5 6.5 3" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full left-0 mb-1 w-[300px]
+          bg-bg-card border border-border-subtle rounded-lg shadow-lg
+          py-1 z-50 animate-fade-in">
+          {/* Master switch */}
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle">
+            <span className="text-[11px] font-medium text-text-secondary">
+              {t('agentPreset.title')}
+            </span>
+            <button
+              role="switch"
+              aria-checked={enabled}
+              onClick={() => setEnabled(!enabled)}
+              className={`relative w-8 h-4.5 rounded-full transition-smooth cursor-pointer ${
+                enabled ? 'bg-sky-500' : 'bg-bg-layer-2 border border-border-subtle'
+              }`}
+            >
+              <span className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                enabled ? 'left-[15px]' : 'left-0.5'
+              }`} />
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="px-3 py-2 text-[11px] text-text-tertiary">{t('agentPreset.loading')}</div>
+          ) : loadErr ? (
+            <div className="px-3 py-2 text-[11px] text-error">{t('agentPreset.loadError')}</div>
+          ) : (
+            <ul className="max-h-56 overflow-y-auto">
+              {(presets ?? []).map((p) => {
+                const active = enabled && p.id === presetId;
+                return (
+                  <li key={p.id}>
+                    <button
+                      onClick={() => { setPreset(p.id); setOpen(false); }}
+                      className={`w-full flex items-start gap-2 px-3 py-1.5 text-left transition-smooth cursor-pointer
+                        ${active ? 'bg-accent/10' : 'hover:bg-bg-secondary'}`}
+                    >
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-xs ${active ? 'text-accent font-medium' : 'text-text-primary'}`}>
+                          {p.name}
+                          {p.isDefault && (
+                            <span className="ml-1.5 text-[9px] px-1 py-px rounded bg-bg-layer-2 text-text-tertiary align-middle">
+                              {t('agentPreset.defaultBadge')}
+                            </span>
+                          )}
+                        </span>
+                        {p.description ? (
+                          <span className="block truncate text-[10px] text-text-tertiary mt-0.5">
+                            {p.description}
+                          </span>
+                        ) : null}
+                      </span>
+                      {active && (
+                        <svg width="10" height="10" viewBox="0 0 12 12" fill="none"
+                          stroke="currentColor" strokeWidth="1.5" className="mt-1 text-accent shrink-0">
+                          <path d="M2.5 6l2.5 2.5 4.5-4.5" />
+                        </svg>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+              {presets && presets.length === 0 && (
+                <div className="px-3 py-2 text-[11px] text-text-tertiary">
+                  {t('agentPreset.empty')}
+                </div>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlanToggleButton() {
   const t = useT();
   const isOpen = usePlanPanelStore((s) => s.open);
@@ -960,6 +1121,9 @@ export function InputBar() {
     if (!opts?.preserveDraft) setInputSync('');
 
     // Silent restart: skip user message bubble (Code mode ExitPlanMode auto-recovery)
+    // userMsgId is hoisted to function scope — the busy-Enter queue path below
+    // marks the just-added bubble as 排队中 via updateMessage.
+    let userMsgId: string | undefined;
     if (silentRestartRef.current) {
       silentRestartRef.current = false;
     } else {
@@ -970,8 +1134,9 @@ export function InputBar() {
       // this message" means session.fork at that seq. Consume the slot so a
       // later message never reuses a stale anchor. Undefined on claude/codex.
       const pendingDshSeq = getActiveTabState().sessionMeta.pendingDshSeq;
+      userMsgId = generateMessageId();
       addMessage(tabId, {
-        id: generateMessageId(),
+        id: userMsgId,
         role: 'user',
         type: 'text',
         content: rawInput.trim(),
@@ -1012,21 +1177,34 @@ export function InputBar() {
         // claude/codex 后端是 stream-json 输入模式，直接写 stdin 的裸文本
         // 会被 CLI 丢弃——回退为 queue 排队（等待当前轮次结束）。
         if (useSettingsStore.getState().cliBackend === 'deepseek' && meta.stdinId) {
+          const steerMsgId = generateMessageId();
           addMessage(tabId, {
-            id: generateMessageId(),
+            id: steerMsgId,
             role: 'user',
             type: 'text',
             content: text,
             timestamp: Date.now(),
           });
           bridge.sendStdin(meta.stdinId, text, 'steer').catch((err: unknown) => {
-            console.warn('[busy-enter] steer sendStdin failed, queuing:', err);
-            useChatStore.getState().addPendingMessage(tabId, text);
+            // The bubble is already shown — re-queuing here made the QueueDock
+            // display a message the user believes was sent (and it keeps
+            // "排队中" forever if the turn never ends). Restore to the draft
+            // instead, same semantics as process_exit / spawn failures.
+            console.warn('[busy-enter] steer sendStdin failed, restoring to draft:', err);
+            const draft = useChatStore.getState().getTab(tabId)?.inputDraft ?? '';
+            useChatStore.getState().setInputDraft(tabId, draft ? `${draft}\n\n${text}` : text);
+            useChatStore.getState().updateMessage(tabId, steerMsgId, { queued: false });
+            showToast(t('input.sendFailedRestored'), 'error');
           });
           return;
         }
       }
       useChatStore.getState().addPendingMessage(tabId, text);
+      // Honest queue state: this message is NOT sent yet — mark its bubble
+      // (added above) with the "排队中" chip so it doesn't look sent.
+      if (userMsgId) {
+        useChatStore.getState().updateMessage(tabId, userMsgId, { queued: true });
+      }
       return;
     }
 
@@ -1428,6 +1606,9 @@ export function InputBar() {
         const liveProviderId = useProviderStore.getState().getActiveIdForBackend(liveCliBackend);
         const liveResolvedModel = resolveModelForProvider(selectedModel);
         const liveContextWindow = getContextWindowForModel(liveResolvedModel, liveContextWindowMode);
+        const liveDshPreset = useSettingsStore.getState().dshAgentPresetEnabled
+          ? useSettingsStore.getState().dshAgentPreset
+          : undefined;
         debugLog('session', 'starting session', { cwd, stdinId: preGeneratedId, mode: liveSessionMode, provider: liveProviderId, backend: liveCliBackend, selectedModel, resolvedModel: liveResolvedModel });
         const session = await bridge.startSession({
           prompt: text,
@@ -1436,6 +1617,7 @@ export function InputBar() {
           session_id: preGeneratedId,
           resume_session_id: existingSessionId || undefined,
           thinking_level: liveThinkingLevel,
+          agent_preset: liveCliBackend === 'deepseek' ? liveDshPreset : undefined,
           session_mode: (liveSessionMode === 'ask' || liveSessionMode === 'plan') ? liveSessionMode : undefined,
           provider_id: liveProviderId || undefined,
           context_window: liveContextWindow,
@@ -1594,7 +1776,11 @@ export function InputBar() {
   /** QueueDock: delete one queued message */
   const removeQueued = useCallback((index: number) => {
     const tabId = useSessionStore.getState().selectedSessionId;
-    if (tabId) useChatStore.getState().removePendingMessage(tabId, index);
+    if (!tabId) return;
+    const text = useChatStore.getState().getTab(tabId)?.pendingUserMessages[index];
+    useChatStore.getState().removePendingMessage(tabId, index);
+    // The message leaves the queue without being sent — drop its 排队中 chip.
+    if (text !== undefined) useChatStore.getState().clearQueuedFlag(tabId, text);
   }, []);
 
   /** QueueDock: steer — send one queued message live to the running turn */
@@ -1611,8 +1797,10 @@ export function InputBar() {
       return;
     }
     useChatStore.getState().removePendingMessage(tabId, index);
+    useChatStore.getState().clearQueuedFlag(tabId, text);
+    const steerMsgId = generateMessageId();
     addMessage(tabId, {
-      id: generateMessageId(),
+      id: steerMsgId,
       role: 'user',
       type: 'text',
       content: text,
@@ -1621,8 +1809,13 @@ export function InputBar() {
     // 必须显式传 'steer'：Rust 端 mode 缺省是 queue，不传的话"插话"实际
     // 会排到当前轮次后面才送达，与按钮语义（中断当前轮次）矛盾。
     bridge.sendStdin(meta.stdinId, text, 'steer').catch((err: unknown) => {
-      console.warn('[queue-dock] steer failed:', err);
-      useChatStore.getState().addPendingMessage(tabId, text);
+      console.warn('[queue-dock] steer failed, restoring to draft:', err);
+      // Re-queuing here put an already-shown (and running) message back into
+      // the QueueDock — the user reported it as "已发送还在排队". Restore to
+      // the draft instead so the queue window only ever shows unsent messages.
+      const draft = useChatStore.getState().getTab(tabId)?.inputDraft ?? '';
+      useChatStore.getState().setInputDraft(tabId, draft ? `${draft}\n\n${text}` : text);
+      showToast(t('input.sendFailedRestored'), 'error');
     });
   }, [t]);
   const hasLiveStdin = useActiveTab((t) => !!t.sessionMeta.stdinId);
@@ -2176,6 +2369,11 @@ export function InputBar() {
 
           {/* Think toggle */}
           <ThinkLevelSelector disabled={isRunning} />
+
+          {/* DeepSeek agent preset — mirrors the DSH harness preset picker
+              (full-tool baseline by default; the profile default is often a
+              bootstrap preset hiding bash/web-search) */}
+          <AgentPresetSelector disabled={isRunning} />
 
           {/* Rewind button */}
           {showRewind && (

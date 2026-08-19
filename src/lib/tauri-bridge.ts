@@ -27,6 +27,10 @@ export interface StartSessionParams {
   permission_mode?: string;
   /** Which CLI backend to use: "claude" (default) or "codex". */
   cli_backend?: string;
+  /** DeepSeek backend only: DSH agent preset id (e.g. "standard"). When set,
+   *  the DSH session is composed under this preset instead of the profile
+   *  default — mirrors the DeepSeek Harness preset picker. */
+  agent_preset?: string;
   /** When false, omit --include-partial-messages (A2: reduces event volume 10-50×). */
   include_partial_messages?: boolean;
 }
@@ -59,10 +63,18 @@ export interface SessionListItem {
  *  spawned=true → LC launched this `dsh web` itself (random port);
  *  external=true → running but not LC-spawned (default port 3080 or adopted). */
 export interface DshServiceStatus {
-  running: boolean;
-  baseUrl: string | null;
+  running: boolean;  baseUrl: string | null;
   spawned: boolean;
   external: boolean;
+}
+
+/** One row of the DSH agent-preset roster (agentPreset.list). */
+export interface DshAgentPreset {
+  id: string;
+  name: string;
+  description?: string;
+  trust?: 'system' | 'user';
+  isDefault?: boolean;
 }
 
 /** T03: paginated session load result (load_session_tail / load_session_more).
@@ -930,6 +942,11 @@ export const bridge = {
    *  绝不 spawn：只读 DshServiceManager 缓存 + 短超时探活。 */
   dshServiceStatus: () =>
     invoke<DshServiceStatus>('dsh_service_status'),
+
+  /** Agent preset roster for the DeepSeek backend — the same catalog the
+   *  DeepSeek Harness preset picker renders (agentPreset.list). */
+  listDshAgentPresets: () =>
+    invoke<{ presets: DshAgentPreset[] }>('dsh_agent_presets'),
 
   /** Install DeepSeek Harness CLI via npm (@deepseek-ai/dsh) */
   installDshCli: () =>
