@@ -2385,12 +2385,26 @@ async fn apply_deepseek_model(
 
     // Find the provider group whose catalog lists the requested model id,
     // capturing the model's declared reasoning efforts for clamping.
+    //
+    // IMPORTANT: `deepseek-official` is SKIPPED as a selection target. On this
+    // deployment that group's chat route is driven by the DSH `llm-deepseek`
+    // settings (baseURL + DEEPSEEK_API_KEY credential), and the DSH desktop
+    // GUI keeps rewriting that baseURL to gateway/compat endpoints (beiluoxi,
+    // opencode.ai, token-plan) that reject the official DeepSeek key with 401
+    // — every LC message pinned to deepseek-official then failed with a bare
+    // "error". The live-verified working chat path here is `opencode-go`
+    // (OPENCODE_GO_API_KEY) and secondarily `qwen`. web_search is independent
+    // (LC_SEARCH_API_KEY → official search endpoint), so skipping this group
+    // breaks nothing else.
     let mut chosen: Option<(String, String, Option<String>)> = None;
     if let Some(groups) = catalog.get("groups").and_then(|g| g.as_array()) {
         for group in groups {
             let provider_id = group.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             if provider_id.is_empty() {
                 continue;
+            }
+            if provider_id == "deepseek-official" {
+                continue; // broken chat route on this deployment — see above
             }
             if let Some(models) = group.get("models").and_then(|m| m.as_array()) {
                 for m in models {
