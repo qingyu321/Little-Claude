@@ -14,4 +14,6 @@
 pub mod commands;
 pub mod local_asr;
 pub mod protocol;
+pub mod realtime;
+pub mod search;
 pub mod system_audio;

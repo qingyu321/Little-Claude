@@ -19,6 +19,76 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '1.2.2',
+    date: '2026-08-24',
+    highlights: {
+      zh: ['三轮优化：安全收敛（目录授权门、解密审计）、大会话性能（attention 预计算、大目录截断渲染）、面试体验（静音自适应、隐私提示）'],
+      en: ['Three optimization rounds: security hardening (directory authorization gates, decrypt auditing), large-session performance (precomputed attention set, capped tree rendering), and interview UX (adaptive silence threshold, privacy notices)'],
+    },
+    categories: [
+      {
+        label: { zh: '安全', en: 'Security' },
+        items: {
+          zh: [
+            '目录枚举与监听接入授权门：文件树浏览/目录监听只允许白名单根与已注册工作区根，启动恢复的目录自动补注册（串行化避免首次加载被拒）',
+            '解密 oracle 收敛：加解密接口 8KB 输入上限 + 全量审计日志；API Key 支持密文透传（明文可完全不进渲染层）',
+            '危险模式（bypassPermissions）启用需原生系统对话框确认',
+          ],
+          en: [
+            'Directory authorization gates: file-tree browsing and directory watching now only allow whitelisted roots and registered workspace roots; restored working directories re-register on startup (serialized to avoid first-load rejection)',
+            'Decrypt oracle hardening: 8KB input cap on encrypt/decrypt plus full audit logging; API keys support ciphertext passthrough (plaintext can stay out of the webview entirely)',
+            'Bypass permissions mode now requires confirmation via a native system dialog',
+          ],
+        },
+      },
+      {
+        label: { zh: '性能', en: 'Performance' },
+        items: {
+          zh: [
+            '会话列表「需处理」集合改为 store 内 O(1) 增量维护——高频流式更新下不再对全部消息重扫',
+            '文件树单目录渲染上限 200 项（node_modules 级目录不再卡界面），其余折叠进「展开全部」',
+          ],
+          en: [
+            'Conversation list "needs attention" set is now incrementally maintained in the store — no more full-message rescans under high-frequency streaming updates',
+            'File tree caps rendering at 200 entries per directory (node_modules-scale folders no longer freeze the UI); the rest collapse behind an "expand" button',
+          ],
+        },
+      },
+      {
+        label: { zh: '面试助手', en: 'Interview assistant' },
+        items: {
+          zh: [
+            '静音阈值环境自适应：噪声地板 EMA 校准（嘈杂环境不再把底噪判成语音导致无法切题），安静环境行为不变',
+            '设置页新增隐私提示：明确说明转写文本/音频会发送到所配置的第三方搜索/答题/实时端点',
+            '本地 ASR 模型下载失败自动重试镜像；检测到旧版模型残留时提供一键清理释放空间',
+            '实时语音后端稳定性重构：取消广播、搜索结果互斥、停止超时兜底；音频输入上限防内存放大',
+          ],
+          en: [
+            'Adaptive silence threshold: noise-floor EMA calibration (noisy rooms no longer classify ambient sound as speech, unblocking turn segmentation); quiet-room behavior unchanged',
+            'Privacy notices in interview settings: clearly states that transcripts/audio are sent to the configured third-party search/answer/realtime endpoints',
+            'Local ASR model download retries mirrors automatically; legacy model leftovers get a one-click cleanup to free disk space',
+            'Realtime voice backend stability rewrite: cancellation broadcast, search-result mutual exclusion, stop-timeout fallback; audio input size caps prevent memory amplification',
+          ],
+        },
+      },
+      {
+        label: { zh: '其他', en: 'Other' },
+        items: {
+          zh: [
+            'ProfileStatsModal 全面 i18n 化（中英文完整覆盖，含数字单位）',
+            '面板拖拽宽度改为拖动中实时跟随、松手才持久化（消除拖拽卡顿与写盘抖动）',
+            'CLAUDE.md 架构文档刷新至当前实际状态',
+          ],
+          en: [
+            'ProfileStatsModal fully localized (complete zh/en coverage including number units)',
+            'Panel drag-resize now tracks live during drag and persists only on release (removes jank and disk-write churn)',
+            'CLAUDE.md architecture doc refreshed to reflect the actual current state',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '1.2.1',
     date: '2026-08-16',
     highlights: {

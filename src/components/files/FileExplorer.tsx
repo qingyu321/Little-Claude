@@ -283,6 +283,10 @@ function SearchResultItem({
 
 // --- Tree Node ---
 
+// P2: 单目录渲染上限 —— node_modules 等数千条目的目录一次性 map 渲染会卡住
+// 主线程；默认只渲前 200 项，其余折叠进「展开全部」按钮（按需一次渲染）。
+const CHILD_RENDER_CAP = 200;
+
 // F16: React.memo —— 树更新时未变化的子树不再重渲（props 浅比较）
 const TreeNode = memo(function TreeNode({
   node,
@@ -315,6 +319,8 @@ const TreeNode = memo(function TreeNode({
 }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  // P2: 超大目录的「展开全部」状态（折叠目录时一并复位）
+  const [showAllChildren, setShowAllChildren] = useState(false);
   const selectedFile = useFileStore((s) => s.selectedFile);
   const selectFile = useFileStore((s) => s.selectFile);
   const changeKind = useFileStore((s) => s.changedFiles.get(node.path));
@@ -359,6 +365,8 @@ const TreeNode = memo(function TreeNode({
 
   const handleClick = () => {
     if (node.is_dir) {
+      // P2: 折叠时复位「展开全部」，下次展开重新按上限截断
+      if (expanded) setShowAllChildren(false);
       setExpanded(!expanded);
     } else {
       selectFile(node.path);
@@ -507,29 +515,50 @@ const TreeNode = memo(function TreeNode({
               />
             </div>
           )}
-          {node.children.map((child) => {
+          {(() => {
             // F18: 隐藏文件可见性下推到渲染条件——不显示隐藏文件时跳过，
             // 替代此前对整树的递归深拷贝（filteredTree）
-            if (!showHiddenFiles && child.name.startsWith('.')) return null;
+            // P2: 超大目录截断渲染，剩余项折叠进「展开全部」
+            const filtered = showHiddenFiles
+              ? node.children!
+              : node.children!.filter((c) => !c.name.startsWith('.'));
+            const capped = showAllChildren || filtered.length <= CHILD_RENDER_CAP
+              ? filtered
+              : filtered.slice(0, CHILD_RENDER_CAP);
+            const hiddenCount = filtered.length - capped.length;
             return (
-              <TreeNode
-                key={child.path}
-                node={child}
-                depth={depth + 1}
-                onContextMenu={onContextMenu}
-                renamingPath={renamingPath}
-                renameValue={renameValue}
-                onRenameChange={onRenameChange}
-                onRenameSubmit={onRenameSubmit}
-                onRenameCancel={onRenameCancel}
-                creatingIn={creatingIn}
-                createName={createName}
-                onCreateNameChange={onCreateNameChange}
-                onCreateSubmit={onCreateSubmit}
-                onCreateCancel={onCreateCancel}
-              />
+              <>
+                {capped.map((child) => (
+                  <TreeNode
+                    key={child.path}
+                    node={child}
+                    depth={depth + 1}
+                    onContextMenu={onContextMenu}
+                    renamingPath={renamingPath}
+                    renameValue={renameValue}
+                    onRenameChange={onRenameChange}
+                    onRenameSubmit={onRenameSubmit}
+                    onRenameCancel={onRenameCancel}
+                    creatingIn={creatingIn}
+                    createName={createName}
+                    onCreateNameChange={onCreateNameChange}
+                    onCreateSubmit={onCreateSubmit}
+                    onCreateCancel={onCreateCancel}
+                  />
+                ))}
+                {hiddenCount > 0 && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setShowAllChildren(true); }}
+                    className="w-full text-left text-[11px] text-text-tertiary hover:text-accent
+                      py-0.5 transition-colors"
+                    style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }}
+                  >
+                    {t('files.showMoreChildren', { n: String(hiddenCount) })}
+                  </button>
+                )}
+              </>
             );
-          })}
+          })()}
         </div>
       )}
     </div>

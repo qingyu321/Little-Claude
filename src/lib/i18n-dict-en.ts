@@ -30,6 +30,35 @@ export const enDict: Record<string, string> = {
     'plugins.scopeLocal': 'Local',
     // Profile stats
     'profile.statsFailed': 'Failed to load stats: {error}',
+    'profile.defaultUser': 'Little Claude User',
+    'profile.subtitle': 'All local Claude Code sessions (including terminal CLI usage)',
+    'profile.loading': 'Reading local session statistics...',
+    'profile.totalTokens': 'Total Tokens',
+    'profile.peakDayTokens': 'Peak Day Tokens',
+    'profile.sessionCount': 'Sessions',
+    'profile.activeDays': 'Active Days',
+    'profile.activeDaysUnit': '{n} days',
+    'profile.messageCount': 'Messages',
+    'profile.tokenActivity': 'Token Activity',
+    'profile.metricTotal': 'Total',
+    'profile.metricInput': 'Input',
+    'profile.metricOutput': 'Output',
+    'profile.metricCache': 'Cache',
+    'profile.viewDaily': 'Daily',
+    'profile.viewWeekly': 'Weekly',
+    'profile.viewTotal': 'All-time',
+    'profile.insights': 'Insights',
+    'profile.noActivity': 'No token activity to show yet.',
+    'profile.inputTokens': 'Input Tokens',
+    'profile.cacheTokens': 'Cache Tokens',
+    'profile.outputTokens': 'Output Tokens',
+    'profile.topModels': 'Top Models',
+    'profile.responses': '{n} responses',
+    'profile.noModels': 'No model usage recorded yet.',
+    'profile.refresh': 'Refresh',
+    'profile.unitYi': 'B',
+    'profile.unitWan': '0.1M',
+    'profile.monthLabel': 'Mon {n}',
 
     // ChatPanel
     'chat.showSidebar': 'Show sidebar',
@@ -240,7 +269,7 @@ export const enDict: Record<string, string> = {
     'interview.title': 'Interview Mode',
     'interview.confirm.title': 'Enter Interview Mode',
     'interview.confirm.subtitle': 'Answers the moment they ask',
-    'interview.confirm.desc': 'Once enabled, the app keeps listening to the microphone, transcribes the interviewer’s questions to text in real time, and has the AI search the knowledge base and generate a short, speakable answer shown in the teleprompter panel.',
+    'interview.confirm.desc': 'Once enabled, the app keeps listening to the microphone, transcribes the interviewer’s questions word-by-word in real time, searches the web incrementally while listening, and shows a short speakable answer in the teleprompter panel.',
     'interview.confirm.point.asr': 'Speech transcription runs fully locally — nothing uploaded, nothing charged',
     'interview.confirm.point.agent': 'AI-generated answers consume API tokens (metered)',
     'interview.confirm.point.mic': 'Microphone permission is required',
@@ -263,6 +292,7 @@ export const enDict: Record<string, string> = {
     'interview.asrBackend.mimo': 'Mimo Cloud',
     'interview.asrBackend.local': 'Local sherpa-onnx',
     'interview.asrBackend.hybrid': 'Hybrid Compare',
+    'interview.asrBackend.realtime': 'Realtime',
     'interview.transcript.placeholder': 'Waiting for a question…',
     'interview.transcript.label': 'Live transcript',
     'interview.question.label': 'Current question',
@@ -358,6 +388,7 @@ export const enDict: Record<string, string> = {
     'files.deleteFailed': 'Delete failed. Please try again.',
     'files.createFailed': 'Create failed. Please try again.',
     'files.toggleHidden': 'Show/Hide hidden files',
+    'files.showMoreChildren': '{n} more items hidden — click to expand',
 
     // ProjectSelector
     'project.selectFolder': 'Select Project Folder',
@@ -475,6 +506,11 @@ export const enDict: Record<string, string> = {
     'input.processingFiles': 'Processing...',
     'input.stop': 'Stop',
     'input.awaitingInteraction': 'Awaiting interaction response',
+
+    // Cross-backend handoff (T01)
+    'session.handoffFailed': '⚠️ Cross-backend history handoff failed ({error}). The new session will start with empty context.',
+    'session.handoffDone': '🔀 Handed off {turns} turns of history from the {from} backend{brief}. The new engine will continue from the handed-off context.',
+    'session.handoffBrief': ' (full brief: {path})',
 
     // Rewind
     'rewind.title': 'Rewind',

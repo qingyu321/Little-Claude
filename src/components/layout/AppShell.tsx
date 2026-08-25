@@ -98,9 +98,17 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
   const rightRafRef = useRef(0);
   const rightPendingWidthRef = useRef(0);
 
-  /** Apply the latest pending width (also called on mouseup to flush). */
-  const applyRightWidth = useCallback((w: number) => {
+  /* P1 (perf): during a drag, panel widths update LOCAL state only (visual
+     feedback without localStorage writes); the persisted settingsStore is
+     written ONCE on mouseup. liveXxx === null means "use the stored width". */
+  const [liveSidebarWidth, setLiveSidebarWidth] = useState<number | null>(null);
+  const [liveSecondaryWidth, setLiveSecondaryWidth] = useState<number | null>(null);
+
+  /** Apply the latest pending width. `commit=true` (mouseup) persists to the
+      settings store; otherwise only the live visual state updates. */
+  const applyRightWidth = useCallback((w: number, commit: boolean) => {
     if (isFilePreviewModeRef.current) {
+      // previewWidth is component-local state — no persist involved either way
       if (w < COLLAPSE_THRESHOLD) {
         isRightDragging.current = false;
         document.body.style.cursor = '';
@@ -118,11 +126,16 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
         document.body.style.userSelect = '';
         const settings = useSettingsStore.getState();
         if (settings.secondaryPanelOpen) settings.toggleSecondaryPanel();
+        setLiveSecondaryWidth(null);
         return;
       }
-      useSettingsStore.getState().setSecondaryPanelWidth(
-        Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, w))
-      );
+      const clamped = Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, w));
+      if (commit) {
+        useSettingsStore.getState().setSecondaryPanelWidth(clamped);
+        setLiveSecondaryWidth(null);
+      } else {
+        setLiveSecondaryWidth(clamped);
+      }
     }
   }, []);
 
@@ -134,7 +147,7 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
       if (rightRafRef.current) return;
       rightRafRef.current = requestAnimationFrame(() => {
         rightRafRef.current = 0;
-        applyRightWidth(rightPendingWidthRef.current);
+        applyRightWidth(rightPendingWidthRef.current, false);
       });
     };
 
@@ -144,7 +157,10 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
         cancelAnimationFrame(rightRafRef.current);
         rightRafRef.current = 0;
         // Flush the final width so the last mousemove isn't lost.
-        applyRightWidth(rightPendingWidthRef.current);
+        applyRightWidth(rightPendingWidthRef.current, true);
+      } else {
+        // rAF already applied the live width — persist it now
+        applyRightWidth(rightPendingWidthRef.current, true);
       }
       isRightDragging.current = false;
       document.body.style.cursor = '';
@@ -206,9 +222,11 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
           document.body.style.userSelect = '';
           const settings = useSettingsStore.getState();
           if (settings.sidebarOpen) settings.toggleSidebar();
+          setLiveSidebarWidth(null);
           return;
         }
-        useSettingsStore.getState().setSidebarWidth(
+        // P1: 拖拽中只更新本地视觉宽度，不写持久化 store
+        setLiveSidebarWidth(
           Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, w))
         );
       });
@@ -218,17 +236,15 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
       if (sidebarRafRef.current) {
         cancelAnimationFrame(sidebarRafRef.current);
         sidebarRafRef.current = 0;
-        // Flush the final width so the last mousemove isn't lost.
-        const w = sidebarPendingWidthRef.current;
-        if (w < SIDEBAR_COLLAPSE_THRESHOLD) {
-          const settings = useSettingsStore.getState();
-          if (settings.sidebarOpen) settings.toggleSidebar();
-        } else {
-          useSettingsStore.getState().setSidebarWidth(
-            Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, w))
-          );
-        }
       }
+      const w = sidebarPendingWidthRef.current;
+      if (w >= SIDEBAR_COLLAPSE_THRESHOLD && w >= MIN_SIDEBAR_WIDTH) {
+        // mouseup 才写一次持久化 store
+        useSettingsStore.getState().setSidebarWidth(
+          Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, w))
+        );
+      }
+      setLiveSidebarWidth(null);
       isSidebarDragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
@@ -267,11 +283,11 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
       {/* Sidebar — animates to w-0 when hidden or preview mode */}
       <div
         className="flex-shrink-0 transition-all duration-300 ease-out overflow-hidden"
-        style={{ width: showSidebar ? `${sidebarWidth}px` : '0px' }}
+        style={{ width: showSidebar ? `${liveSidebarWidth ?? sidebarWidth}px` : '0px' }}
       >
         <div
           className="h-full overflow-y-auto overflow-x-hidden bg-bg-sidebar"
-          style={{ width: `${sidebarWidth}px` }}
+          style={{ width: `${liveSidebarWidth ?? sidebarWidth}px` }}
         >
           {sidebar}
         </div>
@@ -327,11 +343,11 @@ export const AppShell = memo(function AppShell({ sidebar, main, secondary }: App
       {secondary && (
         <div
           className="flex-shrink-0 transition-all duration-300 ease-out overflow-hidden"
-          style={{ width: showSecondary ? `${secondaryPanelWidth}px` : '0px' }}
+          style={{ width: showSecondary ? `${liveSecondaryWidth ?? secondaryPanelWidth}px` : '0px' }}
         >
           <div
             className="h-full overflow-y-auto overflow-x-hidden bg-bg-sidebar"
-            style={{ width: `${secondaryPanelWidth}px` }}
+            style={{ width: `${liveSecondaryWidth ?? secondaryPanelWidth}px` }}
           >
             {secondary}
           </div>

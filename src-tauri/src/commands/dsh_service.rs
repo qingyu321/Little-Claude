@@ -683,12 +683,16 @@ impl DshServiceManager {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as u16 % 16_000)
             .unwrap_or(0));
+        // Keep the most informative stderr tail across attempts: a boot crash
+        // (bad credentials schema, broken plugin tree) fails identically on
+        // every port, so the LAST tail is the actual diagnosis.
+        let mut last_tail = String::new();
         for try_port in base..base + SPAWN_PORT_TRIES {
             let port = if port_free(try_port) { try_port } else { continue };
             // M2: a spawn failure (port race, binary hiccup) should not abort
             // the whole probe — log and try the next port, mirroring the
             // never-became-ready path below.
-            let child = match spawn_dsh_web(&bin, port) {
+            let (mut child, stderr_tail) = match spawn_dsh_web(&bin, port) {
                 Ok(c) => c,
                 Err(e) => {
                     log::warn!("[dsh:service] spawn failed on :{}: {}", port, e);
@@ -719,22 +723,37 @@ impl DshServiceManager {
                 }
                 tokio::time::sleep(READY_INTERVAL).await;
             }
-            // Never became ready — kill and try the next port.
-            let mut child = child;
+            // Never became ready — kill, capture why, try the next port.
             let _ = child.kill().await;
             let _ = child.wait().await;
+            last_tail = stderr_tail_text(&stderr_tail);
+            if !last_tail.is_empty() {
+                log::warn!("[dsh:service] :{} never became ready; stderr tail:\n{}", port, last_tail);
+            }
         }
-        Err(format!(
-            "dsh web failed to start on ports {}–{} (binary: {})",
-            DEFAULT_PORT + 1,
-            DEFAULT_PORT + SPAWN_PORT_TRIES,
-            bin
-        ))
+        if last_tail.is_empty() {
+            Err(format!(
+                "dsh web failed to start (binary: {}); no stderr output captured",
+                bin
+            ))
+        } else {
+            Err(format!(
+                "dsh web failed to start (binary: {});\n--- dsh stderr tail ---\n{}",
+                bin, last_tail
+            ))
+        }
     }
 }
 
-/// Spawn `dsh --profile web --port <p>` (cmd wrapper for .cmd on Windows).
-fn spawn_dsh_web(bin: &str, port: u16) -> Result<tokio::process::Child, String> {
+/// Ring-buffered tail of a spawned service's stderr (last N lines), shared
+/// between the reader task and failure paths so a boot crash surfaces its
+/// actual cause instead of dying silently (stderr used to go to null — a
+/// plugin-tree crash was completely undiagnosable).
+pub type DshStderrTail = Arc<std::sync::Mutex<Vec<String>>>;
+/// How many trailing stderr lines to keep.
+const STDERR_TAIL_LINES: usize = 12;
+
+fn spawn_dsh_web(bin: &str, port: u16) -> Result<(tokio::process::Child, DshStderrTail), String> {
     let mut cmd = {
         #[cfg(target_os = "windows")]
         {
@@ -756,9 +775,26 @@ fn spawn_dsh_web(bin: &str, port: u16) -> Result<tokio::process::Child, String> 
         .arg("web")
         .arg("--port")
         .arg(port.to_string())
+        // dsh-web-app (0.1.0-rc.7+) opens the OS default browser at the web UI
+        // by default (`openBrowser: true`). LC renders sessions natively and
+        // never wants that handoff — pass the documented opt-out.
+        .arg("--no-open")
         .env("DSH_TELEMETRY_DISABLED", "1")
+        // Isolated DSH_HOME: LC's bundled dsh (flat credentials schema) must
+        // never fight the desktop GUI's runtime copy (versioned schema) over
+        // the shared ~/.dsh/.credentials.yaml — whichever service wrote last
+        // used to crash the other on boot ("the value for \"version\" … must
+        // be a string"). A per-app home ends the format war for good.
+        .env(
+            "DSH_HOME",
+            crate::app_data_dir()?
+                .join("dsh-home")
+                .to_string_lossy()
+                .to_string(),
+        )
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Piped, not null: the tail is kept for failure diagnostics.
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     // User report: every first DSH message popped a visible cmd console
     // window (and re-popped after each service death) — this was the only
@@ -766,7 +802,33 @@ fn spawn_dsh_web(bin: &str, port: u16) -> Result<tokio::process::Child, String> 
     // session.rs:690 and codex at lib.rs:1584 both set it).
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    cmd.spawn().map_err(|e| format!("Failed to spawn dsh web: {}", e))
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn dsh web: {}", e))?;
+    let tail: DshStderrTail = Arc::new(std::sync::Mutex::new(Vec::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let tail_sink = Arc::clone(&tail);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut buf = match tail_sink.lock() {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
+                if buf.len() >= STDERR_TAIL_LINES {
+                    buf.remove(0);
+                }
+                buf.push(line);
+            }
+        });
+    }
+    Ok((child, tail))
+}
+
+/// Snapshot the stderr tail as a single diagnostic string (empty if none).
+fn stderr_tail_text(tail: &DshStderrTail) -> String {
+    tail.lock().map(|b| b.join("\n")).unwrap_or_default()
 }
 
 /// Is the port bindable right now (best-effort)?

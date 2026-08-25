@@ -25,7 +25,15 @@ static MIMO_CLIENTS: tokio::sync::Mutex<Option<HashMap<String, reqwest::Client>>
 /// and exclude credential-ish ones. Both interview_mimo_answer and
 /// interview_test_mimo MUST go through this (R1: the test command used to
 /// skip it entirely).
-fn resolve_api_key(env_name: Option<&str>, fallback: String) -> Result<String, String> {
+pub(crate) fn resolve_api_key(env_name: Option<&str>, fallback: String) -> Result<String, String> {
+    // S3 (hardening): 支持直接传入 TENC1 密文 —— Rust 侧用主密钥解密，
+    // 明文 key 无需进入渲染层内存即可到达请求端点。前端可渐进迁移：
+    // 传 `settings._enc_xxx`（密文）或 `settings.xxx`（明文）均可。
+    let fallback = if fallback.starts_with(crate::commands::provider::ENC_MAGIC) {
+        crate::commands::provider::decrypt_providers(&fallback)?
+    } else {
+        fallback
+    };
     let Some(env_name) = env_name.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return Ok(fallback);
     };
@@ -54,7 +62,7 @@ fn resolve_api_key(env_name: Option<&str>, fallback: String) -> Result<String, S
     }
 }
 
-async fn get_mimo_client(base_url: &str, proxy_url: Option<&str>) -> reqwest::Client {
+pub(crate) async fn get_mimo_client(base_url: &str, proxy_url: Option<&str>) -> reqwest::Client {
     let key = format!("{}|{}", base_url, proxy_url.unwrap_or(""));
     // Fast path: cached client with matching key
     {
@@ -210,6 +218,8 @@ pub async fn interview_mimo_answer(
     temperature: Option<f64>,
     // 本地 ASR 旁路：不为空时跳过 ASR 步，直接用此文本作为问题
     question_text: Option<String>,
+    // 增量搜索参考资料：非空时注入答案提示词（搜索失败/未启用时为空）
+    search_context: Option<String>,
 ) -> Result<String, String> {
     let t0 = std::time::Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -234,6 +244,16 @@ pub async fn interview_mimo_answer(
     let prompt = answer_prompt.or(prompt_text).unwrap_or_else(|| {
         "你是一个面试助手。针对以下中文面试问题，用中文给出简洁清晰的答案（100字以内，适合口头作答）。".to_string()
     });
+
+    // 增量搜索资料注入（search_context 非空时附在提示词后）
+    let prompt = match search_context.as_deref() {
+        Some(ctx) if !ctx.trim().is_empty() => format!(
+            "{}\n\n【联网搜索参考（可能相关，请核对后引用其中事实与数据；无关则忽略）】\n{}",
+            prompt,
+            ctx
+        ),
+        _ => prompt,
+    };
 
     let body: serde_json::Value;
 
@@ -468,7 +488,13 @@ pub async fn interview_mimo_answer(
         full_text.trim().to_string()
     } else {
         // ── 整段分支：端点未走 SSE，一次性解析（前端用 invoke 返回值渲染）──
-        let body_text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
+        // S7: 总超时看门狗 —— connect_timeout 只管建连，服务端挂住不回包
+        // 时 text().await 会永久阻塞，面试卡死在 answering。
+        const NON_SSE_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+        let body_text = tokio::time::timeout(NON_SSE_TOTAL_TIMEOUT, resp.text())
+            .await
+            .map_err(|_| format!("非流式响应超时（{}s）", NON_SSE_TOTAL_TIMEOUT.as_secs()))?
+            .map_err(|e| format!("读取响应失败: {e}"))?;
         log::info!(
             "[mimo-perf] rid={} body_complete(non-sse) +{}ms body_chars={}",
             request_id,

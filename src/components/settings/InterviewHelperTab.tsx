@@ -39,6 +39,56 @@ export default function InterviewHelperTab() {
   const [testError, setTestError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
 
+  // ── 增量搜索配置 ──
+  const searchEnabled = useSettingsStore((s) => s.interviewSearchEnabled);
+  const searchBaseUrl = useSettingsStore((s) => s.interviewSearchBaseUrl);
+  const searchApiKey = useSettingsStore((s) => s.interviewSearchApiKey);
+  const searchApiKeyEnv = useSettingsStore((s) => s.interviewSearchApiKeyEnv);
+  const searchModel = useSettingsStore((s) => s.interviewSearchModel);
+  const setSearchEnabled = useSettingsStore((s) => s.setInterviewSearchEnabled);
+  const setSearchBaseUrl = useSettingsStore((s) => s.setInterviewSearchBaseUrl);
+  const setSearchApiKey = useSettingsStore((s) => s.setInterviewSearchApiKey);
+  const setSearchApiKeyEnv = useSettingsStore((s) => s.setInterviewSearchApiKeyEnv);
+  const setSearchModel = useSettingsStore((s) => s.setInterviewSearchModel);
+  const [searchTest, setSearchTest] = useState<{ ok: boolean; latencyMs: number; preview?: string; error?: string } | null>(null);
+  const [searchTesting, setSearchTesting] = useState(false);
+
+  // ── 自动切块配置 ──
+  const chunkMaxChars = useSettingsStore((s) => s.interviewChunkMaxChars);
+  const chunkShortSilenceMs = useSettingsStore((s) => s.interviewChunkShortSilenceMs);
+  const setChunkMaxChars = useSettingsStore((s) => s.setInterviewChunkMaxChars);
+  const setChunkShortSilenceMs = useSettingsStore((s) => s.setInterviewChunkShortSilenceMs);
+
+  // ── 实时语音配置 ──
+  const rtWsUrl = useSettingsStore((s) => s.interviewRealtimeWsUrl);
+  const rtApiKey = useSettingsStore((s) => s.interviewRealtimeApiKey);
+  const rtApiKeyEnv = useSettingsStore((s) => s.interviewRealtimeApiKeyEnv);
+  const rtModel = useSettingsStore((s) => s.interviewRealtimeModel);
+  const rtTranscribeModel = useSettingsStore((s) => s.interviewRealtimeTranscribeModel);
+  const setRtWsUrl = useSettingsStore((s) => s.setInterviewRealtimeWsUrl);
+  const setRtApiKey = useSettingsStore((s) => s.setInterviewRealtimeApiKey);
+  const setRtApiKeyEnv = useSettingsStore((s) => s.setInterviewRealtimeApiKeyEnv);
+  const setRtModel = useSettingsStore((s) => s.setInterviewRealtimeModel);
+  const setRtTranscribeModel = useSettingsStore((s) => s.setInterviewRealtimeTranscribeModel);
+
+  const handleTestSearch = async () => {
+    setSearchTesting(true);
+    setSearchTest(null);
+    try {
+      const r = await bridge.interviewTestSearch(
+        searchBaseUrl || undefined,
+        searchApiKey || undefined,
+        searchApiKeyEnv || undefined,
+        searchModel || undefined,
+      );
+      setSearchTest(r);
+    } catch (e: any) {
+      setSearchTest({ ok: false, latencyMs: 0, error: typeof e === 'string' ? e : e?.message || String(e) });
+    } finally {
+      setSearchTesting(false);
+    }
+  };
+
   // ── Local ASR model management ──
   const [localAsrRuntime, setLocalAsrRuntime] = useState<{ available: boolean; engine: string; version: string } | null>(null);
   const [asrModelLocal, setAsrModelLocal] = useState<{ installed: boolean; model_dir: string; files: string[] } | null>(null);
@@ -48,6 +98,29 @@ export default function InterviewHelperTab() {
   const [localAsrChecking, setLocalAsrChecking] = useState(false);
   // 当前 ASR 下载任务的取消 scope（下载中显示取消按钮，点击后删除 .part 停止下载）
   const [asrDownloadScopeId, setAsrDownloadScopeId] = useState<string | null>(null);
+  // P4: 历史遗留孤儿模型目录（旧版本地模型残留）
+  const [orphanModelDirs, setOrphanModelDirs] = useState<{ name: string; path: string; bytes: number }[]>([]);
+  const [orphanCleaning, setOrphanCleaning] = useState(false);
+
+  const refreshOrphans = useCallback(() => {
+    bridge.listOrphanAsrModelDirs()
+      .then((r) => setOrphanModelDirs(r.orphans ?? []))
+      .catch(() => setOrphanModelDirs([]));
+  }, []);
+
+  useEffect(() => { refreshOrphans(); }, [refreshOrphans]);
+
+  const handleCleanupOrphans = useCallback(async () => {
+    setOrphanCleaning(true);
+    try {
+      for (const o of orphanModelDirs) {
+        await bridge.deleteOrphanAsrModelDir(o.name).catch(() => {});
+      }
+    } finally {
+      setOrphanCleaning(false);
+      refreshOrphans();
+    }
+  }, [orphanModelDirs, refreshOrphans]);
 
   const checkAsrEnv = useCallback(async () => {
     setLocalAsrChecking(true);
@@ -354,7 +427,7 @@ export default function InterviewHelperTab() {
             本地语音识别模型 (sherpa-onnx)
           </h4>
           <p className="mt-1 text-[11px] text-text-tertiary leading-relaxed">
-            SenseVoice 离线 ASR，~80MB。下载后可在面试面板切换至"本地"引擎，无需云端 API 即可转录。
+            流式 Zipformer 中文模型（~65MB，CPU 实时，边说边出字）。下载后可在面试面板切换至"本地"引擎，无需云端 API 即可转录，并驱动增量搜索与自动切块。
           </p>
         </div>
 
@@ -419,7 +492,7 @@ export default function InterviewHelperTab() {
           </button>
         </div>
         <p className="text-[10px] text-text-tertiary">
-          自动依次尝试 ModelScope → HF-Mirror → HuggingFace。若全部失败，可设置系统环境变量 <code className="text-[10px] bg-bg-tertiary px-1 rounded">https_proxy</code> 后重启应用重试。
+          自动依次尝试 HF-Mirror → HuggingFace。若全部失败，可设置系统环境变量 <code className="text-[10px] bg-bg-tertiary px-1 rounded">https_proxy</code> 后重启应用重试。
         </p>
 
         {/* Download progress */}
@@ -437,6 +510,292 @@ export default function InterviewHelperTab() {
             </p>
           </div>
         )}
+
+        {/* P4: 孤儿模型目录清理 */}
+        {orphanModelDirs.length > 0 && (
+          <div className="flex items-center gap-3 flex-wrap p-2.5 rounded-lg
+            bg-warning/10 border border-warning/30 text-[11px] text-text-secondary">
+            <span className="flex-1 min-w-[200px] leading-relaxed">
+              检测到旧版本地模型残留（{orphanModelDirs.map((o) => `${o.name}，约 ${(o.bytes / 1024 / 1024).toFixed(0)} MB`).join('；')}），不再使用，可安全删除释放空间。
+            </span>
+            <button
+              onClick={handleCleanupOrphans}
+              disabled={orphanCleaning}
+              className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-smooth
+                border border-warning/40 text-text-secondary hover:bg-warning/15
+                disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {orphanCleaning ? '清理中…' : '一键清理'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* 增量搜索（联网搜索） */}
+      <div className="rounded-xl border border-border-subtle bg-bg-secondary p-5 max-w-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h4 className="text-[13px] font-medium text-text-primary">
+              增量搜索（联网搜索）
+            </h4>
+            <p className="mt-1 text-[11px] text-text-tertiary leading-relaxed">
+              面试官还没说完就边听边搜：本地流式出字 → 防抖触发联网搜索 → 答案生成时注入搜索资料。失败自动降级为纯模型作答（不计费、不阻塞）。
+            </p>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={searchEnabled}
+              onChange={(e) => setSearchEnabled(e.target.checked)}
+              className="accent-[var(--color-accent)]"
+            />
+            <span className="text-[12px] font-medium text-text-secondary">启用</span>
+          </label>
+        </div>
+
+        <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-text-secondary leading-relaxed">
+          🔒 <span className="font-medium">隐私说明：</span>启用后，面试官语音的转写文本（含未说完的中间结果）会在面试过程中实时发送到你配置的搜索端点用于联网检索；答题问题与搜索资料会发送到答题 API。请勿在涉及敏感信息的面试中使用，或自行配置可信端点。
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-[12px] font-medium text-text-secondary">
+            搜索端点 Base URL（Anthropic 兼容 /v1/messages）
+          </label>
+          <input
+            type="text"
+            value={searchBaseUrl}
+            onChange={(e) => setSearchBaseUrl(e.target.value)}
+            placeholder="https://api.deepseek.com/anthropic"
+            className="w-full max-w-[320px] px-3 py-2 rounded-lg text-[13px]
+              bg-bg-secondary border border-border-subtle text-text-primary
+              focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+          />
+          <p className="text-[10px] text-text-tertiary">
+            默认 DeepSeek 官方端点（内置 web_search_20250305 服务端搜索）；其他 Anthropic 兼容且支持服务端搜索的端点亦可。
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              搜索 API Key（直接填写）
+            </label>
+            <input
+              type="password"
+              value={searchApiKey}
+              onChange={(e) => setSearchApiKey(e.target.value)}
+              placeholder="sk-..."
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              搜索 API Key（环境变量名）
+            </label>
+            <input
+              type="text"
+              value={searchApiKeyEnv}
+              onChange={(e) => setSearchApiKeyEnv(e.target.value)}
+              placeholder="LC_SEARCH_API_KEY"
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+            <p className="text-[10px] text-text-tertiary">
+              优先使用环境变量，留空则使用上方直接填写的 Key
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-end gap-3 flex-wrap">
+          <div className="space-y-1 flex-1 min-w-[160px]">
+            <label className="text-[12px] font-medium text-text-secondary">
+              搜索模型
+            </label>
+            <input
+              type="text"
+              value={searchModel}
+              onChange={(e) => setSearchModel(e.target.value)}
+              placeholder="deepseek-chat"
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+          <button
+            onClick={handleTestSearch}
+            disabled={searchTesting || !searchBaseUrl}
+            className="px-4 py-2 rounded-lg text-[12px] font-medium transition-smooth
+              bg-accent text-white hover:bg-accent/90
+              disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {searchTesting ? '测试中…' : '测试搜索'}
+          </button>
+        </div>
+
+        {searchTest && (
+          <div className={`p-3 rounded-lg text-[12px] border ${
+            searchTest.ok
+              ? 'bg-green-500/10 border-green-500/20 text-green-400'
+              : 'bg-red-500/10 border-red-500/20 text-red-400'
+          }`}>
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${searchTest.ok ? 'bg-green-400' : 'bg-red-400'}`} />
+              <span className="font-medium">{searchTest.ok ? '搜索端点可用' : '搜索端点不可用'}</span>
+              <span className="text-text-tertiary">{searchTest.latencyMs}ms</span>
+            </div>
+            {searchTest.ok && searchTest.preview && (
+              <div className="mt-1 text-[11px] opacity-80 line-clamp-2">{searchTest.preview}</div>
+            )}
+            {!searchTest.ok && searchTest.error && (
+              <div className="mt-1 text-[11px] opacity-80 truncate">{searchTest.error}</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 自动切块（快速无停顿语音） */}
+      <div className="rounded-xl border border-border-subtle bg-bg-secondary p-5 max-w-xl space-y-4">
+        <div>
+          <h4 className="text-[13px] font-medium text-text-primary">
+            自动切块（面试官语速过快、中间无停顿）
+          </h4>
+          <p className="mt-1 text-[11px] text-text-tertiary leading-relaxed">
+            不再只靠 1.5s 长静音判句：句终短静音、文本长度上限、长静音、音频时长上限四重触发，保证快速连续语音也能及时切块出题。
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              句末短静音（毫秒）
+            </label>
+            <input
+              type="number"
+              value={chunkShortSilenceMs}
+              onChange={(e) => setChunkShortSilenceMs(Math.max(200, Math.min(3000, parseInt(e.target.value) || 600)))}
+              min={200}
+              max={3000}
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+            <p className="text-[10px] text-text-tertiary">
+              流式识别出完整句子后，停顿达到此值即切块（默认 600ms）
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              单题文本长度上限（字符）
+            </label>
+            <input
+              type="number"
+              value={chunkMaxChars}
+              onChange={(e) => setChunkMaxChars(Math.max(10, Math.min(200, parseInt(e.target.value) || 50)))}
+              min={10}
+              max={200}
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+            <p className="text-[10px] text-text-tertiary">
+              边说边数，超出立即切块（默认 50 字；语速越快可调小）
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 实时语音（OpenAI Realtime 兼容全双工） */}
+      <div className="rounded-xl border border-border-subtle bg-bg-secondary p-5 max-w-xl space-y-4">
+        <div>
+          <h4 className="text-[13px] font-medium text-text-primary">
+            实时语音（真·流式音频进大模型）
+          </h4>
+          <p className="mt-1 text-[11px] text-text-tertiary leading-relaxed">
+            OpenAI Realtime 兼容全双工端点（如火山引擎豆包）：音频边说边流进模型，模型边听边理解、可中途调用 web_search 工具。在面试面板把"ASR 引擎"切到"实时语音"后生效。
+          </p>
+        </div>
+        <div className="space-y-1">
+          <label className="text-[12px] font-medium text-text-secondary">
+            WebSocket 地址
+          </label>
+          <input
+            type="text"
+            value={rtWsUrl}
+            onChange={(e) => setRtWsUrl(e.target.value)}
+            placeholder="wss://...（含端点路径；api_key/model 可自动附加）"
+            className="w-full max-w-[360px] px-3 py-2 rounded-lg text-[13px]
+              bg-bg-secondary border border-border-subtle text-text-primary
+              focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+          />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              API Key（直接填写）
+            </label>
+            <input
+              type="password"
+              value={rtApiKey}
+              onChange={(e) => setRtApiKey(e.target.value)}
+              placeholder="sk-..."
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              API Key（环境变量名）
+            </label>
+            <input
+              type="text"
+              value={rtApiKeyEnv}
+              onChange={(e) => setRtApiKeyEnv(e.target.value)}
+              placeholder="DOUBAO_API_KEY"
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              模型名
+            </label>
+            <input
+              type="text"
+              value={rtModel}
+              onChange={(e) => setRtModel(e.target.value)}
+              placeholder="如 doubao-realtime-xxx"
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-text-secondary">
+              增量转写模型
+            </label>
+            <input
+              type="text"
+              value={rtTranscribeModel}
+              onChange={(e) => setRtTranscribeModel(e.target.value)}
+              placeholder="gpt-4o-mini-transcribe"
+              className="w-full px-3 py-2 rounded-lg text-[13px]
+                bg-bg-secondary border border-border-subtle text-text-primary
+                focus:outline-none focus:ring-1.5 focus:ring-accent/40"
+            />
+          </div>
+        </div>
+        <p className="text-[10px] text-text-tertiary">
+          按分钟计费；音频 16kHz 采集会自动重采样到 24kHz pcm16。模型调用 web_search 时由应用代为执行并回填（复用上方增量搜索端点配置）。
+        </p>
+        <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-text-secondary leading-relaxed">
+          🔒 <span className="font-medium">隐私说明：</span>实时模式下，麦克风/系统音频将以流式方式持续发送到你配置的 Realtime 端点（如火山引擎豆包），由该服务商处理；系统音频可能包含通话中其他参与者的声音。API Key 仅保存在本机（AES 加密）。
+        </div>
       </div>
 
       {/* Test Connection */}

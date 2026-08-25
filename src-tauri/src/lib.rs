@@ -20,7 +20,9 @@ use commands::{
 use commands::{append_usage_record, check_claude_auth, check_claude_cli, check_cli_update, check_codex_cli, check_codex_update, check_dsh_cli, check_dsh_update, check_file_access, check_local_model_service, check_node_env, check_prerequisites, cleanup_old_cli, compress_wallpaper, copy_file, create_directory, decrypt_value, delete_cli, delete_file, delete_session, delete_skill, delete_wallpaper, diagnose_cli, download_speech_runtime, dsh_fork_session, encrypt_value, export_claude_to_codex, export_codex_to_claude, export_session_json, export_session_markdown, generate_session_title, get_file_size, get_local_node_bin, get_npm_global_bin, get_pinned_cli, get_profile_stats, get_speech_runtime_status, get_wallpaper_path, handoff::{read_dsh_session_turns, write_handoff_file}, inject_cli_path, install_claude_cli, install_codex_cli, install_dsh_cli, install_node_env, install_prerequisite, kill_session, list_active_processes, list_all_commands, list_imported_pets, list_local_models, list_provider_models, list_recent_projects, list_sessions, list_skills, list_slash_commands, list_wallpapers, load_providers, load_session, load_session_more, load_session_tail, open_in_vscode, open_speech_skill_dir, open_terminal_login, open_with_default_app, pin_cli, preview_back, preview_forward, preview_open_url, preview_refresh, pull_local_model, read_file_base64, read_file_content, read_file_tree, read_imported_pet, read_skill, rename_file, respond_permission, reveal_in_finder, rewind_files, run_claude_command, run_claude_plugin_command, run_git_command, save_imported_pet, save_temp_file, search_sessions, send_control_request, send_raw_stdin, send_stdin, set_dock_icon, share_file, share_to_wechat, start_claude_login, start_claude_session, start_wallpaper_server, sync_providers, test_provider_connection, toggle_skill_enabled, track_session, translate_skill_markdown, translate_skill_metadata, truncate_session_history, unpin_cli, unwatch_directory, update_claude_cli, update_codex_cli, update_dsh_cli, watch_directory, write_file_content, write_skill};
 use crate::embedded_resources::resolve_frontend_asset;
 use interview::commands::{interview_mimo_answer, interview_prewarm_connection, interview_start_system_audio_raw, interview_stop_system_audio_raw, interview_test_mimo};
-use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, download_local_asr_model, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
+use interview::local_asr::{check_local_asr_model, check_local_asr_runtime, delete_local_asr_model, delete_orphan_asr_model_dir, download_local_asr_model, list_orphan_asr_model_dirs, test_local_asr, start_local_asr_session, push_local_asr_audio, stop_local_asr_session, transcribe_and_reset_local_asr};
+use interview::realtime::{interview_realtime_send_audio, interview_realtime_start, interview_realtime_stop};
+use interview::search::{interview_test_search, interview_web_search};
 // protocol module kept for ControlRequest (send_control_request) and tests
 use serde_json::Value;
 use std::collections::HashMap;
@@ -2386,25 +2388,19 @@ async fn apply_deepseek_model(
     // Find the provider group whose catalog lists the requested model id,
     // capturing the model's declared reasoning efforts for clamping.
     //
-    // IMPORTANT: `deepseek-official` is SKIPPED as a selection target. On this
-    // deployment that group's chat route is driven by the DSH `llm-deepseek`
-    // settings (baseURL + DEEPSEEK_API_KEY credential), and the DSH desktop
-    // GUI keeps rewriting that baseURL to gateway/compat endpoints (beiluoxi,
-    // opencode.ai, token-plan) that reject the official DeepSeek key with 401
-    // — every LC message pinned to deepseek-official then failed with a bare
-    // "error". The live-verified working chat path here is `opencode-go`
-    // (OPENCODE_GO_API_KEY) and secondarily `qwen`. web_search is independent
-    // (LC_SEARCH_API_KEY → official search endpoint), so skipping this group
-    // breaks nothing else.
+    // NOTE: `deepseek-official`（catalog 第一组）是显式支持的选择目标——它由
+    // DSH `llm-deepseek` settings（baseURL）+ DEEPSEEK_API_KEY credential 驱动。
+    // 此前这里曾硬编码跳过该组：当时的根因其实是本机 ~/.dsh/.credentials.yaml
+    // 残留旧版 schema（version/refs 包装）导致 dsh 凭证层异常、以及 baseURL 被
+    // 写成网关兼容端点而官方 key 被拒——配置修正后（2026-08-24 实测）官方路由
+    // selectModel + 对话链路完全可用，不再跳过。若未来再次出现官方路由 401，
+    // 先检查凭证文件 schema 与 llm-deepseek.baseURL，而不是绕开该组。
     let mut chosen: Option<(String, String, Option<String>)> = None;
     if let Some(groups) = catalog.get("groups").and_then(|g| g.as_array()) {
         for group in groups {
             let provider_id = group.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             if provider_id.is_empty() {
                 continue;
-            }
-            if provider_id == "deepseek-official" {
-                continue; // broken chat route on this deployment — see above
             }
             if let Some(models) = group.get("models").and_then(|m| m.as_array()) {
                 for m in models {
@@ -2930,11 +2926,20 @@ pub fn run() {
             interview_mimo_answer,
             interview_prewarm_connection,
             interview_test_mimo,
+            // Interview module — incremental web search
+            interview_web_search,
+            interview_test_search,
+            // Interview module — realtime full-duplex voice backend
+            interview_realtime_start,
+            interview_realtime_send_audio,
+            interview_realtime_stop,
             // Local ASR — model management (always registered, feature-gated internally)
             check_local_asr_runtime,
             check_local_asr_model,
             download_local_asr_model,
             delete_local_asr_model,
+            list_orphan_asr_model_dirs,
+            delete_orphan_asr_model_dir,
             test_local_asr,
             start_local_asr_session,
             push_local_asr_audio,

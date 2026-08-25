@@ -1,13 +1,21 @@
-//! 本地 ASR 引擎 — 基于 sherpa-onnx OfflineRecognizer + SenseVoice 多语言模型。
+//! 本地 ASR 引擎 — 基于 sherpa-onnx OnlineRecognizer 的**流式**语音识别。
 //!
 //! 仅在启用 `local-asr` feature 时编译。
-//! 使用 SenseVoice Small INT8 模型 (zh/en/ja/ko/yue)，~240MB，2 个文件。
+//! 默认使用流式 Zipformer 中文模型（~60MB，CPU 实时，支持增量 partial 输出）：
+//! - encoder-epoch-99-avg-1.onnx
+//! - decoder-epoch-99-avg-1.onnx
+//! - joiner-epoch-99-avg-1.onnx
+//! - tokens.txt
 //!
-//! 模型文件：
-//! - model.int8.onnx  — INT8 量化 SenseVoice 模型
-//! - tokens.txt       — 词表
+//! 同时兼容流式 Paraformer 布局（encoder.onnx + decoder.onnx + tokens.txt）——
+//! 引擎启动时按模型目录内实际文件自动识别。
+//!
+//! 流式引擎把每帧音频喂给 OnlineRecognizer，decode 后立即产出
+//! partial（is_final=false）/ final（is_final=true）文本，经 `local-asr:transcript`
+//! 事件推给前端 —— 面试官边说话边出字；端点检测（enable_endpoint + rule3
+//! 最大句长）在快速无停顿语音下自动切句。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::download_cancel::{self, CancelScope};
 
@@ -18,15 +26,51 @@ use crate::commands::download_cancel::{self, CancelScope};
 #[cfg(feature = "local-asr")]
 mod engine {
     use std::path::{Path, PathBuf};
-    use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig};
+    use sherpa_onnx::{
+        OnlineParaformerModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineStream,
+        OnlineTransducerModelConfig,
+    };
 
-    /// 默认采样率（SenseVoice 模型要求 16kHz）
+    /// 默认采样率（流式模型要求 16kHz）
     pub const MODEL_SAMPLE_RATE: i32 = 16000;
 
-    /// 本地 ASR 引擎（基于 sherpa-onnx OfflineRecognizer + SenseVoice）
+    /// 一条转录事件（partial 或 final）。
+    #[derive(Clone, Debug)]
+    pub struct TranscriptEvent {
+        pub text: String,
+        pub is_final: bool,
+    }
+
+    impl TranscriptEvent {
+        pub fn to_json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "text": self.text,
+                "startTime": 0.0,
+                "isFinal": self.is_final,
+            })
+        }
+    }
+
+    /// 模型族（按目录内文件自动识别）
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ModelKind {
+        /// 流式 Zipformer transducer（encoder/decoder/joiner + tokens）
+        Zipformer,
+        /// 流式 Paraformer（encoder + decoder + tokens）
+        Paraformer,
+    }
+
+    /// 本地流式 ASR 引擎（sherpa-onnx OnlineRecognizer）。
+    ///
+    /// 引擎持有识别器与活动流：每帧音频 accept 后立即 decode，
+    /// 产出增量 partial 文本；is_final / endpoint 时重置流开始新一句。
     pub struct LocalAsrEngine {
-        recognizer: OfflineRecognizer,
+        recognizer: OnlineRecognizer,
+        stream: OnlineStream,
         model_dir: PathBuf,
+        kind: ModelKind,
+        /// 上次已发出的文本 —— 去重，避免同一 partial 重复 emit
+        last_text: String,
         initialized: bool,
     }
 
@@ -34,21 +78,13 @@ mod engine {
     unsafe impl Sync for LocalAsrEngine {}
 
     impl LocalAsrEngine {
-        /// 创建引擎并加载 SenseVoice 模型。
+        /// 创建流式引擎并加载模型（自动识别 Zipformer / Paraformer 布局）。
         ///
-        /// `model_dir` 应包含 `model.int8.onnx` 和 `tokens.txt`。
+        /// `model_dir` 应包含 tokens.txt + 对应模型文件（见模块注释）。
         pub fn new(model_dir: &Path) -> Result<Self, String> {
             let model_dir = model_dir.to_path_buf();
 
-            let model_path = model_dir.join("model.int8.onnx");
             let tokens_path = model_dir.join("tokens.txt");
-
-            if !model_path.is_file() {
-                return Err(format!(
-                    "Model file not found: {}\nPlease download the ASR model first.",
-                    model_path.display()
-                ));
-            }
             if !tokens_path.is_file() {
                 return Err(format!(
                     "Tokens file not found: {}\nPlease download the ASR model first.",
@@ -56,46 +92,68 @@ mod engine {
                 ));
             }
 
-            let mut config = OfflineRecognizerConfig::default();
-            config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
-                model: Some(model_path.to_string_lossy().to_string()),
-                language: Some("auto".to_string()),
-                use_itn: true,
-            };
+            let para_encoder = model_dir.join("encoder.onnx");
+            let para_decoder = model_dir.join("decoder.onnx");
+            let zip_encoder = model_dir.join("encoder-epoch-99-avg-1.onnx");
+            let zip_decoder = model_dir.join("decoder-epoch-99-avg-1.onnx");
+            let zip_joiner = model_dir.join("joiner-epoch-99-avg-1.onnx");
+
+            let mut config = OnlineRecognizerConfig::default();
             config.model_config.tokens = Some(tokens_path.to_string_lossy().to_string());
             config.model_config.num_threads = 2;
             config.model_config.provider = Some("cpu".to_string());
+            config.decoding_method = Some("greedy_search".to_string());
+            // 端点检测：短/长静音判句 + 最大句长（快速无停顿语音自动切句）
+            config.enable_endpoint = true;
+            config.rule1_min_trailing_silence = 2.5;
+            config.rule2_min_trailing_silence = 1.0;
+            config.rule3_min_utterance_length = 15.0;
 
-            let recognizer = OfflineRecognizer::create(&config)
-                .ok_or_else(|| "Failed to create OfflineRecognizer — check model files".to_string())?;
+            let kind;
+            if para_encoder.is_file() && para_decoder.is_file() {
+                config.model_config.paraformer = OnlineParaformerModelConfig {
+                    encoder: Some(para_encoder.to_string_lossy().to_string()),
+                    decoder: Some(para_decoder.to_string_lossy().to_string()),
+                };
+                kind = ModelKind::Paraformer;
+            } else if zip_encoder.is_file() && zip_decoder.is_file() && zip_joiner.is_file() {
+                config.model_config.transducer = OnlineTransducerModelConfig {
+                    encoder: Some(zip_encoder.to_string_lossy().to_string()),
+                    decoder: Some(zip_decoder.to_string_lossy().to_string()),
+                    joiner: Some(zip_joiner.to_string_lossy().to_string()),
+                };
+                kind = ModelKind::Zipformer;
+            } else {
+                return Err(format!(
+                    "No streaming ASR model found in {} (need Zipformer encoder/decoder/joiner \
+                     or Paraformer encoder/decoder + tokens.txt)",
+                    model_dir.display()
+                ));
+            }
+
+            let recognizer = OnlineRecognizer::create(&config)
+                .ok_or_else(|| "Failed to create OnlineRecognizer — check model files".to_string())?;
+            let stream = recognizer.create_stream();
 
             eprintln!(
-                "[local-asr] SenseVoice engine initialized from {}",
+                "[local-asr] Streaming engine initialized ({:?}) from {}",
+                kind,
                 model_dir.display()
             );
 
             Ok(Self {
                 recognizer,
+                stream,
                 model_dir,
+                kind,
+                last_text: String::new(),
                 initialized: true,
             })
         }
 
-        /// 转录音频样本为文本。
-        ///
-        /// `samples`: f32 数组，值范围 [-1.0, 1.0]
-        /// `sample_rate`: 输入采样率（应为 16000）
-        pub fn transcribe(&self, samples: &[f32], sample_rate: i32) -> Result<String, String> {
-            if samples.is_empty() {
-                return Ok(String::new());
-            }
-            let stream = self.recognizer.create_stream();
-            stream.accept_waveform(sample_rate, samples);
-            self.recognizer.decode(&stream);
-            stream
-                .get_result()
-                .map(|r| r.text)
-                .ok_or_else(|| "No recognition result".to_string())
+        /// 模型族
+        pub fn kind(&self) -> ModelKind {
+            self.kind
         }
 
         /// 模型路径
@@ -107,6 +165,57 @@ mod engine {
         pub fn is_initialized(&self) -> bool {
             self.initialized
         }
+
+        /// 喂入一帧音频并立即增量解码，返回本次要 emit 的转录事件。
+        ///
+        /// `samples`: f32 数组，值范围 [-1.0, 1.0]
+        /// `sample_rate`: 输入采样率（应为 16000）
+        pub fn feed(&mut self, samples: &[f32], sample_rate: i32) -> Vec<TranscriptEvent> {
+            if samples.is_empty() {
+                return Vec::new();
+            }
+            self.stream.accept_waveform(sample_rate, samples);
+            let mut events = Vec::new();
+
+            while self.recognizer.is_ready(&self.stream) {
+                self.recognizer.decode(&self.stream);
+            }
+
+            if let Some(r) = self.recognizer.get_result(&self.stream) {
+                if !r.text.is_empty() && r.text != self.last_text {
+                    events.push(TranscriptEvent {
+                        text: r.text.clone(),
+                        is_final: r.is_final,
+                    });
+                    self.last_text = r.text.clone();
+                }
+                // 句终（is_final 或端点检测）→ 重置流开始新一句
+                if r.is_final || self.recognizer.is_endpoint(&self.stream) {
+                    self.recognizer.reset(&self.stream);
+                    self.last_text.clear();
+                }
+            }
+            events
+        }
+
+        /// 冲刷当前流的最终结果（停录/切句时调用），并重置流。
+        pub fn flush_final(&mut self) -> Option<TranscriptEvent> {
+            self.stream.input_finished();
+            while self.recognizer.is_ready(&self.stream) {
+                self.recognizer.decode(&self.stream);
+            }
+            let ev = self
+                .recognizer
+                .get_result(&self.stream)
+                .filter(|r| !r.text.is_empty())
+                .map(|r| TranscriptEvent {
+                    text: r.text,
+                    is_final: true,
+                });
+            self.recognizer.reset(&self.stream);
+            self.last_text.clear();
+            ev
+        }
     }
 }
 
@@ -117,6 +226,30 @@ mod engine {
 #[cfg(not(feature = "local-asr"))]
 mod engine {
     use std::path::Path;
+
+    /// 一条转录事件（partial 或 final）。
+    #[derive(Clone, Debug)]
+    pub struct TranscriptEvent {
+        pub text: String,
+        pub is_final: bool,
+    }
+
+    impl TranscriptEvent {
+        pub fn to_json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "text": self.text,
+                "startTime": 0.0,
+                "isFinal": self.is_final,
+            })
+        }
+    }
+
+    /// 模型族（按目录内文件自动识别）
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ModelKind {
+        Zipformer,
+        Paraformer,
+    }
 
     pub struct LocalAsrEngine {
         _private: (),
@@ -130,12 +263,14 @@ mod engine {
         pub fn new(_model_dir: &Path) -> Result<Self, String> {
             Err("Local ASR is not compiled (missing 'local-asr' feature)".to_string())
         }
-        pub fn transcribe(
-            &self,
-            _samples: &[f32],
-            _sample_rate: i32,
-        ) -> Result<String, String> {
-            Err("Local ASR not compiled".to_string())
+        pub fn kind(&self) -> ModelKind {
+            ModelKind::Zipformer
+        }
+        pub fn feed(&mut self, _samples: &[f32], _sample_rate: i32) -> Vec<TranscriptEvent> {
+            Vec::new()
+        }
+        pub fn flush_final(&mut self) -> Option<TranscriptEvent> {
+            None
         }
         pub fn model_dir(&self) -> &Path {
             Path::new("")
@@ -151,27 +286,30 @@ mod engine {
 // ============================================================
 
 pub use engine::LocalAsrEngine;
+pub use engine::TranscriptEvent;
 pub use engine::MODEL_SAMPLE_RATE;
 
 /// 模型下载镜像源（按优先级排序）。
-/// 注意：zh-en-only 模型在 HuggingFace 上为私有仓库，请使用多语言版本 (zh/en/ja/ko/yue)。
+/// 流式 Zipformer 中文模型（sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23）。
 pub const MODEL_DOWNLOAD_URLS: &[(&str, &str)] = &[
     // HF-Mirror (国内 HuggingFace 镜像 — 实测可下载)
     (
-        "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
+        "https://hf-mirror.com/csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/resolve/main",
         "HF-Mirror (国内镜像)",
     ),
     // HuggingFace 官方（国内可能被墙，作为后备）
     (
-        "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
+        "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/resolve/main",
         "HuggingFace (全球)",
     ),
 ];
 
-/// 模型文件列表（SenseVoice 多语言 INT8 量化模型）
+/// 模型文件列表（流式 Zipformer 中文 14M，CPU 实时）
 pub const MODEL_FILES: &[&str] = &[
-    "model.int8.onnx", // ~239 MB
-    "tokens.txt",      // ~316 KB
+    "encoder-epoch-99-avg-1.onnx", // ~56 MB
+    "decoder-epoch-99-avg-1.onnx",  // ~8 MB
+    "joiner-epoch-99-avg-1.onnx",   // ~1 MB
+    "tokens.txt",                   // ~316 KB
 ];
 
 /// 返回模型默认安装目录
@@ -180,7 +318,7 @@ pub fn default_model_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(crate::safe_data_dir_name())
         .join("models")
-        .join("sensevoice")
+        .join("asr-streaming")
 }
 
 // ============================================================
@@ -208,7 +346,7 @@ pub fn check_local_asr_model() -> Result<serde_json::Value, String> {
 pub fn check_local_asr_runtime() -> serde_json::Value {
     serde_json::json!({
         "available": cfg!(feature = "local-asr"),
-        "engine": "sherpa-onnx (SenseVoice OfflineRecognizer)",
+        "engine": "sherpa-onnx (OnlineRecognizer streaming)",
         "version": env!("CARGO_PKG_VERSION"),
     })
 }
@@ -658,6 +796,79 @@ pub fn delete_local_asr_model() -> Result<String, String> {
     }
 }
 
+/// models/ 下现行的模型目录名；其余子目录视为历史版本遗留的孤儿
+/// （如旧版非流式 SenseVoice 的 `sensevoice` 目录，~239MB）。
+const KNOWN_MODEL_DIR_NAMES: &[&str] = &["asr-streaming"];
+
+/// 递归统计目录大小（孤儿目录数量有限，直接遍历即可）
+fn dir_size_recursive(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size_recursive(&p);
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// 检测 models/ 根目录下的历史遗留孤儿模型目录（名称 + 字节数）
+#[tauri::command]
+pub fn list_orphan_asr_model_dirs() -> Result<serde_json::Value, String> {
+    let models_root = default_model_dir()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位模型根目录".to_string())?;
+    let mut orphans: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if KNOWN_MODEL_DIR_NAMES.iter().any(|k| *k == name) {
+                continue;
+            }
+            orphans.push(serde_json::json!({
+                "name": name,
+                "path": p.to_string_lossy(),
+                "bytes": dir_size_recursive(&p),
+            }));
+        }
+    }
+    Ok(serde_json::json!({ "orphans": orphans }))
+}
+
+/// 删除指定孤儿模型目录。安全约束：只接受纯目录名（禁止路径分隔符），
+/// 且不得是现行模型目录 —— 防止被诱导删除在用模型或任意路径。
+#[tauri::command]
+pub fn delete_orphan_asr_model_dir(name: String) -> Result<String, String> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("非法目录名".to_string());
+    }
+    if KNOWN_MODEL_DIR_NAMES.iter().any(|k| *k == name) {
+        return Err(format!("{} 是正在使用的模型目录", name));
+    }
+    let models_root = default_model_dir()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位模型根目录".to_string())?;
+    let target = models_root.join(&name);
+    if !target.is_dir() {
+        return Ok("目录不存在（可能已被清理）".to_string());
+    }
+    let bytes = dir_size_recursive(&target);
+    std::fs::remove_dir_all(&target)
+        .map_err(|e| format!("删除失败: {}", e))?;
+    eprintln!("[LITTLECLAUDE:security] orphan asr model dir deleted: {} ({} bytes)", target.display(), bytes);
+    Ok(format!("已删除 {}（约 {:.0} MB）", name, bytes as f64 / (1024.0 * 1024.0)))
+}
+
 /// 用本地 ASR 引擎测试一段 WAV 文件
 #[tauri::command]
 pub fn test_local_asr(model_dir: Option<String>) -> Result<String, String> {
@@ -673,44 +884,81 @@ pub fn test_local_asr(model_dir: Option<String>) -> Result<String, String> {
 
 // ============================================================
 // 流式 ASR 会话命令（面试面板转录用）
-//
-// 由于 SenseVoice 使用 OfflineRecognizer（非流式），我们采用累积+定期解码策略：
-// - start: 创建引擎 + 清空缓冲区
-// - push: 追加音频样本到缓冲区 → 全量解码 → 发送事件
-// - stop:  最终解码 → 发送最终结果 → 释放引擎
 // ============================================================
+// 流式引擎持有 OnlineRecognizer + 活动流，push 每帧喂入并立即增量解码：
+// - start: 创建流式引擎（识别器 + 空流）
+// - push:  喂入一帧 → decode → 产出 partial/final 事件（local-asr:transcript）
+// - stop:  input_finished + 最终冲刷 → 释放引擎
+// - transcribe_and_reset: 冲刷当前流的最终结果并重置（兼容旧调用，返回最终文本）
 
-/// 全局 ASR 引擎 + 累积音频缓冲区
-static ACTIVE_SESSION: std::sync::OnceLock<
-    std::sync::Mutex<Option<(LocalAsrEngine, Vec<f32>)>>,
-> = std::sync::OnceLock::new();
+/// 全局流式 ASR 引擎（识别器 + 活动流）
+static ACTIVE_SESSION: std::sync::OnceLock<std::sync::Mutex<Option<LocalAsrEngine>>> =
+    std::sync::OnceLock::new();
 
 /// R5 (bug): generation counter closing the transcribe-window race. start and
-/// stop bump it; an in-flight transcribe_and_reset only writes the engine
-/// back if the generation is unchanged (otherwise the write-back used to
-/// RESURRECT a stopped session — 239MB model resident again — or clobber a
-/// freshly started one).
+/// stop bump it; an in-flight push/transcribe only writes the engine back if
+/// the generation is unchanged (otherwise the write-back used to RESURRECT a
+/// stopped session — 239MB model resident again — or clobber a fresh one).
 static SESSION_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// 启动本地 ASR 会话 — 加载模型并创建引擎，清空音频缓冲区
-/// R6 (perf): async + spawn_blocking — loading the 239MB model is a
-/// second-scale blocking op that used to freeze the IPC thread.
+/// 取出当前会话（引擎 + 当前 generation），锁外使用。
+fn take_session() -> Result<Option<(LocalAsrEngine, u64)>, String> {
+    let lock = ACTIVE_SESSION
+        .get()
+        .ok_or("No active ASR session.")?;
+    let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(guard
+        .take()
+        .map(|e| (e, SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst))))
+}
+
+/// 放回会话（generation 未变且槽位为空时），否则丢弃引擎。
+fn put_back_session(engine: LocalAsrEngine, gen: u64) {
+    let lock = match ACTIVE_SESSION.get() {
+        Some(l) => l,
+        None => {
+            drop(engine);
+            return;
+        }
+    };
+    let mut guard = match lock.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            drop(engine);
+            return;
+        }
+    };
+    if SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen && guard.is_none() {
+        *guard = Some(engine);
+    } else {
+        eprintln!("[local-asr] write-back skipped: session changed during use (stop/start won)");
+        drop(engine);
+    }
+}
+
+/// 启动本地流式 ASR 会话 — 加载模型并创建引擎。
+/// R6 (perf): async + spawn_blocking — 加载模型是秒级阻塞操作，不能冻结 IPC 线程。
 #[tauri::command]
 pub async fn start_local_asr_session() -> Result<String, String> {
     tokio::task::spawn_blocking(|| {
         let model_dir = default_model_dir();
-        if !model_dir.join("model.int8.onnx").is_file() {
-            return Err(
-                "Model not installed. Please download the ASR model in Settings > Interview Helper."
-                    .to_string(),
-            );
+        let missing = MODEL_FILES
+            .iter()
+            .filter(|f| !model_dir.join(f).is_file())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "Model not installed (missing {}). Please download the ASR model in Settings > Interview Helper.",
+                missing.join(", ")
+            ));
         }
 
         let engine = LocalAsrEngine::new(&model_dir)?;
         let lock = ACTIVE_SESSION.get_or_init(|| std::sync::Mutex::new(None));
         let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
         SESSION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *guard = Some((engine, Vec::new()));
+        *guard = Some(engine);
         Ok(format!(
             "Local ASR session started with model at {}",
             model_dir.display()
@@ -720,212 +968,113 @@ pub async fn start_local_asr_session() -> Result<String, String> {
     .map_err(|e| format!("ASR start task failed: {}", e))?
 }
 
-/// 单题音频缓冲上限（60s @16kHz，与前端 MAX_QA_AUDIO_CHUNKS 兜底语义一致）。
-/// 前端强制分段判句失效时（如静音判句被持续底噪重置），Rust 侧截断头部
-/// 保留最新音频，防止 Vec 无限增长与超长推理。
-const MAX_BUFFER_SAMPLES: usize = MODEL_SAMPLE_RATE as usize * 60;
-
-/// 推送音频数据到本地 ASR 引擎（WAV base64，单声道 16bit）。
-/// 只累积音频，不做推理——推理在 stop 时一次性完成，避免 UI 冻结。
+/// 推送音频帧到流式 ASR 引擎（WAV base64，单声道 16bit）并立即增量解码。
+/// 产出的 partial/final 文本经 `local-asr:transcript` 事件推给前端。
 #[tauri::command]
-pub fn push_local_asr_audio(wav_base64: String) -> Result<(), String> {
+pub async fn push_local_asr_audio(
+    app: tauri::AppHandle,
+    wav_base64: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
     let samples = decode_wav_base64_to_f32(&wav_base64)?;
-
-    let lock = match ACTIVE_SESSION.get() {
-        Some(l) => l,
-        None => {
-            // 引擎尚未启动（冷启动窗口）——前端有 pendingAudioRef 暂存，
-            // 这里丢弃属预期，仅记日志便于诊断音频丢失场景
-            eprintln!("[local-asr] push dropped: no active session (cold-start window)");
-            return Ok(());
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let (session, gen) = match take_session() {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                // 引擎尚未启动（冷启动窗口）——前端有 pendingAudioRef 暂存，
+                // 这里丢弃属预期，仅记日志便于诊断音频丢失场景
+                eprintln!("[local-asr] push dropped: no active session (cold-start window)");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("[local-asr] push dropped: {}", e);
+                return Ok(());
+            }
+        };
+        let mut engine = session;
+        let events = engine.feed(&samples, MODEL_SAMPLE_RATE);
+        put_back_session(engine, gen);
+        for ev in &events {
+            let _ = app2.emit("local-asr:transcript", ev.to_json());
         }
-    };
-    let mut guard = match lock.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            eprintln!("[local-asr] push dropped: mutex poisoned");
-            return Ok(());
-        }
-    };
-    let (_engine, buffer) = match guard.as_mut() {
-        Some(s) => s,
-        None => {
-            // 引擎正在重启（stop→start 窗口）或推理中（session 被临时取走）
-            eprintln!("[local-asr] push dropped: session busy (restart or inference)");
-            return Ok(());
-        }
-    };
-
-    // 只累积，不做推理（SenseVoice OfflineRecognizer 是全量模型，逐帧推理极慢）
-    buffer.extend_from_slice(&samples);
-    // 缓冲上限：截断头部，保留最新 60s（面试问题刚说完，旧音频无转写价值）
-    if buffer.len() > MAX_BUFFER_SAMPLES {
-        let drop = buffer.len() - MAX_BUFFER_SAMPLES;
-        buffer.drain(0..drop);
-        eprintln!(
-            "[local-asr] buffer cap reached (60s), dropped {} samples from head",
-            drop
-        );
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("ASR push task failed: {}", e))?
 }
 
-/// 停止本地 ASR 会话 — 对全部累积音频运行一次性推理，返回转录文本。
-/// 同时通过 `local-asr:transcript` 事件发送结果（供混合对比面板使用）。
+/// 停止本地 ASR 会话 — 冲刷最终文本并释放引擎。
+/// 同时通过 `local-asr:transcript` 事件发送最终结果（供混合对比面板使用）。
 #[tauri::command]
 pub async fn stop_local_asr_session(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
     let app2 = app.clone();
     tokio::task::spawn_blocking(move || {
-    // R5: bump the generation FIRST — an in-flight transcribe_and_reset then
-    // sees the change and drops the engine instead of resurrecting it after
-    // this stop. Also makes stop-while-busy return cleanly (take() is None).
-    SESSION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // R5: bump the generation FIRST — an in-flight transcribe/push then
+        // sees the change and drops the engine instead of resurrecting it.
+        SESSION_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // 先取出 session，释放锁后再推理
-    let session = {
-        let lock = ACTIVE_SESSION
-            .get()
-            .ok_or("No active ASR session.")?;
-        let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        guard.take()
-    };
-
-    let mut result_text = String::new();
-
-    if let Some((engine, buffer)) = session {
-        if !buffer.is_empty() {
-            let audio_dur = buffer.len() as f32 / MODEL_SAMPLE_RATE as f32;
-            eprintln!(
-                "[local-asr] Running inference on {:.1}s of audio ({} samples)...",
-                audio_dur,
-                buffer.len()
-            );
-
-            // 推理在锁外执行，不阻塞后续 push 调用
-            match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
-                Ok(text) => {
-                    let trimmed = text.trim().to_string();
-                    // 日志预览按字符截断（字节切片 [..80] 会在多字节 UTF-8
-                    // 字符中间 panic — 中文转写 >80 字节时闪退）
-                    let preview = preview_chars(&trimmed, 80);
-                    eprintln!(
-                        "[local-asr] Inference done: {} chars, \"{}\"",
-                        trimmed.len(),
-                        preview
-                    );
-                    let _ = app2.emit(
-                        "local-asr:transcript",
-                        serde_json::json!({
-                            "text": trimmed.clone(),
-                            "startTime": 0.0,
-                            "isFinal": true,
-                        }),
-                    );
-                    result_text = trimmed;
-                }
-                Err(e) => {
-                    eprintln!("[local-asr] Inference error: {}", e);
-                }
+        let mut result_text = String::new();
+        if let Some((mut engine, _gen)) = take_session()? {
+            if let Some(ev) = engine.flush_final() {
+                let trimmed = ev.text.trim().to_string();
+                let preview = preview_chars(&trimmed, 80);
+                eprintln!("[local-asr] stop flush: {} chars, \"{}\"", trimmed.len(), preview);
+                let _ = app2.emit("local-asr:transcript", ev.to_json());
+                result_text = trimmed;
+            } else {
+                eprintln!("[local-asr] stop called but no pending final text");
             }
-        } else {
-            eprintln!("[local-asr] stop called but buffer is empty (no audio pushed)");
+            // engine dropped here (session ended)
         }
-        drop(engine);
-    }
-
-    Ok(result_text)
+        Ok(result_text)
     })
     .await
     .map_err(|e| format!("ASR stop task failed: {}", e))?
 }
 
-/// 转录并重置：取走当前会话（引擎 + 缓冲区）→ 锁外推理 → 放回引擎与空缓冲区。
-/// 避免每次推理后重新加载 239MB 模型（~500ms-1s 冷启动）。
-/// 推理期间锁不被持有：push_local_asr_audio 不会阻塞等待推理完成（推理
-/// 时长与缓冲音频成正比，长音频时持锁会卡住采集管道导致 chunk 丢弃）；
-/// 代价是推理期间 push 看到 session 被取走 → 静默丢弃（有日志）。
+/// 冲刷并重置：取走引擎 → 锁外冲刷最终文本 → 放回引擎（流已重置）。
+/// 与旧行为一致：引擎保留在内存，避免每次重新加载模型（秒级冷启动）。
 #[tauri::command]
 pub async fn transcribe_and_reset_local_asr(app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Emitter;
     let app2 = app.clone();
     tokio::task::spawn_blocking(move || {
-    // 取出整个 session（引擎 + 缓冲区），锁外推理。
-    // R5: remember the generation — if stop/start happens during inference,
-    // the write-back below is skipped (no resurrection, no clobbering).
-    let (session, gen) = {
-        let lock = ACTIVE_SESSION
-            .get()
-            .ok_or("No active ASR session.")?;
-        let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        (guard.take(), SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst))
-    };
+        let (session, gen) = match take_session() {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                eprintln!("[local-asr] transcribe_and_reset: engine gone (busy or stopped)");
+                return Ok(String::new());
+            }
+            Err(e) => {
+                eprintln!("[local-asr] transcribe_and_reset: {}", e);
+                return Ok(String::new());
+            }
+        };
+        let mut engine = session;
 
-    let (engine, buffer) = match session {
-        Some(s) => s,
-        None => {
-            eprintln!("[local-asr] transcribe_and_reset: engine gone (busy or stopped)");
-            return Ok(String::new());
-        }
-    };
-
-    let result_text = if buffer.is_empty() {
-        eprintln!("[local-asr] transcribe_and_reset: buffer is empty");
-        String::new()
-    } else {
-        // 推理在锁外执行
-        let audio_dur = buffer.len() as f32 / MODEL_SAMPLE_RATE as f32;
-        eprintln!(
-            "[local-asr] transcribe_and_reset: {:.1}s of audio ({} samples)...",
-            audio_dur, buffer.len()
-        );
-
-        match engine.transcribe(&buffer, MODEL_SAMPLE_RATE) {
-            Ok(text) => {
-                let trimmed = text.trim().to_string();
-                // 预览按字符截断 — 见推理路径注释（字节切片会 panic 闪退）
+        let result_text = match engine.flush_final() {
+            Some(ev) => {
+                let trimmed = ev.text.trim().to_string();
                 let preview = preview_chars(&trimmed, 80);
                 eprintln!(
                     "[local-asr] transcribe_and_reset done: {} chars, \"{}\"",
                     trimmed.len(),
                     preview
                 );
-                let _ = app2.emit(
-                    "local-asr:transcript",
-                    serde_json::json!({
-                        "text": trimmed.clone(),
-                        "startTime": 0.0,
-                        "isFinal": true,
-                    }),
-                );
+                let _ = app2.emit("local-asr:transcript", ev.to_json());
                 trimmed
             }
-            Err(e) => {
-                eprintln!("[local-asr] transcribe_and_reset inference error: {}", e);
+            None => {
+                eprintln!("[local-asr] transcribe_and_reset: no pending text");
                 String::new()
             }
-        }
-    };
+        };
 
-    // 放回引擎与空缓冲区（推理期间 push 被丢弃的音频在下一轮正常接收）。
-    // R5: only when the generation is unchanged AND the slot is still empty —
-    // a stop or a fresh start during inference wins over the write-back.
-    {
-        let lock = ACTIVE_SESSION
-            .get()
-            .ok_or("No active ASR session.")?;
-        let mut guard = lock.lock().map_err(|e| format!("Lock error: {}", e))?;
-        if SESSION_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen && guard.is_none() {
-            *guard = Some((engine, Vec::new()));
-        } else {
-            eprintln!(
-                "[local-asr] write-back skipped: session changed during inference (stop/start won)"
-            );
-            drop(engine);
-        }
-    }
-
-    Ok(result_text)
+        // 放回引擎（generation 未变且槽位为空时；stop/start 优先）
+        put_back_session(engine, gen);
+        Ok(result_text)
     })
     .await
     .map_err(|e| format!("ASR transcribe task failed: {}", e))?
@@ -1015,6 +1164,96 @@ fn decode_wav_base64_to_f32(base64: &str) -> Result<Vec<f32>, String> {
 /// Stub for non-local-asr builds
 #[cfg(not(feature = "local-asr"))]
 fn decode_wav_base64_to_f32(_base64: &str) -> Result<Vec<f32>, String> {
+    Err("Local ASR not compiled".to_string())
+}
+
+/// 解码 WAV base64 为 i16 PCM 样本（单声道 16bit，原始采样率不重采样）。
+/// 供实时语音后端（interview_realtime）把前端 WAV 转成 Realtime API 的
+/// pcm16 音频流。返回 (样本, 采样率)。
+#[cfg(feature = "local-asr")]
+pub(crate) fn decode_wav_base64_to_pcm16(
+    base64: &str,
+) -> Result<(Vec<i16>, u32), String> {
+    use base64::Engine as _;
+
+    // DoS 上限：正常 500ms@16kHz chunk ≈ 22KB base64。4MB ≈ 3MB PCM
+    // ≈ 96 秒音频，远超任何合法单块；超出直接拒绝，防内存放大攻击。
+    const MAX_AUDIO_B64_LEN: usize = 4_000_000;
+    if base64.len() > MAX_AUDIO_B64_LEN {
+        return Err(format!(
+            "Audio payload too large: {} bytes (max {})",
+            base64.len(),
+            MAX_AUDIO_B64_LEN
+        ));
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .map_err(|e| format!("Base64 decode error: {}", e))?;
+
+    if bytes.len() < 44 {
+        return Err("WAV too short".to_string());
+    }
+
+    let sample_rate = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    let num_channels = u16::from_le_bytes([bytes[22], bytes[23]]);
+    let bits_per_sample = u16::from_le_bytes([bytes[34], bytes[35]]);
+
+    if !(1_000..=384_000).contains(&sample_rate) {
+        return Err(format!("Invalid WAV sample rate: {}", sample_rate));
+    }
+    if bits_per_sample != 16 || num_channels != 1 {
+        return Err(format!(
+            "Unsupported WAV format: {}ch {}bit (need mono 16bit)",
+            num_channels, bits_per_sample
+        ));
+    }
+
+    let mut offset = 12usize;
+    let mut data_start = 0usize;
+    let mut data_size = 0usize;
+    while offset + 8 <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        if chunk_id == b"data" {
+            data_start = offset + 8;
+            data_size = chunk_size.min(bytes.len() - data_start);
+            break;
+        }
+        offset += 8 + chunk_size;
+        if chunk_size % 2 != 0 {
+            offset += 1;
+        }
+    }
+
+    if data_start == 0 || data_size == 0 {
+        return Err("No data chunk in WAV".to_string());
+    }
+
+    let pcm = &bytes[data_start..data_start + data_size];
+    let sample_count = pcm.len() / 2;
+    let mut samples: Vec<i16> = Vec::with_capacity(sample_count);
+    for i in 0..sample_count {
+        samples.push(i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]));
+    }
+    Ok((samples, sample_rate))
+}
+
+/// Stub for non-local-asr builds
+#[cfg(not(feature = "local-asr"))]
+pub(crate) fn decode_wav_base64_to_pcm16(
+    base64: &str,
+) -> Result<(Vec<i16>, u32), String> {
+    // 与 local-asr 版本保持一致的输入上限校验（防内存放大）
+    const MAX_AUDIO_B64_LEN: usize = 4_000_000;
+    if base64.len() > MAX_AUDIO_B64_LEN {
+        return Err("Audio payload too large".to_string());
+    }
     Err("Local ASR not compiled".to_string())
 }
 

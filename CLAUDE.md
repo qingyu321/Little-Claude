@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 Little Claude is a native desktop GUI for Claude Code (Anthropic's CLI), built with **Tauri 2 + React 19 + TypeScript + Tailwind CSS 4 + Zustand 5**. It wraps the Claude CLI in a rich interface with multi-session tabs, file exploration, rewind/checkpoint restore, slash commands, a command palette, MCP server management, and a multi-provider API configuration system.
 
-**Version**: 0.8.0
+**Version**: 1.2.2 (single source of truth: `package.json` + `src-tauri/tauri.conf.json`)
 **Package manager**: pnpm
 **Platforms**: macOS (primary), Windows (supported)
 
@@ -55,7 +55,7 @@ The Tauri dev command runs `npm run dev` as its `beforeDevCommand` (configured i
 | Markdown | react-markdown 10, rehype-highlight, remark-gfm |
 | Build | Vite 7, @vitejs/plugin-react, @tailwindcss/vite |
 | macOS native | cocoa 0.26, objc 0.2 (window customization) |
-| Auto-update | tauri-plugin-updater (GitHub primary, Gitee fallback) |
+| Auto-update | In-app web update (`web_update.rs`, ed25519-signed manifests via GitHub raw + jsdelivr; CLI updates via `check_cli_update`/`update_claude_cli`) |
 
 ## Architecture Overview
 
@@ -95,7 +95,7 @@ The Rust backend spawns Claude CLI as a subprocess. Key behaviors:
 
 ## State Management
 
-Ten independent **Zustand** stores in `src/stores/`:
+Independent **Zustand** stores in `src/stores/` (20 at last count — chat, session, settings, file, agent, command, skill, mcp, provider, setup, interview, speech, lightbox, preview, feedback, goal, todo, tokenSpeed, videoAnalysisRuntime, …). Key ones:
 
 | Store | Responsibility | Persisted |
 |-------|---------------|-----------|
@@ -118,7 +118,7 @@ Ten independent **Zustand** stores in `src/stores/`:
 src/
 ├── App.tsx                    # Entry: theme, font, file watcher, global hotkeys
 ├── main.tsx                   # React root + ErrorBoundary
-├── stores/                    # 10 Zustand stores (see above)
+├── stores/                    # ~20 Zustand stores (see above)
 ├── components/                # ~46 component files
 │   ├── layout/                # AppShell, Sidebar, SecondaryPanel
 │   ├── chat/                  # ChatPanel, InputBar, MessageBubble, TiptapEditor,
@@ -142,7 +142,8 @@ src/
 │   ├── useStreamProcessor.ts  # Stream message handling (foreground + background tabs)
 │   ├── useFileAttachments.ts  # File upload, drag-drop (OS native + browser)
 │   ├── useRewind.ts           # Rewind orchestration (kill, truncate, checkpoint restore)
-│   └── useAutoUpdateCheck.ts  # Periodic update check via tauri-plugin-updater
+│   ├── useAutoUpdateCheck.ts  # Periodic web-update check (ed25519 manifest, web_update.rs)
+│   └── useAudioCapture.ts     # Interview mic capture (500ms WAV chunks)
 └── lib/
     ├── tauri-bridge.ts        # ALL Tauri IPC calls + event listeners (single source of truth)
     ├── i18n.ts                # Chinese/English translations (zh/en)
@@ -160,7 +161,7 @@ src/
 
 ## Rust Backend
 
-**`src-tauri/src/lib.rs`** (~4,576 LOC) — All Tauri command handlers:
+**`src-tauri/src/lib.rs`** (~3,200 LOC) — Tauri command registration + app setup; command bodies live in `src-tauri/src/commands/*.rs`:
 
 | Category | Commands |
 |----------|---------|
@@ -222,7 +223,7 @@ src/
 | Session resume failures | `InputBar.tsx` (resume logic), `lib.rs` (start_claude_session with resume_session_id) |
 | Background session events | `useStreamProcessor.ts` (handleBackgroundStreamMessage), `chatStore.ts` (*InCache methods) |
 | Mode/model switch at runtime | `settingsStore.ts` (subscribe watcher), `protocol.rs` (ControlRequest), `lib.rs` (send_control_request) |
-| Auto-update | `useAutoUpdateCheck.ts`, `UpdateButton.tsx`, `tauri.conf.json` (updater endpoints) |
+| Auto-update | `useAutoUpdateCheck.ts`, `UpdateButton.tsx`, `src-tauri/src/commands/web_update.rs` (ed25519-signed manifest) |
 
 ## File Quick Reference
 

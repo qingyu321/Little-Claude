@@ -1,6 +1,6 @@
 [package]
 name = "little-claude"
-version = "1.2.1"
+version = "1.2.2"
 description = "Little Claude - Claude Code desktop GUI client"
 authors = ["TinyZ"]
 license = "UNLICENSED"
@@ -41,6 +41,7 @@ tokio-tungstenite = "0.26"
 futures-util = { version = "0.3", features = ["channel"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
 http-body-util = "0.1"
 http-body = "1"
 rand = "0.8"

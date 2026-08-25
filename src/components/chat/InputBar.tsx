@@ -1453,7 +1453,7 @@ export function InputBar() {
                 id: generateMessageId(),
                 role: 'system',
                 type: 'text',
-                content: `⚠️ 跨后端历史交接失败（${String(e)}），新会话将以空白上下文开始。`,
+                content: t('session.handoffFailed', { error: String(e) }),
                 commandType: 'info',
                 timestamp: Date.now(),
               });
@@ -1700,9 +1700,13 @@ export function InputBar() {
             id: generateMessageId(),
             role: 'system',
             type: 'text',
-            content: `🔀 已从 ${handoffInfo.from} 后端交接 ${handoffInfo.turnCount} 轮历史`
-              + (handoffInfo.briefPath ? `（完整简报：${handoffInfo.briefPath}）` : '')
-              + '。新引擎将基于交接上下文继续。',
+            content: t('session.handoffDone', {
+              from: handoffInfo.from,
+              turns: String(handoffInfo.turnCount),
+              brief: handoffInfo.briefPath
+                ? t('session.handoffBrief', { path: handoffInfo.briefPath })
+                : '',
+            }),
             commandType: 'info',
             timestamp: Date.now(),
           });
@@ -2405,7 +2409,7 @@ export function InputBar() {
                   ? 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary cursor-pointer'
                   : 'text-text-muted cursor-not-allowed opacity-50'
                 }`}
-              title={canRewind ? `${t('rewind.title')} (Esc×2)` : t('rewind.disabled')}
+              title={canRewind ? t('rewind.title') : t('rewind.disabled')}
             >
               <svg width="12" height="12" viewBox="0 0 14 14" fill="none"
                 stroke="currentColor" strokeWidth="1.5" className="flex-shrink-0">

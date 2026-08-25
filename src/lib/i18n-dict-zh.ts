@@ -30,6 +30,35 @@ export const zhDict: Record<string, string> = {
     'plugins.scopeLocal': '本地',
     // Profile stats
     'profile.statsFailed': '读取统计失败：{error}',
+    'profile.defaultUser': 'Little Claude 用户',
+    'profile.subtitle': '本机所有 Claude Code 会话汇总（含终端 CLI 使用）',
+    'profile.loading': '正在读取本机所有会话统计...',
+    'profile.totalTokens': '累计 Token 数',
+    'profile.peakDayTokens': '峰值日 Token 数',
+    'profile.sessionCount': '会话总数',
+    'profile.activeDays': '活跃天数',
+    'profile.activeDaysUnit': '{n} 天',
+    'profile.messageCount': '消息计数',
+    'profile.tokenActivity': 'Token 活动',
+    'profile.metricTotal': '总量',
+    'profile.metricInput': '输入',
+    'profile.metricOutput': '输出',
+    'profile.metricCache': '缓存',
+    'profile.viewDaily': '每日',
+    'profile.viewWeekly': '每周',
+    'profile.viewTotal': '累计',
+    'profile.insights': '活动洞察',
+    'profile.noActivity': '还没有可统计的 token 活动。',
+    'profile.inputTokens': '输入 Token',
+    'profile.cacheTokens': '缓存 Token',
+    'profile.outputTokens': '输出 Token',
+    'profile.topModels': '常用模型',
+    'profile.responses': '{n} 次响应',
+    'profile.noModels': '还没有模型使用记录。',
+    'profile.refresh': '刷新统计',
+    'profile.unitYi': '亿',
+    'profile.unitWan': '万',
+    'profile.monthLabel': '{n}月',
 
     // ChatPanel
     'chat.showSidebar': '展开侧栏',
@@ -240,7 +269,7 @@ export const zhDict: Record<string, string> = {
     'interview.title': '面试模式',
     'interview.confirm.title': '进入面试模式',
     'interview.confirm.subtitle': '面试官开口，答案秒出',
-    'interview.confirm.desc': '开启后，应用将持续监听麦克风，把面试官的问题实时转录为文字，并交给 AI 检索知识库、生成可口述的简短答案，显示在提词面板中。',
+    'interview.confirm.desc': '开启后，应用将持续监听麦克风，把面试官的问题实时流式转录为文字（边说边出字），并边听边联网搜索资料，生成可口述的简短答案显示在提词面板中。',
     'interview.confirm.point.asr': '语音转录全程本地处理，不上传、不花钱',
     'interview.confirm.point.agent': 'AI 生成答案会消耗 API token（按量计费）',
     'interview.confirm.point.mic': '需要授予麦克风权限',
@@ -263,6 +292,7 @@ export const zhDict: Record<string, string> = {
     'interview.asrBackend.mimo': 'Mimo 云端',
     'interview.asrBackend.local': '本地 sherpa-onnx',
     'interview.asrBackend.hybrid': '混合对比',
+    'interview.asrBackend.realtime': '实时语音',
     'interview.transcript.placeholder': '等待面试官提问…',
     'interview.transcript.label': '实时转录',
     'interview.question.label': '当前问题',
@@ -358,6 +388,7 @@ export const zhDict: Record<string, string> = {
     'files.deleteFailed': '删除失败，请重试',
     'files.createFailed': '创建失败，请重试',
     'files.toggleHidden': '显示/隐藏隐藏文件',
+    'files.showMoreChildren': '还有 {n} 项未显示，点击展开',
 
     // ProjectSelector
     'project.selectFolder': '选择项目文件夹',
@@ -475,6 +506,11 @@ export const zhDict: Record<string, string> = {
     'input.processingFiles': '处理中...',
     'input.stop': '终止',
     'input.awaitingInteraction': '等待交互响应',
+
+    // Cross-backend handoff (T01)
+    'session.handoffFailed': '⚠️ 跨后端历史交接失败（{error}），新会话将以空白上下文开始。',
+    'session.handoffDone': '🔀 已从 {from} 后端交接 {turns} 轮历史{brief}。新引擎将基于交接上下文继续。',
+    'session.handoffBrief': '（完整简报：{path}）',
 
     // Rewind
     'rewind.title': '回退',

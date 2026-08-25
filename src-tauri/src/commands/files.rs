@@ -117,6 +117,15 @@ pub async fn read_file_tree(path: String, depth: Option<u32>) -> Result<Vec<File
             if is_system_dir(&canon) {
                 return Err(format!("拒绝访问系统目录: {}", path));
             }
+            // S5 (security): 目录枚举接入授权门 —— 只允许白名单根、已注册
+            // 项目/工作区根（前端 setWorkingDirectory/会话启动时注册）。
+            // 防止被攻陷渲染层枚举任意非黑名单目录结构。
+            if !path_authorized(&canon) {
+                return Err(format!(
+                    "拒绝浏览未授权目录（请先在应用中选择该目录为工作区）: {}",
+                    path
+                ));
+            }
         }
         let name = dir
             .file_name()
@@ -347,6 +356,54 @@ fn authorized_paths() -> &'static StdMutex<HashMap<PathBuf, Instant>> {
     AUTHORIZED_PATHS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+/// S1 (defense-in-depth): 授权根数量上限 —— 防止被攻陷渲染层无限灌入授权项。
+const MAX_AUTHORIZED_ROOTS: usize = 64;
+
+/// Insert a root into the authorized map with audit logging + capacity bound.
+/// Every IPC-reachable grant goes through here so abuse shows up in logs.
+fn insert_authorized_root(canon: PathBuf, source: &str) {
+    if let Ok(mut map) = authorized_paths().lock() {
+        // 容量上限：超出时淘汰最早的授权（map 无序，线性找最旧即可）
+        while map.len() >= MAX_AUTHORIZED_ROOTS {
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, at)| at.elapsed())
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        eprintln!(
+            "[LITTLECLAUDE:security] authorize root ({source}): {}",
+            canon.display()
+        );
+        map.insert(canon, Instant::now());
+    }
+}
+
+/// Reject grants for hidden directories (any `.`-prefixed component under the
+/// user's home). The app's own managed config trees (~/.claude, ~/.codex,
+/// safe_data_dir) are whitelisted independently and don't need these grants;
+/// blocking dot-dirs here closes the easiest exfiltration targets (dotfile
+/// configs, token stores) that aren't already in the sensitive list.
+fn rejects_hidden_dir(canon: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Ok(home_c) = fs::canonicalize(&home) else {
+        return false;
+    };
+    let Ok(rel) = canon.strip_prefix(&home_c) else {
+        return false; // outside home: hidden-dir rule doesn't apply
+    };
+    rel.iter().any(|c| {
+        let s = c.to_string_lossy();
+        s.starts_with('.') && s != "."
+    })
+}
+
 /// Register a project root (called from start_claude_session on every spawn).
 /// Rust-internal only — there is deliberately NO IPC command for this, so a
 /// compromised renderer cannot grant itself arbitrary roots.
@@ -373,9 +430,11 @@ pub fn register_workspace_root(path: String) -> Result<(), String> {
     if is_system_dir(&canon) {
         return Err(format!("拒绝注册系统/敏感目录为工作目录: {}", path));
     }
-    if let Ok(mut map) = authorized_paths().lock() {
-        map.insert(canon, Instant::now());
+    // S1 (defense-in-depth): 隐藏目录（.git/.ssh 类）不允许经 IPC 授权
+    if rejects_hidden_dir(&canon) {
+        return Err(format!("拒绝授权隐藏目录: {}", path));
     }
+    insert_authorized_root(canon, "workspace_root");
     Ok(())
 }
 
@@ -403,9 +462,11 @@ pub fn authorize_external_path(path: String) -> Result<(), String> {
             None => canon,
         }
     };
-    if let Ok(mut map) = authorized_paths().lock() {
-        map.insert(root, Instant::now());
+    // S1 (defense-in-depth): 隐藏目录不允许经 IPC 授权
+    if rejects_hidden_dir(&root) {
+        return Err(format!("拒绝授权隐藏目录: {}", path));
     }
+    insert_authorized_root(root, "external_dialog");
     Ok(())
 }
 
@@ -836,6 +897,14 @@ pub async fn watch_directory(
         .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
     if is_system_dir(&canonical) {
         return Err("拒绝监视系统目录".to_string());
+    }
+    // S5 (security): 长驻目录监听接入授权门 —— 只允许白名单根与已注册
+    // 项目/工作区根（前端 setWorkingDirectory / App 启动恢复时注册）。
+    if !path_is_authorized(&canonical) {
+        return Err(format!(
+            "拒绝监视未授权目录（请先在应用中选择该目录为工作区）: {}",
+            path
+        ));
     }
     let watch_key = canonical.to_string_lossy().to_string();
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useInterviewStore, InterviewPhase } from '../../stores/interviewStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useAudioCapture } from '../../hooks/useAudioCapture';
-import { bridge, onMimoToken, onMimoQuestion, onSystemAudioChunk, onSystemAudioResult, onSystemAudioError, onSystemAudioStatus, onLocalAsrTranscript } from '../../lib/tauri-bridge';
+import { bridge, onMimoToken, onMimoQuestion, onSystemAudioChunk, onSystemAudioResult, onSystemAudioError, onSystemAudioStatus, onLocalAsrTranscript, onInterviewRtTranscript, onInterviewRtAnswer, onInterviewRtAnswerDone, onInterviewRtStatus, onInterviewRtError } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 import { debugLog, debugWarn, debugError } from '../../lib/debug-log';
 import { HybridCompareCard } from './HybridCompareCard';
@@ -23,12 +23,27 @@ const SYS_AUDIO_MAX_RESTARTS = 3;
 // 环境底噪（风扇/白噪声常在 0.001~0.01）——低于它判静音帧，防止底噪
 // 持续重置静音计时器导致音频无限累积。
 const AUDIO_MIN_PEAK = 0.01;
+// P3: 噪声地板自适应参数 —— EMA 平滑系数（约 10 帧 ≈ 5s 收敛）、
+// 有效阈值 = 地板 × 3（底噪峰值的 3 倍才判语音）、绝对上限兜底。
+const NOISE_FLOOR_ALPHA = 0.1;
+const NOISE_FLOOR_FACTOR = 3;
+const NOISE_FLOOR_MAX = 0.12;
 // 系统音频静音判定阈值：WASAPI loopback 回采的扬声器输出（微信电话/
 // 腾讯会议）是远场弱信号，峰值常落在 0.001~0.01。沿用麦克风标准会把
 // 系统语音全判成静音帧 → mimoQuestionStartedRef 永不置位 → local 后端
 // 静音门控永不 finalize → 识别不出。与 Rust 侧 system_audio.rs 的静音线
 // （peak < 0.001 计 silent_chunks）对齐。
 const SYS_AUDIO_MIN_PEAK = 0.001;
+
+// ── 流式切块 + 增量搜索参数 ──
+// 快速无停顿语音（面试官语速快、中间无停顿）四重切块：
+// 1) 句末短静音（interviewChunkShortSilenceMs，默认 600ms）—— is_final 句终后短停顿即切；
+// 2) 文本长度上限（interviewChunkMaxChars，默认 50 字）—— 边说边数，超出立即切；
+// 3) 长静音（1.5s）—— 原有判句兜底；
+// 4) 音频块数上限（75 × 500ms ≈ 37.5s）—— 防失控。
+const SEARCH_DEBOUNCE_MS = 800;      // 增量搜索防抖：partial 稳定后触发
+const SEARCH_MIN_QUERY_CHARS = 6;    // 少于 6 字不搜（避免噪音查询）
+const SEARCH_GROW_CHARS = 4;         // 文本比上次搜索多 4 字才重搜（防抖内只搜一次）
 
 /** 阶段 → 状态点颜色与文案 */
 const PHASE_META: Record<InterviewPhase, { dot: string; glow?: string; pulse?: boolean }> = {
@@ -311,8 +326,71 @@ export function InterviewPanel() {
    *  （底噪判为语音时静音判句永不触发，防止 Rust 缓冲区无限累积） */
   const localAudioChunkCountRef = useRef(0);
   const silenceSinceRef = useRef<number | null>(null);
+  /** P3: 环境噪声地板 EMA（仅由低幅度帧驱动，只升阈值不降）——嘈杂环境下
+   *  固定 AUDIO_MIN_PEAK 会把底噪判成语音，静音切题永不触发。 */
+  const noiseFloorRef = useRef(0);
   /** 引擎冷启动期间的音频暂存区：引擎就绪后一次性 flush */
   const pendingAudioRef = useRef<string[]>([]);
+
+  // ── 流式切块 + 增量搜索状态 ──
+  /** 当前段已完结句子（is_final 事件文本） */
+  const segmentFinalsRef = useRef<string[]>([]);
+  /** 当前段最近一次 partial 文本 */
+  const currentPartialRef = useRef('');
+  /** 最近一次 is_final 时间戳（句终后短静音即切块） */
+  const lastFinalAtRef = useRef<number | null>(null);
+  /** 最近一次非静音帧时间戳 */
+  const lastSpeechAtRef = useRef<number | null>(null);
+  /** 增量搜索缓存（query → 结果），cut 时优先复用 */
+  const searchCacheRef = useRef<{ query: string; result: string } | null>(null);
+  /** 上次已搜索的文本（增量重搜门槛） */
+  const lastSearchedQueryRef = useRef('');
+  /** 增量搜索防抖定时器 */
+  const searchDebounceRef = useRef<number | null>(null);
+  /** 实时语音后端会话是否已启动 */
+  const rtStartedRef = useRef(false);
+  /** 实时语音转写：已完结句 + 当前 partial */
+  const rtFinalsRef = useRef('');
+  const rtPartialRef = useRef('');
+  /** 答案请求代际：新问答开始时自增，旧监听器据此静默（B7 防答案串线） */
+  const answerGenRef = useRef(0);
+
+  /** 当前段完整文本（完结句子 + 当前 partial） */
+  const getSegmentText = useCallback((): string => {
+    const finals = segmentFinalsRef.current.join('');
+    const partial = currentPartialRef.current;
+    return (finals + partial).trim();
+  }, []);
+
+  /** 当前段显示文本（与 segment 文本一致，供转录框展示） */
+  const getSegmentDisplay = useCallback((): string => {
+    const finals = segmentFinalsRef.current.join('\n');
+    const partial = currentPartialRef.current;
+    if (!finals) return partial;
+    if (!partial) return finals;
+    return `${finals}\n${partial}`;
+  }, []);
+
+  const cancelSearchDebounce = useCallback(() => {
+    if (searchDebounceRef.current !== null) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+  }, []);
+
+  /** 重置切块状态（切块/停止后调用） */
+  const resetSegmentState = useCallback(() => {
+    segmentFinalsRef.current = [];
+    currentPartialRef.current = '';
+    lastFinalAtRef.current = null;
+    lastSpeechAtRef.current = null;
+    searchCacheRef.current = null;
+    lastSearchedQueryRef.current = '';
+    // 清掉段内累积的音频（mimo 兜底缓冲）与计数
+    mimoAudioChunksRef.current = [];
+    localAudioChunkCountRef.current = 0;
+    cancelSearchDebounce();
+  }, [cancelSearchDebounce]);
 
   /** 获取 mimo API 凭证 */
   const getMimoCredentials = useCallback(() => {
@@ -355,6 +433,8 @@ export function InterviewPanel() {
     debugLog('mimo', 'finalizing question, chunks=%d, baseUrl=%s, model=%s', chunks.length, creds.baseUrl, creds.model);
 
     // ── 流式监听：先订阅 token 事件，再发起 API 调用 ──
+    // B6/B7: 代际守卫 —— 新问答开始后旧监听器静默；退出面试后不回写 UI
+    const gen = ++answerGenRef.current;
     let streamed = '';
     let firstTokenAt: number | null = null;
     let tokenCount = 0;
@@ -363,7 +443,7 @@ export function InterviewPanel() {
     let unlisten: (() => void) | null = null;
     try {
       unlisten = await onMimoToken(({ delta }) => {
-        if (finished) return;
+        if (finished || gen !== answerGenRef.current) return;
         if (tokenCount === 0) {
           firstTokenAt = performance.now();
           debugLog('mimo-perf', 'first_token +%dms (from finalize start)', Math.round(firstTokenAt - perfStart));
@@ -434,6 +514,7 @@ export function InterviewPanel() {
       // invoke 返回值是权威全文：先停收 token，再一次性校准 UI。
       // IPC 队列里可能还剩几个迟到 token，不挡住会覆盖校准结果导致丢尾。
       finished = true;
+      if (!useInterviewStore.getState().active || gen !== answerGenRef.current) return; // 已退出/被新问答取代
       st.setCurrentAnswer(answer);
       st.setPhase('answered');
       debugLog('mimo-perf', 'total +%dms', Math.round(performance.now() - perfStart));
@@ -442,8 +523,10 @@ export function InterviewPanel() {
       debugError('mimo', 'API error:', e);
       const errText = `[错误] 多模态 API 请求失败: ${e instanceof Error ? e.message : String(e)}`;
       // 流中断但已流出部分答案：保留已渲染内容 + 追加错误提示
-      st.setCurrentAnswer(streamed.trim() ? `${streamed}\n\n${errText}` : errText);
-      st.setPhase('answered');
+      if (useInterviewStore.getState().active && gen === answerGenRef.current) {
+        st.setCurrentAnswer(streamed.trim() ? `${streamed}\n\n${errText}` : errText);
+        st.setPhase('answered');
+      }
     } finally {
       unlisten?.();
       unlistenQ?.();
@@ -475,10 +558,11 @@ export function InterviewPanel() {
           let streamed = '';
           let tokenCount = 0;
           let finished = false;
+          const gen = ++answerGenRef.current;
           let unlistenMimo: (() => void) | null = null;
           try {
             unlistenMimo = await onMimoToken(({ delta }) => {
-              if (finished) return;
+              if (finished || gen !== answerGenRef.current) return;
               tokenCount++;
               streamed += delta;
               useInterviewStore.getState().setCurrentAnswer(streamed);
@@ -493,16 +577,20 @@ export function InterviewPanel() {
             );
             finished = true;
             debugLog('local-asr', 'Mimo answer: streamed=%d chars, invoke=%d chars', streamed.length, answer.length);
-            if (tokenCount === 0) {
-              debugLog('local-asr', 'no streaming tokens, using invoke return value');
-              st.setCurrentAnswer(answer);
+            if (useInterviewStore.getState().active && gen === answerGenRef.current) {
+              if (tokenCount === 0) {
+                debugLog('local-asr', 'no streaming tokens, using invoke return value');
+                st.setCurrentAnswer(answer);
+              }
+              st.setPhase('answered');
             }
-            st.setPhase('answered');
           } catch (e: any) {
             finished = true;
             debugWarn('local-asr', 'Mimo answer error:', e);
-            st.setCurrentAnswer(`[错误] 获取答案失败: ${e}`);
-            st.setPhase('answered');
+            if (useInterviewStore.getState().active && gen === answerGenRef.current) {
+              st.setCurrentAnswer(`[错误] 获取答案失败: ${e}`);
+              st.setPhase('answered');
+            }
           } finally {
             if (unlistenMimo) unlistenMimo();
           }
@@ -525,32 +613,159 @@ export function InterviewPanel() {
     }
   }, [getMimoCredentials]);
 
-  /** 静音帧处理：检查静音时长，触发判句。
-   *  local 模式：静音 1.2s → finalizeLocalAsr
-   *  mimo/hybrid 模式：累积 WAV 后调 Mimo API */
+  /** 增量搜索：partial 文本防抖触发（文本比上次多 SEARCH_GROW_CHARS 字才重搜） */
+  const scheduleIncrementalSearch = useCallback((text: string) => {
+    const settings = useSettingsStore.getState();
+    if (!settings.interviewSearchEnabled) return;
+    const q = text.trim();
+    if (q.length < SEARCH_MIN_QUERY_CHARS) return;
+    // 增长门槛：距上次搜索不足 SEARCH_GROW_CHARS 字 → 跳过（防抖内只搜一次）
+    const prevLen = lastSearchedQueryRef.current.length;
+    if (prevLen > 0 && q.length - prevLen < SEARCH_GROW_CHARS) return;
+
+    cancelSearchDebounce();
+    searchDebounceRef.current = window.setTimeout(() => {
+      searchDebounceRef.current = null;
+      const cache = searchCacheRef.current;
+      if (cache && cache.query === q) return;
+      void (async () => {
+        try {
+          const t0 = performance.now();
+          const result = await bridge.interviewWebSearch(
+            q,
+            settings.interviewSearchBaseUrl || undefined,
+            settings.interviewSearchApiKey || undefined,
+            settings.interviewSearchApiKeyEnv || undefined,
+            settings.interviewSearchModel || undefined,
+          );
+          searchCacheRef.current = { query: q, result };
+          lastSearchedQueryRef.current = q;
+          debugLog('interview-search',
+            'incremental search +%dms "%s" (%d chars)',
+            Math.round(performance.now() - t0), q, result.length);
+        } catch (e) {
+          debugWarn('interview-search', 'incremental search failed:', e);
+        }
+      })();
+    }, SEARCH_DEBOUNCE_MS);
+  }, [cancelSearchDebounce]);
+
+  /** 统一切块 → 搜索 → 作答（流式文本路径；local/mimo 后端共用） */
+  const cutAndAnswer = useCallback(async (questionText: string) => {
+    const st = useInterviewStore.getState();
+    if (st.phase === 'searching' || st.phase === 'answering') return; // 防重入
+    const q = questionText.trim();
+    if (!q) return;
+    resetSegmentState();
+    // 清空转录展示（问题已归档到 currentQuestion）
+    setLocalTranscript('');
+    st.setTranscript('');
+
+    const settings = useSettingsStore.getState();
+    const creds = getMimoCredentials();
+    if (!creds) {
+      st.setCurrentQuestion(q);
+      st.setCurrentAnswer('[错误] 未配置答题 API 凭证。请在 设置 > 面试助手 中配置。');
+      st.setLastAnswerSource('llm');
+      st.setPhase('answered');
+      return;
+    }
+
+    st.setCurrentQuestion(q);
+    st.setPhase('searching');
+
+    // ── 增量搜索：优先复用增量阶段缓存（query 与最终问题高度重合），
+    //    否则补一发精确搜索（快速失败，失败降级为纯模型作答）──
+    let searchText = '';
+    if (settings.interviewSearchEnabled) {
+      const cache = searchCacheRef.current;
+      const cacheUsable = cache && cache.result &&
+        (q.startsWith(cache.query) || cache.query.startsWith(q) || q.includes(cache.query));
+      if (cacheUsable) {
+        searchText = cache.result;
+        debugLog('interview-search', 'using cache for "%s" (searched "%s")', q, cache.query);
+      } else {
+        try {
+          const t0 = performance.now();
+          searchText = await bridge.interviewWebSearch(
+            q,
+            settings.interviewSearchBaseUrl || undefined,
+            settings.interviewSearchApiKey || undefined,
+            settings.interviewSearchApiKeyEnv || undefined,
+            settings.interviewSearchModel || undefined,
+          );
+          debugLog('interview-search', 'final search +%dms (%d chars)',
+            Math.round(performance.now() - t0), searchText.length);
+        } catch (e) {
+          debugWarn('interview-search', 'final search failed:', e);
+          searchText = '';
+        }
+      }
+      searchCacheRef.current = { query: q, result: searchText };
+    }
+
+    if (!useInterviewStore.getState().active) return; // 搜索期间退出面试
+    st.setPhase('answering');
+
+    // ── 答案：文本旁路（本地流式已给出问题文本，跳过云端 ASR 跳）──
+    // B6/B7: 代际守卫 —— 新问答开始后旧监听器静默；退出面试后不回写 UI
+    const gen = ++answerGenRef.current;
+    let streamed = '';
+    let finished = false;
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await onMimoToken(({ delta }) => {
+        if (finished || gen !== answerGenRef.current) return;
+        streamed += delta;
+        useInterviewStore.getState().setCurrentAnswer(streamed);
+      });
+    } catch {
+      // 订阅失败降级为 invoke 返回值渲染
+    }
+    try {
+      const answer = await bridge.interviewMimoAnswer(
+        creds.baseUrl, creds.apiKey, creds.apiKeyEnv, creds.model,
+        settings.interviewAsrModel || 'mimo-v2.5-asr',
+        '', // audioBase64 空 → Rust 侧走 question_text 旁路
+        undefined, undefined, settings.interviewIsSingleHop,
+        settings.interviewAnswerPrompt || undefined,
+        settings.interviewMaxTokens, settings.interviewTemperature,
+        q, searchText || undefined,
+      );
+      finished = true;
+      const cur = useInterviewStore.getState();
+      if (!cur.active || gen !== answerGenRef.current) { unlisten?.(); return; } // 已退出或已被新问答取代
+      st.setCurrentAnswer(answer);
+      st.setLastAnswerSource(searchText ? 'web' : 'llm');
+      st.setPhase('answered');
+      debugLog('interview-search', 'answered, source=%s', searchText ? 'web' : 'llm');
+    } catch (e) {
+      finished = true;
+      const errText = `[错误] 获取答案失败: ${e instanceof Error ? e.message : String(e)}`;
+      const cur = useInterviewStore.getState();
+      if (cur.active && gen === answerGenRef.current) {
+        st.setCurrentAnswer(streamed.trim() ? `${streamed}\n\n${errText}` : errText);
+        st.setLastAnswerSource(searchText ? 'web' : 'llm');
+        st.setPhase('answered');
+      }
+    } finally {
+      unlisten?.();
+    }
+  }, [getMimoCredentials, resetSegmentState]);
+
+  /** 静音帧处理：检查静音时长，触发切块判句。
+   *  流式切块路径（local/mimo）：句终短静音 → 切块；长静音 → 切块。
+   *  hybrid：保持旧行为（MiMo 音频 ASR 对比 + 本地转录）。
+   *  realtime：由服务端 VAD 处理，无本地判句。 */
   const handleMimoSilence = useCallback(async () => {
     const backend = useSettingsStore.getState().interviewAsrBackend;
-    // mimo 模式需要有人声才开始累积，local 模式只要有音频就尝试推理
-    if (backend !== 'local' && !mimoQuestionStartedRef.current) return;
+    if (backend === 'realtime') return;
     if (silenceSinceRef.current === null) {
       silenceSinceRef.current = Date.now();
       return;
     }
     const elapsed = Date.now() - silenceSinceRef.current;
     if (elapsed < SILENCE_DURATION_MS) return;
-
-    if (backend === 'local') {
-      // 空推理保护：从未捕获到非静音帧 → 跳过空推理，避免每 ~1.5s 一次
-      // 空 ASR 推理空转 CPU。放行条件：
-      //  - mimoQuestionStartedRef：出现过非静音帧（幅度达标，正常语音路径）；
-      //  - sysAudioInputSeenRef：系统音频模式下收到过任何 chunk（含幅度不
-      //    达标被判静音帧的弱语音）——音频已推给本地 ASR，SenseVoice 能转写
-      //    弱信号，必须放行（恢复老版本"有输入即转写"行为）。
-      // 两者都在 finalizeLocalAsr 开头复位，与"曾有人声"语义一致。
-      if (!mimoQuestionStartedRef.current && !sysAudioInputSeenRef.current) return;
-      await finalizeLocalAsr();
-      return;
-    }
 
     if (backend === 'hybrid') {
       // 混合模式：同时触发 Mimo API 问答和本地 ASR 转录，供对比面板展示
@@ -562,10 +777,27 @@ export function InterviewPanel() {
       return;
     }
 
-    if (mimoAudioChunksRef.current.length === 0) return;
-    debugLog('mimo', 'silence threshold reached (%dms), triggering question finalization', elapsed);
-    void finalizeMimoQuestion();
-  }, [finalizeMimoQuestion, finalizeLocalAsr]);
+    // ── 流式切块路径（local/mimo）：有流式文本 → 短静音/长静音即切 ──
+    const seg = getSegmentText();
+    if (seg.trim().length > 0) {
+      const shortSilence = useSettingsStore.getState().interviewChunkShortSilenceMs || 600;
+      if (lastFinalAtRef.current !== null && elapsed >= shortSilence) {
+        debugLog('interview-chunk', 'cut: short silence %dms after final, "%s"', elapsed, seg.substring(0, 40));
+        void cutAndAnswer(seg);
+        return;
+      }
+      debugLog('interview-chunk', 'cut: long silence %dms, "%s"', elapsed, seg.substring(0, 40));
+      void cutAndAnswer(seg);
+      return;
+    }
+
+    // 无流式文本（引擎未就绪/模型未装）→ 退回旧音频路径（mimo 后端）
+    if (backend === 'mimo' && !localAsrActive && mimoQuestionStartedRef.current
+      && mimoAudioChunksRef.current.length > 0) {
+      debugLog('mimo', 'silence threshold reached (%dms), triggering question finalization (audio fallback)', elapsed);
+      void finalizeMimoQuestion();
+    }
+  }, [finalizeMimoQuestion, finalizeLocalAsr, cutAndAnswer, getSegmentText, localAsrActive]);
 
   // ── 音频采集 ──
   const handleAudioChunk = useCallback(
@@ -575,18 +807,30 @@ export function InterviewPanel() {
 
       const backend = useSettingsStore.getState().interviewAsrBackend;
       const sysAudioOn = state.systemAudioEnabled;
+
+      // ── 实时语音后端：音频直接推给 WS 全双工会话，无本地判句/切块 ──
+      if (backend === 'realtime') {
+        // B5 音源互斥：开启系统音频时以系统音频为准（面试官语音来自扬声器），
+        // 麦克风只维持录音状态不再推流，避免同一语音被双路喂入产生回声/重复转写。
+        if (!sysAudioOn) {
+          bridge.interviewRealtimeSendAudio(wavBase64).catch((e) => {
+            debugWarn('rt', 'send audio error:', e);
+          });
+        }
+        return;
+      }
+
       // local + 系统音频: 麦克风只维持 isRecording 状态，音频和静音由 WASAPI 负责
       if (backend === 'local' && sysAudioOn) return;
 
-      const needsLocal = backend === 'local' || backend === 'hybrid';
-
-      // Push to local ASR (independent of peak detection)
+      // 流式 ASR 作为出字器 + 切块器：local/hybrid/mimo 都推（mimo 仅用于出字/切块）
+      const needsLocal = backend === 'local' || backend === 'hybrid' || backend === 'mimo';
       if (needsLocal) {
         if (localAsrActive) {
           bridge.pushLocalAsrAudio(wavBase64).catch((e) => {
             debugWarn('local-asr', 'push error:', e);
           });
-        } else {
+        } else if (backend !== 'mimo') {
           // 引擎尚未就绪（冷启动窗口）→ 暂存，等就绪后一次性 flush
           // F6: 环形上限，超出丢最旧（启动失败时暂存不再无界增长）
           if (pendingAudioRef.current.length >= MAX_PENDING_ASR_CHUNKS) {
@@ -597,36 +841,57 @@ export function InterviewPanel() {
       }
 
       const peak = computeWavPeakFromBase64(wavBase64);
-      if (peak < AUDIO_MIN_PEAK) {
+      // P3: 环境噪声地板自适应 —— 只用「明显低于基础阈值的帧」更新 EMA
+      //（语音帧不参与，防止连续说话抬高阈值）；有效阈值 = max(基础, 地板×3)，
+      // 上限 0.12 兜底（极端嘈杂时宁可慢切题也不能永不切）。
+      if (peak < AUDIO_MIN_PEAK * 2) {
+        noiseFloorRef.current = noiseFloorRef.current === 0
+          ? peak
+          : noiseFloorRef.current * (1 - NOISE_FLOOR_ALPHA) + peak * NOISE_FLOOR_ALPHA;
+      }
+      const effThreshold = Math.min(
+        Math.max(AUDIO_MIN_PEAK, noiseFloorRef.current * NOISE_FLOOR_FACTOR),
+        NOISE_FLOOR_MAX,
+      );
+      if (peak < effThreshold) {
         handleMimoSilence();
       } else {
         silenceSinceRef.current = null;
+        lastSpeechAtRef.current = Date.now();
         mimoQuestionStartedRef.current = true;
-        // 仅在 mimo/hybrid 模式累积音频到 Mimo API
-        if (backend !== 'local') {
+        // 仅在 hybrid / mimo 模式累积音频到 Mimo API（mimo 为兜底：流式无输出时走音频路径）
+        if (backend === 'hybrid' || backend === 'mimo') {
           mimoAudioChunksRef.current.push(wavBase64);
           if (mimoAudioChunksRef.current.length === 1) {
             debugLog('mimo', 'speech started (mic), peak=%.4f', peak);
           }
-          // 上限兜底：超长连续语音（无 1.5s 停顿）强制分段判句
+          // 上限兜底：超长连续语音强制分段
           if (mimoAudioChunksRef.current.length >= MAX_QA_AUDIO_CHUNKS) {
             debugLog('mimo', 'mic chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
             silenceSinceRef.current = null;
-            void finalizeMimoQuestion();
+            if (backend === 'hybrid') {
+              void finalizeMimoQuestion();
+            } else {
+              const seg = getSegmentText();
+              if (seg.trim()) void cutAndAnswer(seg);
+              else void finalizeMimoQuestion();
+            }
           }
-        } else {
+        } else if (backend === 'local') {
           // local 模式：非静音 chunk 计数，超单题时长上限强制转写
           localAudioChunkCountRef.current += 1;
           if (localAudioChunkCountRef.current >= MAX_QA_AUDIO_CHUNKS) {
             debugLog('mimo', 'local mic chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
             localAudioChunkCountRef.current = 0;
             silenceSinceRef.current = null;
-            void finalizeLocalAsr();
+            const seg = getSegmentText();
+            if (seg.trim()) void cutAndAnswer(seg);
+            else void finalizeLocalAsr();
           }
         }
       }
     },
-    [handleMimoSilence, localAsrActive],
+    [handleMimoSilence, localAsrActive, finalizeMimoQuestion, finalizeLocalAsr, cutAndAnswer, getSegmentText],
   );
 
   const { isRecording, start: startCapture, stop: stopCapture, prepare: prepareCapture, error: captureError } =
@@ -646,8 +911,9 @@ export function InterviewPanel() {
       bridge.prewarmMimoConnection(creds.baseUrl).catch(() => {});
     }
     void prepareCapture();
-    // 本地/混合模式：提前加载 ASR 引擎，避免首句录音时冷启动丢失音频
-    const needsLocal = asrBackend === 'local' || asrBackend === 'hybrid';
+    // 流式 ASR 引擎预热：除 realtime 外所有后端都需要（出字 + 切块），
+    // 提前加载模型，避免首句录音时冷启动丢失音频
+    const needsLocal = asrBackend !== 'realtime';
     if (needsLocal && !localAsrActive) {
       bridge.startLocalAsrSession().then(() => {
         setLocalAsrActive(true);
@@ -684,20 +950,135 @@ export function InterviewPanel() {
     setSessionId('mimo-direct');
   }, [active, sessionId, setSessionId]);
 
-  // ── 本地 ASR 转录事件监听 ──
+  // ── 本地流式 ASR 转录事件监听（partial 出字 + 增量搜索 + 长度切块）──
   useEffect(() => {
     if (!active || !localAsrActive) return;
     const p = onLocalAsrTranscript(({ text, isFinal }) => {
-      setLocalTranscript((prev) => {
-        if (isFinal) return prev + text;
-        // For partial results, replace the last line
-        const lines = prev.split('\n');
-        lines[lines.length - 1] = text;
-        return lines.join('\n');
-      });
+      const st = useInterviewStore.getState();
+      // B4: 只在 listening 阶段消费转录事件 —— searching/answering 期间
+      // 引擎里残留的音频仍可能吐 final/partial，不挡会把下一题文本污染进
+      // 当前段 refs，还会错误触发增量搜索。
+      if (st.phase !== 'listening') return;
+      if (isFinal) {
+        segmentFinalsRef.current.push(text);
+        currentPartialRef.current = '';
+        lastFinalAtRef.current = Date.now();
+      } else {
+        currentPartialRef.current = text;
+      }
+      // 转录框展示（主框 + 本地绿框同源）
+      const display = getSegmentDisplay();
+      setLocalTranscript(display);
+      st.setTranscript(display);
+
+      const seg = getSegmentText();
+      if (!isFinal && seg.trim()) {
+        // 增量搜索（防抖）
+        scheduleIncrementalSearch(seg);
+        // 长度切块：边说边数，快速无停顿语音超限立即切
+        const maxChars = useSettingsStore.getState().interviewChunkMaxChars || 50;
+        if (seg.length >= maxChars) {
+          debugLog('interview-chunk', 'cut: text length %d >= %d, "%s"', seg.length, maxChars, seg.substring(0, 40));
+          void cutAndAnswer(seg);
+          return;
+        }
+      } else if (isFinal && seg.trim()) {
+        // 句终：立即增量搜索（不防抖），等待短静音切块
+        scheduleIncrementalSearch(seg);
+      }
     });
     return () => { p.then((u: () => void) => u()).catch(() => {}); };
-  }, [active, localAsrActive]);
+  }, [active, localAsrActive, getSegmentText, getSegmentDisplay, scheduleIncrementalSearch, cutAndAnswer]);
+
+  // ── 实时语音后端（OpenAI Realtime 兼容 WS）：会话启停 + 事件监听 ──
+  // 全双工语义：listening/answered 期间会话保持（模型持续监听），
+  // 用户停麦（standby）或退出面试才断开。
+  const rtShouldRun = active && asrBackend === 'realtime' && (phase === 'listening' || phase === 'answered');
+  useEffect(() => {
+    if (!rtShouldRun) {
+      if (rtStartedRef.current) {
+        rtStartedRef.current = false;
+        bridge.interviewRealtimeStop().catch(() => {});
+      }
+      return;
+    }
+    if (rtStartedRef.current) return;
+    rtStartedRef.current = true;
+    const s = useSettingsStore.getState();
+    bridge.interviewRealtimeStart(
+      s.interviewRealtimeWsUrl,
+      s.interviewRealtimeApiKey || '',
+      s.interviewRealtimeApiKeyEnv || undefined,
+      s.interviewRealtimeModel || undefined,
+      s.interviewRealtimeTranscribeModel || undefined,
+      s.interviewAnswerPrompt || undefined,
+      s.interviewSearchBaseUrl || undefined,
+      s.interviewSearchApiKey || undefined,
+      s.interviewSearchApiKeyEnv || undefined,
+      s.interviewSearchModel || undefined,
+    ).catch((e) => {
+      rtStartedRef.current = false;
+      setAudioError(`实时语音启动失败: ${e}`);
+    });
+  }, [rtShouldRun]);
+
+  // 实时语音事件：增量转写 + 答案流 + 状态
+  useEffect(() => {
+    if (!active || asrBackend !== 'realtime') return;
+    const ps = [
+      onInterviewRtTranscript(({ delta, isFinal }) => {
+        const st = useInterviewStore.getState();
+        if (isFinal) {
+          rtFinalsRef.current += delta;
+          rtPartialRef.current = '';
+          st.setCurrentQuestion((rtFinalsRef.current + rtPartialRef.current).trim());
+        } else {
+          rtPartialRef.current += delta;
+        }
+        const display = (rtFinalsRef.current + rtPartialRef.current).trim();
+        st.setTranscript(display);
+        setLocalTranscript(display);
+      }),
+      onInterviewRtAnswer(({ delta }) => {
+        const st = useInterviewStore.getState();
+        st.setCurrentAnswer(st.currentAnswer + delta);
+      }),
+      onInterviewRtAnswerDone(({ text }) => {
+        const st = useInterviewStore.getState();
+        st.setCurrentAnswer(text);
+        st.setLastAnswerSource('llm');
+        st.setPhase('answered');
+      }),
+      onInterviewRtStatus(({ status }) => {
+        const st = useInterviewStore.getState();
+        if (status === 'speech_started') {
+          // 新问题开始：重置上一题答案，回到 listening
+          rtFinalsRef.current = '';
+          rtPartialRef.current = '';
+          st.setCurrentAnswer('');
+          st.setPhase('listening');
+        }
+        if (status === 'closed' && rtStartedRef.current && st.active) {
+          // B3: 断线无条件重置（listening 或 answered 都算）——否则 answered
+          // 阶段断线后 rtStartedRef 永远为 true，rtShouldRun effect 不重跑，
+          // WS 静默死亡且永不重连。
+          setAudioError('实时语音会话已断开，请停止后重新开始监听');
+          rtStartedRef.current = false;
+        }
+      }),
+      onInterviewRtError(({ message }) => {
+        debugWarn('rt', 'realtime error:', message);
+        const st = useInterviewStore.getState();
+        if (st.currentAnswer) {
+          st.setCurrentAnswer(`${st.currentAnswer}\n\n[实时语音错误] ${message}`);
+          st.setPhase('answered');
+        } else {
+          setAudioError(`实时语音错误: ${message}`);
+        }
+      }),
+    ];
+    return () => { for (const p of ps) p.then((u: () => void) => u()).catch(() => {}); };
+  }, [active, asrBackend]);
 
   // ── 退出面试 ──
   useEffect(() => {
@@ -719,9 +1100,19 @@ export function InterviewPanel() {
       setLocalAsrActive(false);
       setLocalTranscript('');
     }
+    // Stop realtime session if active
+    if (rtStartedRef.current) {
+      rtStartedRef.current = false;
+      bridge.interviewRealtimeStop().catch(() => {});
+    }
+    // B4/B6: 清空分段与转写残留，防止下次进入面试显示上一场内容
+    resetSegmentState();
+    noiseFloorRef.current = 0; // P3: 噪声地板随会话重置（跨题保留，换场重新收敛）
+    rtFinalsRef.current = '';
+    rtPartialRef.current = '';
     useInterviewStore.getState().setSessionId(null);
     setSystemAudioStatus(null);
-  }, [active, setSystemAudioStatus, stopCapture, localAsrActive]);
+  }, [active, setSystemAudioStatus, stopCapture, localAsrActive, resetSegmentState]);
 
   // ── 组件卸载清理 ──
   useEffect(() => {
@@ -776,7 +1167,18 @@ export function InterviewPanel() {
       const peak = result.peak;
       const wavBase64 = (result as any).wavBase64 as string | undefined;
       const backend = useSettingsStore.getState().interviewAsrBackend;
-      const needsLocal = backend === 'local' || backend === 'hybrid';
+
+      // ── 实时语音后端：系统音频也直接推给 WS ──
+      if (backend === 'realtime') {
+        if (wavBase64) {
+          bridge.interviewRealtimeSendAudio(wavBase64).catch((e) => {
+            debugWarn('rt', 'send sys audio error:', e);
+          });
+        }
+        return;
+      }
+
+      const needsLocal = backend === 'local' || backend === 'hybrid' || backend === 'mimo';
 
       // 收到过任何系统音频 chunk（含静音帧）——local 后端静音门控据此放行
       sysAudioInputSeenRef.current = true;
@@ -787,7 +1189,7 @@ export function InterviewPanel() {
           bridge.pushLocalAsrAudio(wavBase64).catch((e) => {
             debugWarn('local-asr', 'push (sys audio) error:', e);
           });
-        } else {
+        } else if (backend !== 'mimo') {
           // F6: 环形上限，超出丢最旧（与麦克风暂存路径一致）
           if (pendingAudioRef.current.length >= MAX_PENDING_ASR_CHUNKS) {
             pendingAudioRef.current.shift();
@@ -808,9 +1210,10 @@ export function InterviewPanel() {
           debugLog('sys-audio', 'speech resumed, peak=%.6f (silence was %dms)', peak, Date.now() - silenceSinceRef.current);
         }
         silenceSinceRef.current = null;
+        lastSpeechAtRef.current = Date.now();
         mimoQuestionStartedRef.current = true;
-        // 仅在 mimo/hybrid 模式累积音频到 Mimo API
-        if (backend !== 'local') {
+        // 仅在 hybrid / mimo 模式累积音频到 Mimo API（mimo 为兜底：流式无输出时走音频路径）
+        if (backend === 'hybrid' || backend === 'mimo') {
           mimoAudioChunksRef.current.push(wavBase64);
           if (mimoAudioChunksRef.current.length === 1) {
             debugLog('mimo', 'speech started (sys), peak=%.4f', peak);
@@ -819,16 +1222,24 @@ export function InterviewPanel() {
           if (mimoAudioChunksRef.current.length >= MAX_QA_AUDIO_CHUNKS) {
             debugLog('mimo', 'sys audio chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
             silenceSinceRef.current = null;
-            void finalizeMimoQuestion();
+            if (backend === 'hybrid') {
+              void finalizeMimoQuestion();
+            } else {
+              const seg = getSegmentText();
+              if (seg.trim()) void cutAndAnswer(seg);
+              else void finalizeMimoQuestion();
+            }
           }
-        } else {
+        } else if (backend === 'local') {
           // local 模式：非静音 chunk 计数，超单题时长上限强制转写
           localAudioChunkCountRef.current += 1;
           if (localAudioChunkCountRef.current >= MAX_QA_AUDIO_CHUNKS) {
             debugLog('mimo', 'local sys audio chunk cap reached (%d), forcing finalize', MAX_QA_AUDIO_CHUNKS);
             localAudioChunkCountRef.current = 0;
             silenceSinceRef.current = null;
-            void finalizeLocalAsr();
+            const seg = getSegmentText();
+            if (seg.trim()) void cutAndAnswer(seg);
+            else void finalizeLocalAsr();
           }
         }
       }
@@ -882,7 +1293,7 @@ export function InterviewPanel() {
       p2.then((u) => u()).catch(() => {});
       p3.then((u) => u()).catch(() => {});
     };
-  }, [active, handleMimoSilence, incrementSystemAudioChunks, setSystemAudioStatus, localAsrActive, finalizeMimoQuestion, finalizeLocalAsr]);
+  }, [active, handleMimoSilence, incrementSystemAudioChunks, setSystemAudioStatus, localAsrActive, finalizeMimoQuestion, finalizeLocalAsr, cutAndAnswer, getSegmentText]);
 
   // 退出时自动关闭系统音频
   useEffect(() => {
@@ -921,6 +1332,10 @@ export function InterviewPanel() {
       sysAudioInputSeenRef.current = false;
       localAudioChunkCountRef.current = 0;
       silenceSinceRef.current = null;
+      // B4: 同步清空流式切块与实时转写残留，防止上一题文本混进下一题
+      resetSegmentState();
+      rtFinalsRef.current = '';
+      rtPartialRef.current = '';
       startListening();
       setIsTransitioning(true);
       try {
@@ -935,9 +1350,18 @@ export function InterviewPanel() {
       stopListening();
       stopCapture();
       const backend = useSettingsStore.getState().interviewAsrBackend;
+      if (backend === 'realtime') {
+        // 实时后端：停麦即断开 WS 会话（rtShouldRun 效果处理）
+        return;
+      }
       if (backend === 'local') {
-        // 本地模式：立即触发推理（不等静音超时）
-        void finalizeLocalAsr();
+        // 本地模式：优先用流式文本立即作答，无文本则冲刷引擎
+        const seg = getSegmentText();
+        if (seg.trim()) {
+          void cutAndAnswer(seg);
+        } else {
+          void finalizeLocalAsr();
+        }
       } else if (backend === 'hybrid') {
         // 混合模式：同时触发 Mimo 问答和本地转录
         if (mimoAudioChunksRef.current.length > 0 && mimoQuestionStartedRef.current) {
@@ -945,10 +1369,18 @@ export function InterviewPanel() {
         }
         void finalizeLocalAsr();
       } else if (mimoAudioChunksRef.current.length > 0 && mimoQuestionStartedRef.current) {
-        void finalizeMimoQuestion();
+        // mimo：优先流式文本，无文本（引擎未就绪）走音频路径
+        const seg = getSegmentText();
+        if (seg.trim()) {
+          void cutAndAnswer(seg);
+        } else {
+          void finalizeMimoQuestion();
+        }
       }
     } else if (!isBusy) {
       // 开始录音
+      // B4: 每次开始监听都从干净的分段状态出发（幂等，防残留）
+      resetSegmentState();
       startListening();
       setIsTransitioning(true);
       try {
@@ -959,7 +1391,7 @@ export function InterviewPanel() {
         setIsTransitioning(false);
       }
     }
-  }, [phase, isListening, isBusy, isTransitioning, finalizeQA, stopListening, stopCapture, startCapture, startListening, finalizeMimoQuestion, finalizeLocalAsr]);
+  }, [phase, isListening, isBusy, isTransitioning, finalizeQA, stopListening, stopCapture, startCapture, startListening, finalizeMimoQuestion, finalizeLocalAsr, cutAndAnswer, getSegmentText, resetSegmentState]);
 
   // ── Enter 快捷键：开关麦克风 ──
   useEffect(() => {
@@ -997,7 +1429,7 @@ export function InterviewPanel() {
           {/* ASR 后端选择器 */}
           <select
             value={asrBackend}
-            onChange={(e) => setAsrBackend(e.target.value as 'mimo' | 'local' | 'hybrid')}
+            onChange={(e) => setAsrBackend(e.target.value as 'mimo' | 'local' | 'hybrid' | 'realtime')}
             className="px-1.5 py-1 rounded-md text-[11px] font-medium transition-smooth cursor-pointer
               bg-bg-secondary border border-border-subtle text-text-secondary
               hover:border-border-focus focus:outline-none focus:ring-1 focus:ring-accent/30"
@@ -1006,6 +1438,7 @@ export function InterviewPanel() {
             <option value="mimo">{t('interview.asrBackend.mimo')}</option>
             <option value="local">{t('interview.asrBackend.local')}</option>
             <option value="hybrid">{t('interview.asrBackend.hybrid')}</option>
+            <option value="realtime">{t('interview.asrBackend.realtime')}</option>
           </select>
           {/* 系统音频开关 */}
           <button

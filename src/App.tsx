@@ -446,12 +446,20 @@ function App() {
       bridge.unwatchDirectory(prevDirRef.current).catch(() => {});
     }
     prevDirRef.current = workingDirectory;
-
-    // Load tree and start watching
-    loadTree(workingDirectory);
-    bridge.watchDirectory(workingDirectory).catch(console.error);
+    // S5: 确保目录已进入后端授权表（persist 恢复的 workingDirectory 不经过
+    // setWorkingDirectory，必须在生效处补注册）。先等注册完成再加载树/启动
+    // 监听，避免授权 invoke 与读取 invoke 在后端乱序导致首次加载被拒。
+    let cancelled = false;
+    bridge.registerWorkspaceRoot(workingDirectory)
+      .catch(() => {})
+      .then(() => {
+        if (cancelled) return;
+        loadTree(workingDirectory);
+        bridge.watchDirectory(workingDirectory).catch(console.error);
+      });
 
     return () => {
+      cancelled = true;
       bridge.unwatchDirectory(workingDirectory).catch(() => {});
     };
   }, [workingDirectory]);

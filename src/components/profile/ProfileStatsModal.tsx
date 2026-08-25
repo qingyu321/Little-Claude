@@ -35,10 +35,10 @@ const METRIC_BAR_CLASS: Record<TokenMetric, string> = {
   cache: 'bg-warning',
 };
 
-function formatTokens(value: number): string {
+function formatTokens(value: number, unitYi: string, unitWan: string): string {
   if (!value) return '0';
-  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)}亿`;
-  if (value >= 10_000) return `${(value / 10_000).toFixed(1)}万`;
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)}${unitYi}`;
+  if (value >= 10_000) return `${(value / 10_000).toFixed(1)}${unitWan}`;
   return value.toLocaleString();
 }
 
@@ -74,12 +74,13 @@ function heatColor(level: number): string {
   }
 }
 
-function monthLabel(date: Date): string {
-  return `${date.getMonth() + 1}月`;
+function monthLabel(date: Date, t: (k: string, p?: Record<string, string>) => string): string {
+  return t('profile.monthLabel', { n: String(date.getMonth() + 1) });
 }
 
 export function ProfileStatsModal({ open, onClose }: Props) {
   const t = useT();
+  const fmt = (v: number) => formatTokens(v, t('profile.unitYi'), t('profile.unitWan'));
   const [stats, setStats] = useState<ProfileStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -169,7 +170,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
   }, [dailyMap]);
 
   const maxWeek = Math.max(...weekly.map((w) => w.tokens), 1);
-  const displayName = userDisplayName.trim() || 'Little Claude 用户';
+  const displayName = userDisplayName.trim() || t('profile.defaultUser');
   const barClass = METRIC_BAR_CLASS[metric];
 
   if (!open) return null;
@@ -206,11 +207,11 @@ export function ProfileStatsModal({ open, onClose }: Props) {
               )}
             </div>
             <h2 className="mt-4 text-[28px] font-semibold text-text-primary">{displayName}</h2>
-            <p className="mt-1 text-sm text-text-muted">本机所有 Claude Code 会话汇总（含终端 CLI 使用）</p>
+            <p className="mt-1 text-sm text-text-muted">{t('profile.subtitle')}</p>
           </div>
 
           {loading && (
-            <div className="mt-10 text-center text-sm text-text-muted">正在读取本机所有会话统计...</div>
+            <div className="mt-10 text-center text-sm text-text-muted">{t('profile.loading')}</div>
           )}
 
           {error && (
@@ -223,11 +224,11 @@ export function ProfileStatsModal({ open, onClose }: Props) {
             <>
               <div className="mt-9 grid grid-cols-5 rounded-[20px] border border-border-subtle bg-bg-primary/70 overflow-hidden">
                 {[
-                  ['累计 Token 数', formatTokens(stats.totalTokens || 0)],
-                  ['峰值日 Token 数', formatTokens(maxDay)],
-                  ['会话总数', stats.sessionCount.toLocaleString()],
-                  ['活跃天数', `${stats.activeDays} 天`],
-                  ['消息计数', stats.messageCount.toLocaleString()],
+                  [t('profile.totalTokens'), fmt(stats.totalTokens || 0)],
+                  [t('profile.peakDayTokens'), fmt(maxDay)],
+                  [t('profile.sessionCount'), stats.sessionCount.toLocaleString()],
+                  [t('profile.activeDays'), t('profile.activeDaysUnit', { n: String(stats.activeDays) })],
+                  [t('profile.messageCount'), stats.messageCount.toLocaleString()],
                 ].map(([label, value]) => (
                   <div key={label} className="px-5 py-4 text-center border-r border-border-subtle last:border-r-0">
                     <div className="text-[18px] font-semibold text-text-primary">{value}</div>
@@ -238,14 +239,14 @@ export function ProfileStatsModal({ open, onClose }: Props) {
 
               <section className="mt-9">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-base font-semibold text-text-primary">Token 活动</h3>
+                  <h3 className="text-base font-semibold text-text-primary">{t('profile.tokenActivity')}</h3>
                   <div className="flex items-center gap-2">
                     <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary/70 p-1">
                       {[
-                        ['total', '总量'],
-                        ['input', '输入'],
-                        ['output', '输出'],
-                        ['cache', '缓存'],
+                        ['total', t('profile.metricTotal')],
+                        ['input', t('profile.metricInput')],
+                        ['output', t('profile.metricOutput')],
+                        ['cache', t('profile.metricCache')],
                       ].map(([id, label]) => (
                         <button
                           key={id}
@@ -259,9 +260,9 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                     </div>
                     <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary/70 p-1">
                       {[
-                        ['daily', '每日'],
-                        ['weekly', '每周'],
-                        ['total', '累计'],
+                        ['daily', t('profile.viewDaily')],
+                        ['weekly', t('profile.viewWeekly')],
+                        ['total', t('profile.viewTotal')],
                       ].map(([id, label]) => (
                         <button
                           key={id}
@@ -285,7 +286,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                           return (
                             <div
                               key={day.key}
-                              title={`${day.key}: ${formatTokens(day.tokens)} tokens`}
+                              title={`${day.key}: ${fmt(day.tokens)} tokens`}
                               className="w-[13px] h-[13px] rounded-[4px] border border-white/35"
                               style={{ background: heatColor(level) }}
                             />
@@ -301,14 +302,14 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                     .filter((week) => week[0]?.date.getDate() <= 7)
                     .slice(-12)
                     .map((week) => (
-                      <span key={week[0].key}>{monthLabel(week[0].date)}</span>
+                      <span key={week[0].key}>{monthLabel(week[0].date, t)}</span>
                     ))}
                 </div>
               </section>
 
               <div className="mt-9 grid grid-cols-[1fr_0.95fr] gap-10">
                 <section>
-                  <h3 className="text-base font-semibold text-text-primary mb-4">活动洞察</h3>
+                  <h3 className="text-base font-semibold text-text-primary mb-4">{t('profile.insights')}</h3>
                   {view === 'daily' && (
                     <div className="space-y-2">
                       {recentDaily.length ? recentDaily.map((day) => (
@@ -321,11 +322,11 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                             />
                           </div>
                           <span className="w-20 text-right text-text-primary">
-                            {formatTokens(metricValue(day, metric))}
+                            {fmt(metricValue(day, metric))}
                           </span>
                         </div>
                       )) : (
-                        <p className="text-sm text-text-muted">还没有可统计的 token 活动。</p>
+                        <p className="text-sm text-text-muted">{t('profile.noActivity')}</p>
                       )}
                     </div>
                   )}
@@ -340,7 +341,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                               style={{ width: `${Math.max(3, week.tokens / maxWeek * 100)}%` }}
                             />
                           </div>
-                          <span className="w-20 text-right text-text-primary">{formatTokens(week.tokens)}</span>
+                          <span className="w-20 text-right text-text-primary">{fmt(week.tokens)}</span>
                         </div>
                       ))}
                     </div>
@@ -348,13 +349,13 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                   {view === 'total' && (
                     <div className="space-y-3 text-sm">
                       {[
-                        ['输入 Token', stats.totalInputTokens],
-                        ['缓存 Token', stats.totalCacheTokens],
-                        ['输出 Token', stats.totalOutputTokens],
+                        [t('profile.inputTokens'), stats.totalInputTokens],
+                        [t('profile.cacheTokens'), stats.totalCacheTokens],
+                        [t('profile.outputTokens'), stats.totalOutputTokens],
                       ].map(([label, value]) => (
                         <div key={label} className="flex items-center justify-between border-b border-border-subtle pb-2">
                           <span className="text-text-muted">{label}</span>
-                          <span className="font-medium text-text-primary">{formatTokens(value as number)}</span>
+                          <span className="font-medium text-text-primary">{fmt(value as number)}</span>
                         </div>
                       ))}
                     </div>
@@ -362,7 +363,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                 </section>
 
                 <section>
-                  <h3 className="text-base font-semibold text-text-primary mb-4">常用模型</h3>
+                  <h3 className="text-base font-semibold text-text-primary mb-4">{t('profile.topModels')}</h3>
                   <div className="space-y-3">
                     {stats.models.length ? stats.models.map((model) => (
                       <div key={model.model} className="flex items-center gap-3">
@@ -375,12 +376,12 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="text-sm text-text-primary truncate">{displayDeepSeekModelName(model.model)}</div>
-                          <div className="text-xs text-text-tertiary">{model.message_count} 次响应</div>
+                          <div className="text-xs text-text-tertiary">{t('profile.responses', { n: String(model.message_count) })}</div>
                         </div>
-                        <div className="text-sm text-text-muted">{formatTokens(model.total_tokens)}</div>
+                        <div className="text-sm text-text-muted">{fmt(model.total_tokens)}</div>
                       </div>
                     )) : (
-                      <p className="text-sm text-text-muted">还没有模型使用记录。</p>
+                      <p className="text-sm text-text-muted">{t('profile.noModels')}</p>
                     )}
                   </div>
                 </section>
@@ -392,7 +393,7 @@ export function ProfileStatsModal({ open, onClose }: Props) {
                   className="px-4 py-2 rounded-full border border-border-subtle text-sm text-text-muted
                     hover:text-text-primary hover:bg-bg-secondary transition-smooth"
                 >
-                  刷新统计
+                  {t('profile.refresh')}
                 </button>
               </div>
             </>

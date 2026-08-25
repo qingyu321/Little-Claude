@@ -384,6 +384,11 @@ interface ChatState {
   /** Highlight a specific message for search result jump blink (user turn number, 1-based). Auto-clears after 2s. */
   highlightMessageIndex: number | null;
   setHighlightMessageIndex: (index: number | null) => void;
+
+  /** U4-2: tabs with unresolved permission/question/plan_review cards —
+   *  incrementally maintained (see _attentionCounts); ConversationList reads
+   *  this instead of rescanning every message on each tabs change. */
+  attentionTabs: Set<string>;
 }
 
 // --- Helpers ---
@@ -486,6 +491,7 @@ function getMsgIndex(tabId: string, messages: ChatMessage[]): Map<string, number
 /** Drop all per-tab module-level caches when a tab is removed (memory hygiene). */
 function _purgeTabCache(tabId: string) {
   _msgIndex.delete(tabId); // P1 一致性维护点：tab 移除 → 索引不能留陈旧条目
+  _attentionCounts.delete(tabId); // U4-2: 同上，attention 计数不留僵尸条目
   useAgentStore.getState().removeCache(tabId);
 }
 
@@ -498,6 +504,48 @@ export function migrateBatchDedupKey(oldTabId: string, newTabId?: string) {
   if (entry && newTabId && !_msgIndex.has(newTabId)) {
     _msgIndex.set(newTabId, entry);
   }
+  // U4-2: attention 计数随 tab 键改名一起迁移（与消息索引同生命周期）
+  const att = _attentionCounts.get(oldTabId);
+  _attentionCounts.delete(oldTabId);
+  if (att !== undefined && newTabId && !_attentionCounts.has(newTabId)) {
+    _attentionCounts.set(newTabId, att);
+  }
+}
+
+// ── U4-2: pending 交互（attention）O(1) 增量索引 ──
+// ConversationList 的「需处理」集合原先在每次 tabs 变化时对全部消息做 O(n)
+// 扫描；现在随各消息变更点增量维护每 tab 计数，组件直接读 `attentionTabs`。
+// 维护点与 _msgIndex 相同：addMessage/batchAddMessages/updateMessage/
+// setInteractionState/prependMessages(重算)/clearMessages(清零)/rewindToTurn(重算)
+// /removeTab·LRU 淘汰(_purgeTabCache 删除)/migrateBatchDedupKey(迁移)。
+const _attentionCounts = new Map<string, number>();
+
+/** 与 ConversationList 原 useMemo 完全一致的判定谓词（单一事实来源）。 */
+export function msgNeedsAttention(m: ChatMessage): boolean {
+  return (m.type === 'permission' || m.type === 'question' || m.type === 'plan_review')
+    && !m.resolved && m.interactionState !== 'failed';
+}
+
+/** 整体重算某 tab 的计数（低频路径：历史加载/截断/恢复）。 */
+function recountAttention(tabId: string, messages: ChatMessage[]): void {
+  let n = 0;
+  for (let i = 0; i < messages.length; i++) if (msgNeedsAttention(messages[i])) n++;
+  _attentionCounts.set(tabId, n);
+}
+
+/**
+ * delta≠0 → 更新计数并重建成员 Set（作为 set() partial 返回，触发订阅方）；
+ * delta==0 或被钳制为无变化 → 返回 null（调用方不附加字段、不通知）。
+ */
+function applyAttentionDelta(tabId: string, delta: number): { attentionTabs: Set<string> } | null {
+  if (delta === 0) return null;
+  const prev = _attentionCounts.get(tabId) ?? 0;
+  const next = Math.max(0, prev + delta);
+  if (next === prev) return null;
+  _attentionCounts.set(tabId, next);
+  const members = new Set<string>();
+  for (const [id, n] of _attentionCounts) if (n > 0) members.add(id);
+  return { attentionTabs: members };
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -511,12 +559,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   highlightMessageIndex: null,
   setHighlightMessageIndex: (index) => set({ highlightMessageIndex: index }),
 
+  attentionTabs: new Set<string>(),
+
   // ------------------------------------------------------------------
   // Tab-level operations
   // ------------------------------------------------------------------
 
   addMessage: (tabId, message) =>
     set((state) => {
+      // U4-2: attention 计数增量（去重替换按新旧差值，追加按新消息）
+      let attDelta = 0;
       const result = updateTab(state.tabs, tabId, (tab) => {
         // De-duplicate: if a message with the same ID already exists, update it
         // instead of appending a duplicate. This happens when the CLI re-sends
@@ -533,18 +585,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         let messages: ChatMessage[];
         if (existingIdx !== undefined && existingIdx !== -1) {
           messages = tab.messages.slice();
-          messages[existingIdx] = { ...messages[existingIdx], ...message };
+          const old = messages[existingIdx];
+          messages[existingIdx] = { ...old, ...message };
+          attDelta = (msgNeedsAttention(messages[existingIdx]) ? 1 : 0) - (msgNeedsAttention(old) ? 1 : 0);
         } else {
           // P1 一致性维护点：追加时登记索引（位置 = 当前数组尾部）
           index.set(message.id, tab.messages.length);
           messages = [...tab.messages, message];
+          attDelta = msgNeedsAttention(message) ? 1 : 0;
         }
         return { ...tab, messages };
         // NOTE: partialText/isStreaming are NOT cleared here. Clearing is handled
         // explicitly by clearPartial() in the result/process_exit handlers and
         // in the assistant message handler when a text block supersedes streaming.
       });
-      return result ?? {};
+      if (!result) return {};
+      return { ...result, ...(applyAttentionDelta(tabId, attDelta) ?? {}) };
     }),
 
   /** Batch-add multiple messages in a single set() call.
@@ -554,6 +610,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
    *  (or pass clearStreaming: true via batchAddMessagesWithStreamClear). */
   batchAddMessages: (tabId, messages) =>
     set((state) => {
+      // U4-2: 批量路径的 attention 增量（每条 O(1) 累加）
+      let attDelta = 0;
       const result = updateTab(state.tabs, tabId, (tab) => {
         if (messages.length === 0) return tab;
         const existing = tab.messages;
@@ -570,9 +628,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             if (idx !== -1) index.set(msg.id, idx);
           }
           if (idx !== undefined && idx !== -1) {
-            updated[idx] = { ...updated[idx], ...msg };
+            const old = updated[idx];
+            updated[idx] = { ...old, ...msg };
+            attDelta += (msgNeedsAttention(updated[idx]) ? 1 : 0) - (msgNeedsAttention(old) ? 1 : 0);
           } else {
             newMessages.push(msg);
+            attDelta += msgNeedsAttention(msg) ? 1 : 0;
           }
         }
         // P1 一致性维护点：批量登记追加项的索引（位置 = existing 尾部 + 批内偏移）。
@@ -582,7 +643,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         }
         return { ...tab, messages: [...updated, ...newMessages] };
       });
-      return result ?? {};
+      if (!result) return {};
+      return { ...result, ...(applyAttentionDelta(tabId, attDelta) ?? {}) };
     }),
 
   /** T03: see interface. Older-history pages arrive newest-first-within-page
@@ -604,6 +666,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const rebuilt = new Map<string, number>();
         for (let i = 0; i < merged.length; i++) rebuilt.set(merged[i].id, i);
         _msgIndex.set(tabId, rebuilt);
+        // U4-2: 历史分页为低频路径，直接按合并结果整体重算 attention 计数
+        recountAttention(tabId, merged);
         return {
           ...tab,
           messages: merged,
@@ -613,11 +677,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           },
         };
       });
-      return result ?? {};
+      if (!result) return {};
+      const members = new Set<string>();
+      for (const [id, n] of _attentionCounts) if (n > 0) members.add(id);
+      return { ...result, attentionTabs: members };
     }),
 
   updateMessage: (tabId, id, updates) =>
     set((state) => {
+      // U4-2: attention 计数增量（单条消息新旧差值，两条路径都覆盖）
+      let attDelta = 0;
       const result = updateTab(state.tabs, tabId, (tab) => {
         // P1: id→index 定点替换——tool_result 等高频流事件此前每次都对整个
         // messages 数组做 O(n) map（长会话 1000+ 消息、agent 工具密集期主线程
@@ -627,20 +696,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (idx !== undefined && idx < tab.messages.length && tab.messages[idx].id === id) {
           // 仍返回新数组引用以触发 React 更新，但免去全量 map
           const messages = tab.messages.slice();
-          messages[idx] = { ...messages[idx], ...updates };
+          const old = messages[idx];
+          messages[idx] = { ...old, ...updates };
+          attDelta = (msgNeedsAttention(messages[idx]) ? 1 : 0) - (msgNeedsAttention(old) ? 1 : 0);
           return { ...tab, messages };
         }
         // P1 保底回退：索引缺失/陈旧 → 原有 O(n) 扫描（行为与旧实现一致），
         // 命中时顺手自愈索引，下次即走快路径。
         let found = -1;
         const messages = tab.messages.map((m, i) => {
-          if (m.id === id) { found = i; return { ...m, ...updates }; }
+          if (m.id === id) {
+            found = i;
+            attDelta += (msgNeedsAttention({ ...m, ...updates }) ? 1 : 0) - (msgNeedsAttention(m) ? 1 : 0);
+            return { ...m, ...updates };
+          }
           return m;
         });
         if (found !== -1) index.set(id, found);
         return { ...tab, messages };
       });
-      return result ?? {};
+      if (!result) return {};
+      return { ...result, ...(applyAttentionDelta(tabId, attDelta) ?? {}) };
     }),
 
   updatePartialMessage: (tabId, text) =>
@@ -734,6 +810,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   clearMessages: (tabId) => {
     _msgIndex.delete(tabId); // P1 一致性维护点：消息清空时删索引，防陈旧条目（fix8 等价物）
+    // U4-2: 消息清空 → attention 计数归零（仅在有残留时重建成员集）
+    const hadAttention = (_attentionCounts.get(tabId) ?? 0) > 0;
+    _attentionCounts.set(tabId, 0);
     set((state) => {
       const result = updateTab(state.tabs, tabId, (tab) => ({
         ...tab,
@@ -747,7 +826,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }));
       const newStreams = new Map(state.streams);
       newStreams.delete(tabId);
-      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams };
+      let attPartial: { attentionTabs: Set<string> } | null = null;
+      if (hadAttention) {
+        const members = new Set<string>();
+        for (const [id, n] of _attentionCounts) if (n > 0) members.add(id);
+        attPartial = { attentionTabs: members };
+      }
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams, ...attPartial };
     });
   },
 
@@ -759,6 +844,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // P1 一致性维护点：/clear 复用同一 tabId 且消息清空 → 索引一并删除
     // （旧实现在此路径漏删 _batchDedupCache，靠 len 探测兜底；统一索引必须显式删）
     _msgIndex.delete(tabId);
+    // U4-2: 同 clearMessages —— 计数归零
+    const hadAttention = (_attentionCounts.get(tabId) ?? 0) > 0;
+    _attentionCounts.set(tabId, 0);
     return set((state) => {
       const result = updateTab(state.tabs, tabId, () => createTab(tabId));
       const newStreams = new Map(state.streams);
@@ -767,7 +855,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       // scroll position (and detach follow) on the freshly cleared session.
       const newAnchors = { ...state.scrollAnchors };
       delete newAnchors[tabId];
-      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams, scrollAnchors: newAnchors };
+      let attPartial: { attentionTabs: Set<string> } | null = null;
+      if (hadAttention) {
+        const members = new Set<string>();
+        for (const [id, n] of _attentionCounts) if (n > 0) members.add(id);
+        attPartial = { attentionTabs: members };
+      }
+      return { tabs: result?.tabs ?? state.tabs, sessionCache: result?.sessionCache ?? state.sessionCache, streams: newStreams, scrollAnchors: newAnchors, ...attPartial };
     });
   },
 
@@ -914,24 +1008,36 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           activityStatus: { phase: 'idle' as ActivityPhase },
         };
       });
-      return result ?? {};
+      if (!result) return {};
+      // U4-2: 截断为低频路径，按截断结果整体重算 attention 计数
+      const tab = result.tabs.get(tabId);
+      if (tab) recountAttention(tabId, tab.messages);
+      const members = new Set<string>();
+      for (const [id, n] of _attentionCounts) if (n > 0) members.add(id);
+      return { ...result, attentionTabs: members };
     });
   },
 
   setInteractionState: (tabId, msgId, interactionState, error) =>
     set((state) => {
+      // U4-2: 该路径必然影响 attention 判定（resolved / failed 翻转）
+      let attDelta = 0;
       const result = updateTab(state.tabs, tabId, (tab) => ({
         ...tab,
-        messages: tab.messages.map((m) =>
-          m.id === msgId ? {
+        messages: tab.messages.map((m) => {
+          if (m.id !== msgId) return m;
+          const next = {
             ...m,
             interactionState,
             interactionError: error,
             resolved: interactionState === 'resolved',
-          } : m,
-        ),
+          };
+          attDelta += (msgNeedsAttention(next) ? 1 : 0) - (msgNeedsAttention(m) ? 1 : 0);
+          return next;
+        }),
       }));
-      return result ?? {};
+      if (!result) return {};
+      return { ...result, ...(applyAttentionDelta(tabId, attDelta) ?? {}) };
     }),
 
   getActiveInteraction: (tabId) => {

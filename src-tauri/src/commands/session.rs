@@ -233,6 +233,29 @@ pub async fn start_claude_session(
     if !cmd_arg_safe(permission_mode) {
         return Err(format!("Invalid permission mode: {}", permission_mode));
     }
+    // S2 (security): bypassPermissions 等效 --dangerously-skip-permissions。
+    // 不再无条件信任渲染层参数 —— 必须经过原生确认对话框（用户肉眼可见），
+    // 被攻陷的渲染层无法静默启用危险模式。
+    if permission_mode == "bypassPermissions" {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        let confirmed = app
+            .dialog()
+            .message(
+                "即将以「危险模式」（bypassPermissions）启动会话：CLI 将自动批准所有工具调用，\
+                 无需逐项确认。\n\n仅在完全信任当前任务与工作目录时使用。是否继续？",
+            )
+            .title("危险模式确认")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "启用危险模式".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Err("已取消：危险模式需要用户在原生对话框中确认".to_string());
+        }
+        eprintln!("[LITTLECLAUDE:session] bypassPermissions confirmed via native dialog");
+    }
     args.push("--permission-mode".to_string());
     args.push(permission_mode.to_string());
     args.push("--permission-prompt-tool".to_string());

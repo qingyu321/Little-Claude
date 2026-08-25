@@ -2480,7 +2480,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "little-claude"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2491,6 +2491,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",

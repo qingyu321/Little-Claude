@@ -804,8 +804,28 @@ export const bridge = {
    * question via streaming SSE. The transcribed question text arrives through
    * the `interview:mimo-question` event; answer tokens via `interview:mimo-token`.
    * Returns the model's final answer text. */
-  interviewMimoAnswer: (baseUrl: string, apiKey: string, apiKeyEnv: string | undefined, model: string, asrModel: string, audioBase64: string, promptText?: string, proxyUrl?: string, isSingleHop?: boolean, answerPrompt?: string, maxTokens?: number, temperature?: number, questionText?: string) =>
-    invoke<string>('interview_mimo_answer', { baseUrl, apiKey, apiKeyEnv: apiKeyEnv || null, model, asrModel, audioBase64, promptText: promptText || null, proxyUrl: proxyUrl || null, isSingleHop: isSingleHop ?? null, answerPrompt: answerPrompt || null, maxTokens: maxTokens ?? null, temperature: temperature ?? null, questionText: questionText || null }),
+  interviewMimoAnswer: (baseUrl: string, apiKey: string, apiKeyEnv: string | undefined, model: string, asrModel: string, audioBase64: string, promptText?: string, proxyUrl?: string, isSingleHop?: boolean, answerPrompt?: string, maxTokens?: number, temperature?: number, questionText?: string, searchContext?: string) =>
+    invoke<string>('interview_mimo_answer', { baseUrl, apiKey, apiKeyEnv: apiKeyEnv || null, model, asrModel, audioBase64, promptText: promptText || null, proxyUrl: proxyUrl || null, isSingleHop: isSingleHop ?? null, answerPrompt: answerPrompt || null, maxTokens: maxTokens ?? null, temperature: temperature ?? null, questionText: questionText || null, searchContext: searchContext || null }),
+
+  /** 面试面板增量联网搜索 — Anthropic 兼容 /v1/messages + web_search_20250305 工具。
+   *  返回可直接注入答案提示词的参考文本；失败返回 Err（调用方降级为纯模型作答）。 */
+  interviewWebSearch: (query: string, baseUrl?: string, apiKey?: string, apiKeyEnv?: string, model?: string, proxyUrl?: string) =>
+    invoke<string>('interview_web_search', { query, baseUrl: baseUrl || null, apiKey: apiKey || null, apiKeyEnv: apiKeyEnv || null, model: model || null, proxyUrl: proxyUrl || null }),
+
+  /** 测试搜索端点连通性（"测试搜索"按钮） */
+  interviewTestSearch: (baseUrl?: string, apiKey?: string, apiKeyEnv?: string, model?: string, proxyUrl?: string) =>
+    invoke<{ ok: boolean; latencyMs: number; preview?: string; error?: string }>('interview_test_search', { baseUrl: baseUrl || null, apiKey: apiKey || null, apiKeyEnv: apiKeyEnv || null, model: model || null, proxyUrl: proxyUrl || null }),
+
+  // ── 实时语音后端（OpenAI Realtime 兼容 WebSocket 全双工）──
+  /** 启动实时语音会话。模型调用 web_search 工具时由 Rust 侧执行并回填。 */
+  interviewRealtimeStart: (wsUrl: string, apiKey: string, apiKeyEnv: string | undefined, model: string | undefined, transcribeModel: string | undefined, instructions: string | undefined, searchBaseUrl?: string, searchApiKey?: string, searchApiKeyEnv?: string, searchModel?: string, proxyUrl?: string) =>
+    invoke<string>('interview_realtime_start', { wsUrl, apiKey, apiKeyEnv: apiKeyEnv || null, model: model || null, transcriptionModel: transcribeModel || null, instructions: instructions || null, searchBaseUrl: searchBaseUrl || null, searchApiKey: searchApiKey || null, searchApiKeyEnv: searchApiKeyEnv || null, searchModel: searchModel || null, proxyUrl: proxyUrl || null }),
+  /** 推送一帧音频（WAV base64 → pcm16 24kHz） */
+  interviewRealtimeSendAudio: (wavBase64: string) =>
+    invoke<void>('interview_realtime_send_audio', { wavBase64 }),
+  /** 停止实时语音会话 */
+  interviewRealtimeStop: () =>
+    invoke<string>('interview_realtime_stop'),
 
   /** Prewarm the TCP/TLS connection to the mimo endpoint with a zero-billing
    *  GET, so the first question of a session reuses a hot connection instead
@@ -824,6 +844,9 @@ export const bridge = {
   checkLocalAsrModel: () => invoke<{ installed: boolean; model_dir: string; files: string[] }>('check_local_asr_model'),
   downloadLocalAsrModel: (mirrorIndex?: number) => invokeWithTimeout<string>('download_local_asr_model', { mirrorIndex: mirrorIndex ?? null }, INSTALL_INVOKE_TIMEOUT_MS),
   deleteLocalAsrModel: () => invoke<string>('delete_local_asr_model'),
+  // P4: 历史遗留孤儿模型目录（如旧版 SenseVoice）检测与清理
+  listOrphanAsrModelDirs: () => invoke<{ orphans: { name: string; path: string; bytes: number }[] }>('list_orphan_asr_model_dirs'),
+  deleteOrphanAsrModelDir: (name: string) => invoke<string>('delete_orphan_asr_model_dir', { name }),
   testLocalAsr: (modelDir?: string) => invoke<string>('test_local_asr', { modelDir: modelDir ?? null }),
   // ── Local ASR (sherpa-onnx) — streaming session ──
   startLocalAsrSession: () => invoke<string>('start_local_asr_session'),
@@ -1475,6 +1498,56 @@ export function onLocalAsrTranscript(
 ): Promise<UnlistenFn> {
   return listen<{ text: string; startTime: number; isFinal: boolean }>(
     'local-asr:transcript',
+    (event) => callback(event.payload),
+  );
+}
+
+/** 实时语音后端 — 增量转写（delta partial / completed final） */
+export function onInterviewRtTranscript(
+  callback: (payload: { delta: string; isFinal: boolean }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ delta: string; isFinal: boolean }>(
+    'interview:rt-transcript',
+    (event) => callback(event.payload),
+  );
+}
+
+/** 实时语音后端 — 答案增量 delta */
+export function onInterviewRtAnswer(
+  callback: (payload: { delta: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ delta: string }>(
+    'interview:rt-answer',
+    (event) => callback(event.payload),
+  );
+}
+
+/** 实时语音后端 — 答案完成（最终文本） */
+export function onInterviewRtAnswerDone(
+  callback: (payload: { text: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ text: string }>(
+    'interview:rt-answer-done',
+    (event) => callback(event.payload),
+  );
+}
+
+/** 实时语音后端 — 会话状态（connecting/ready/answered/closed） */
+export function onInterviewRtStatus(
+  callback: (payload: { status: string; message?: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ status: string; message?: string }>(
+    'interview:rt-status',
+    (event) => callback(event.payload),
+  );
+}
+
+/** 实时语音后端 — 错误 */
+export function onInterviewRtError(
+  callback: (payload: { message: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ message: string }>(
+    'interview:rt-error',
     (event) => callback(event.payload),
   );
 }

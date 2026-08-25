@@ -30,6 +30,8 @@ function isEncrypted(val: unknown): val is string {
 export const ENCRYPTED_KEY_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['interviewMimoApiKey', '_enc_interviewMimoApiKey'],
   ['videoAnalysisApiKey', '_enc_videoAnalysisApiKey'],
+  ['interviewSearchApiKey', '_enc_interviewSearchApiKey'],
+  ['interviewRealtimeApiKey', '_enc_interviewRealtimeApiKey'],
 ];
 
 /**

@@ -140,20 +140,10 @@ export function ConversationList() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'attention' | 'error'>('all');
 
   // U4: "需处理"会话集合 —— 存在未解决的 permission / question / plan_review
-  // 交互卡片（等待用户授权或回答问题）。选择器只做廉价的 tabs 引用读取
-  // （流式 partial 更新不改 tabs 引用），O(消息数) 扫描放进 useMemo，仅在
-  // tabs Map 真正变化（消息增删/状态更新）时重算，避免高频流式更新下重复扫描。
-  const tabsMap = useChatStore((s) => s.tabs);
-  const attentionSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const [tabId, tab] of tabsMap) {
-      if (tab.messages.some((m) =>
-        (m.type === 'permission' || m.type === 'question' || m.type === 'plan_review')
-        && !m.resolved && m.interactionState !== 'failed'
-      )) set.add(tabId);
-    }
-    return set;
-  }, [tabsMap]);
+  // 交互卡片（等待用户授权或回答问题）。U4-2: 该集合已改为 chatStore 内随消息
+  // 变更点 O(1) 增量维护（_attentionCounts），此处直接读预计算结果，不再对
+  // 全部消息做 O(n) 扫描。判定谓词单一来源：chatStore.msgNeedsAttention。
+  const attentionSet = useChatStore((s) => s.attentionTabs);
 
   // Multi-select
   const [multiSelect, setMultiSelect] = useState(false);

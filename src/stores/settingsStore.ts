@@ -315,7 +315,35 @@ interface SettingsState {
   /** B1: Answer temperature */
   interviewTemperature: number;
   /** Phase 4: ASR backend mode — mimo API / local sherpa-onnx / hybrid comparison */
-  interviewAsrBackend: 'mimo' | 'local' | 'hybrid';
+  interviewAsrBackend: 'mimo' | 'local' | 'hybrid' | 'realtime';
+  /** 面试助手 — 增量联网搜索开关 */
+  interviewSearchEnabled: boolean;
+  /** 面试助手 — 搜索端点 Base URL（Anthropic 兼容 /v1/messages，默认 DeepSeek 官方） */
+  interviewSearchBaseUrl: string;
+  /** 面试助手 — 搜索 API Key (明文) */
+  interviewSearchApiKey: string;
+  /** 面试助手 — 搜索 API Key 环境变量名 (优先于明文) */
+  interviewSearchApiKeyEnv: string;
+  /** S3: Encrypted interviewSearchApiKey for localStorage persistence. */
+  _enc_interviewSearchApiKey: string;
+  /** 面试助手 — 搜索模型名 */
+  interviewSearchModel: string;
+  /** 面试助手 — 自动切块：单题文本长度上限（字符，超出立即切块） */
+  interviewChunkMaxChars: number;
+  /** 面试助手 — 自动切块：句末短静音（毫秒，句终后达到即切块） */
+  interviewChunkShortSilenceMs: number;
+  /** 面试助手 — 实时语音后端 WebSocket 地址（OpenAI Realtime 兼容） */
+  interviewRealtimeWsUrl: string;
+  /** 面试助手 — 实时语音 API Key (明文) */
+  interviewRealtimeApiKey: string;
+  /** 面试助手 — 实时语音 API Key 环境变量名 (优先于明文) */
+  interviewRealtimeApiKeyEnv: string;
+  /** S3: Encrypted interviewRealtimeApiKey for localStorage persistence. */
+  _enc_interviewRealtimeApiKey: string;
+  /** 面试助手 — 实时语音模型名 */
+  interviewRealtimeModel: string;
+  /** 面试助手 — 实时语音增量转写模型名 */
+  interviewRealtimeTranscribeModel: string;
   /** A2: Include --include-partial-messages flag (default true).
    *  Disabling reduces stream event volume 10-50× for low-CPU/iGPU machines. */
   includePartialMessages: boolean;
@@ -384,7 +412,19 @@ interface SettingsState {
   setInterviewAnswerPrompt: (prompt: string) => void;
   setInterviewMaxTokens: (n: number) => void;
   setInterviewTemperature: (t: number) => void;
-  setInterviewAsrBackend: (backend: 'mimo' | 'local' | 'hybrid') => void;
+  setInterviewAsrBackend: (backend: 'mimo' | 'local' | 'hybrid' | 'realtime') => void;
+  setInterviewSearchEnabled: (v: boolean) => void;
+  setInterviewSearchBaseUrl: (url: string) => void;
+  setInterviewSearchApiKey: (key: string) => void;
+  setInterviewSearchApiKeyEnv: (name: string) => void;
+  setInterviewSearchModel: (model: string) => void;
+  setInterviewChunkMaxChars: (n: number) => void;
+  setInterviewChunkShortSilenceMs: (n: number) => void;
+  setInterviewRealtimeWsUrl: (url: string) => void;
+  setInterviewRealtimeApiKey: (key: string) => void;
+  setInterviewRealtimeApiKeyEnv: (name: string) => void;
+  setInterviewRealtimeModel: (model: string) => void;
+  setInterviewRealtimeTranscribeModel: (model: string) => void;
   setIncludePartialMessages: (v: boolean) => void;
   setUpdateAvailable: (available: boolean, version?: string) => void;
   setUpdateDownloaded: (downloaded: boolean) => void;
@@ -501,7 +541,10 @@ export const useSettingsStore = create<SettingsState>()(
       cliBackend: 'deepseek' as 'claude' | 'codex' | 'deepseek',
       previewSidebarVisible: true,
       skillsSidebarVisible: true,
-      interviewSidebarVisible: true,
+      // 面试模块默认关闭（2026-08-25）：属于特定场景工具，不该在全新安装时
+      // 就占侧边栏入口；需要时在「模块管理」中打开。已显式开启的用户不受影响
+      // （persist 中已有值优先于默认值）。
+      interviewSidebarVisible: false,
       interviewMimoModel: 'mimo-v2.5-pro',
       interviewMimoBaseUrl: '',
       interviewMimoApiKey: '',
@@ -514,7 +557,24 @@ export const useSettingsStore = create<SettingsState>()(
         '你是一个面试助手。针对以下中文面试问题，用中文给出简洁清晰的答案（100字以内，适合口头作答）。',
       interviewMaxTokens: 512,
       interviewTemperature: 0,
-      interviewAsrBackend: 'mimo' as 'mimo' | 'local' | 'hybrid',
+      interviewAsrBackend: 'mimo' as 'mimo' | 'local' | 'hybrid' | 'realtime',
+      // 增量搜索（面试助手）— 默认 DeepSeek 官方 Anthropic 端点 + LC_SEARCH_API_KEY
+      interviewSearchEnabled: false,
+      interviewSearchBaseUrl: 'https://api.deepseek.com/anthropic',
+      interviewSearchApiKey: '',
+      interviewSearchApiKeyEnv: 'LC_SEARCH_API_KEY',
+      _enc_interviewSearchApiKey: '',
+      interviewSearchModel: 'deepseek-chat',
+      // 自动切块：快速无停顿语音 —— 句末短静音 600ms 或文本超 50 字立即切
+      interviewChunkMaxChars: 50,
+      interviewChunkShortSilenceMs: 600,
+      // 实时语音后端（OpenAI Realtime 兼容，如豆包）
+      interviewRealtimeWsUrl: '',
+      interviewRealtimeApiKey: '',
+      interviewRealtimeApiKeyEnv: '',
+      _enc_interviewRealtimeApiKey: '',
+      interviewRealtimeModel: '',
+      interviewRealtimeTranscribeModel: 'gpt-4o-mini-transcribe',
       // F25: 默认改 false（与 Rust 侧同步）——partial messages 产生 10-50× 流事件量；
       // 设置项保留可手动开启。字段在 persist partialize 中，已存用户值不受影响。
       includePartialMessages: false,
@@ -709,7 +769,56 @@ export const useSettingsStore = create<SettingsState>()(
       setInterviewAnswerPrompt: (interviewAnswerPrompt: string) => set(() => ({ interviewAnswerPrompt })),
       setInterviewMaxTokens: (interviewMaxTokens: number) => set(() => ({ interviewMaxTokens })),
       setInterviewTemperature: (interviewTemperature: number) => set(() => ({ interviewTemperature })),
-      setInterviewAsrBackend: (interviewAsrBackend: 'mimo' | 'local' | 'hybrid') => set(() => ({ interviewAsrBackend })),
+      setInterviewAsrBackend: (interviewAsrBackend: 'mimo' | 'local' | 'hybrid' | 'realtime') => set(() => ({ interviewAsrBackend })),
+      setInterviewSearchEnabled: (interviewSearchEnabled: boolean) => set(() => ({ interviewSearchEnabled })),
+      setInterviewSearchBaseUrl: (interviewSearchBaseUrl: string) => set(() => ({ interviewSearchBaseUrl })),
+      setInterviewSearchApiKey: (interviewSearchApiKey: string) => {
+        const seq = ++_apiKeyEncryptSeq.interviewSearchApiKey;
+        // 明文立即生效（加密异步落地到 _enc_ 字段）
+        set({ interviewSearchApiKey });
+        if (!interviewSearchApiKey) {
+          set({ _enc_interviewSearchApiKey: '' });
+          return;
+        }
+        encryptApiKey(interviewSearchApiKey)
+          .then((enc) => {
+            if (enc && seq === _apiKeyEncryptSeq.interviewSearchApiKey) set({ _enc_interviewSearchApiKey: enc });
+          })
+          .catch((e) => {
+            if (seq !== _apiKeyEncryptSeq.interviewSearchApiKey) return;
+            console.error(
+              '[settingsStore] Failed to encrypt interviewSearchApiKey — key will NOT survive restart. Re-enter the key to retry:',
+              e,
+            );
+          });
+      },
+      setInterviewSearchApiKeyEnv: (interviewSearchApiKeyEnv: string) => set(() => ({ interviewSearchApiKeyEnv })),
+      setInterviewSearchModel: (interviewSearchModel: string) => set(() => ({ interviewSearchModel })),
+      setInterviewChunkMaxChars: (interviewChunkMaxChars: number) => set(() => ({ interviewChunkMaxChars })),
+      setInterviewChunkShortSilenceMs: (interviewChunkShortSilenceMs: number) => set(() => ({ interviewChunkShortSilenceMs })),
+      setInterviewRealtimeWsUrl: (interviewRealtimeWsUrl: string) => set(() => ({ interviewRealtimeWsUrl })),
+      setInterviewRealtimeApiKey: (interviewRealtimeApiKey: string) => {
+        const seq = ++_apiKeyEncryptSeq.interviewRealtimeApiKey;
+        set({ interviewRealtimeApiKey });
+        if (!interviewRealtimeApiKey) {
+          set({ _enc_interviewRealtimeApiKey: '' });
+          return;
+        }
+        encryptApiKey(interviewRealtimeApiKey)
+          .then((enc) => {
+            if (enc && seq === _apiKeyEncryptSeq.interviewRealtimeApiKey) set({ _enc_interviewRealtimeApiKey: enc });
+          })
+          .catch((e) => {
+            if (seq !== _apiKeyEncryptSeq.interviewRealtimeApiKey) return;
+            console.error(
+              '[settingsStore] Failed to encrypt interviewRealtimeApiKey — key will NOT survive restart. Re-enter the key to retry:',
+              e,
+            );
+          });
+      },
+      setInterviewRealtimeApiKeyEnv: (interviewRealtimeApiKeyEnv: string) => set(() => ({ interviewRealtimeApiKeyEnv })),
+      setInterviewRealtimeModel: (interviewRealtimeModel: string) => set(() => ({ interviewRealtimeModel })),
+      setInterviewRealtimeTranscribeModel: (interviewRealtimeTranscribeModel: string) => set(() => ({ interviewRealtimeTranscribeModel })),
       setIncludePartialMessages: (includePartialMessages: boolean) =>
         set(() => ({ includePartialMessages })),
 
@@ -1098,6 +1207,19 @@ export const useSettingsStore = create<SettingsState>()(
         interviewMaxTokens: state.interviewMaxTokens,
         interviewTemperature: state.interviewTemperature,
         interviewAsrBackend: state.interviewAsrBackend,
+        // 面试助手 — 增量搜索 + 自动切块 + 实时语音
+        interviewSearchEnabled: state.interviewSearchEnabled,
+        interviewSearchBaseUrl: state.interviewSearchBaseUrl,
+        interviewSearchApiKeyEnv: state.interviewSearchApiKeyEnv,
+        _enc_interviewSearchApiKey: state._enc_interviewSearchApiKey,
+        interviewSearchModel: state.interviewSearchModel,
+        interviewChunkMaxChars: state.interviewChunkMaxChars,
+        interviewChunkShortSilenceMs: state.interviewChunkShortSilenceMs,
+        interviewRealtimeWsUrl: state.interviewRealtimeWsUrl,
+        interviewRealtimeApiKeyEnv: state.interviewRealtimeApiKeyEnv,
+        _enc_interviewRealtimeApiKey: state._enc_interviewRealtimeApiKey,
+        interviewRealtimeModel: state.interviewRealtimeModel,
+        interviewRealtimeTranscribeModel: state.interviewRealtimeTranscribeModel,
         includePartialMessages: state.includePartialMessages,
       }),
     },
@@ -1243,6 +1365,8 @@ let _skipNextModeSync = false;
 const _apiKeyEncryptSeq: Record<string, number> = {
   interviewMimoApiKey: 0,
   videoAnalysisApiKey: 0,
+  interviewSearchApiKey: 0,
+  interviewRealtimeApiKey: 0,
 };
 
 export function hasVideoAnalysisMultimodalDefaults(state?: {

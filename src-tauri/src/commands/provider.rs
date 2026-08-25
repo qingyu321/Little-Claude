@@ -293,6 +293,15 @@ pub fn encrypt_value(value: String) -> Result<String, String> {
     if value.is_empty() {
         return Ok(String::new());
     }
+    // S3 (hardening): 输入上限 —— 该命令面向 API key/短密文，8KB 远超合法用途
+    const MAX_VALUE_LEN: usize = 8 * 1024;
+    if value.len() > MAX_VALUE_LEN {
+        return Err(format!(
+            "encrypt_value: payload too large ({} bytes, max {})",
+            value.len(),
+            MAX_VALUE_LEN
+        ));
+    }
     encrypt_providers(&value)
 }
 
@@ -305,6 +314,21 @@ pub fn decrypt_value(encrypted: String) -> Result<String, String> {
     if encrypted.is_empty() {
         return Ok(String::new());
     }
+    // S3 (hardening): 通用解密 oracle 无法一步移除（设置页回显依赖它），
+    // 先做两道收敛：输入大小上限 + 每次调用审计日志，异常批量调用可追溯。
+    const MAX_VALUE_LEN: usize = 8 * 1024;
+    if encrypted.len() > MAX_VALUE_LEN {
+        return Err(format!(
+            "decrypt_value: payload too large ({} bytes, max {})",
+            encrypted.len(),
+            MAX_VALUE_LEN
+        ));
+    }
+    eprintln!(
+        "[LITTLECLAUDE:security] decrypt_value invoked ({} bytes{})",
+        encrypted.len(),
+        if encrypted.starts_with(ENC_MAGIC) { ", TENC1" } else { ", passthrough" }
+    );
     decrypt_providers(&encrypted)
 }
 
